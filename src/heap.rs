@@ -9,6 +9,7 @@ use crate::{
     node::{GcHead, GcRef},
     partition::{GcPartitionId, GcPartitionMgr},
     trace::GcTracable,
+    type_registry::TypeRegistry,
 };
 
 pub struct GcHeap {
@@ -50,7 +51,7 @@ impl GcHeap {
             partition_heads: HashMap::with_capacity(8),
             partition_roots: HashMap::with_capacity(8),
             weak_list: Vec::new(),
-            type_registry: crate::type_registry::TypeRegistry::new(),
+            type_registry: TypeRegistry::new(),
         }
     }
 
@@ -84,7 +85,7 @@ impl GcHeap {
     pub fn gc_threshold(&self, partition_id: GcPartitionId) -> Option<usize> {
         self.partitions
             .partition(partition_id)
-            .and_then(|partition| partition.gc_threshold())
+            .map(|partition| partition.gc_threshold())
     }
 
     /// Set garbage collection threshold for partition (in bytes)
@@ -158,7 +159,7 @@ impl GcHeap {
         }
 
         // Type information
-        let type_idx = self.type_registry.get_or_register::<T>();
+        let type_idx = self.type_registry.register::<T>();
         debug_assert!(type_idx != 0);
 
         // Allocate memory
@@ -190,7 +191,7 @@ impl GcHeap {
             let data_ptr = ptr.as_ptr().add(std::mem::size_of::<GcHead>()).cast::<T>();
             std::ptr::write(data_ptr, data);
 
-            debug_assert!((*header_ptr).get_type_idx() != 0);
+            debug_assert!((*header_ptr).type_id() != 0);
 
             // Add to partition list
             let header = NonNull::new_unchecked(header_ptr);

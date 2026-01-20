@@ -71,7 +71,7 @@ fn main() -> GcResult<()> {
                 "  {}: {} [自动GC: {}]",
                 partition.name(),
                 usage,
-                if partition.gc_threshold().map_or(false, |t| t > 0) {
+                if partition.gc_threshold() > 0 {
                     "Enabled"
                 } else {
                     "Disabled"
@@ -90,7 +90,7 @@ fn main() -> GcResult<()> {
     // Manually trigger garbage collection for partition1
     println!("\nManually trigger garbage collection for partition1...");
     let freed = heap.collect_garbage(partition1);
-    println!("  回收了 {} 字节内存", freed);
+    println!("  Collected {} bytes", freed);
 
     // Verify root objects are still valid
     println!("\nVerify partition1 root objects are still valid:");
@@ -100,7 +100,7 @@ fn main() -> GcResult<()> {
     // Manually trigger garbage collection for partition2
     println!("\nManually trigger garbage collection for partition2...");
     let freed = heap.collect_garbage(partition2);
-    println!("  回收了 {} 字节内存", freed);
+    println!("  Collected {} bytes", freed);
 
     // Verify partition2 root objects are still valid
     println!("\nVerify partition2 root objects are still valid:");
@@ -114,7 +114,7 @@ fn main() -> GcResult<()> {
     // Trigger garbage collection for partition1 again
     println!("\nTrigger garbage collection for partition1 again...");
     let freed = heap.collect_garbage(partition1);
-    println!("  回收了 {} 字节内存", freed);
+    println!("  Collected {} bytes", freed);
 
     // Verify remaining root objects are still valid
     println!("\nVerify remaining root objects are still valid:");

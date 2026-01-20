@@ -106,7 +106,7 @@ impl GcHeap {
         while let Some(p) = current {
             unsafe {
                 current = p.as_ref().next;
-                let type_idx = p.as_ref().get_type_idx();
+                let type_idx = p.as_ref().type_id();
 
                 let should_collect: bool = if !force && (*p.as_ptr()).is_marked() {
                     false
@@ -120,7 +120,7 @@ impl GcHeap {
                                 "Cannot free root object: partition_id={:?}, header={:?}, type={:?}",
                                 partition_id,
                                 p,
-                                self.type_registry.with_idx(type_idx, |x| x.type_name)
+                                self.type_registry.with_type_id(type_idx, |x| x.type_name)
                             );
                         }
                     }
@@ -175,12 +175,12 @@ impl GcHeap {
             }
         }
 
-        let type_idx = unsafe { (*p.as_ptr()).get_type_idx() };
+        let type_idx = unsafe { (*p.as_ptr()).type_id() };
         debug_assert!(type_idx != 0);
 
         let (size, dispose_fn) = self
             .type_registry
-            .with_idx(type_idx, |t| {
+            .with_type_id(type_idx, |t| {
                 (
                     t.size,
                     if t.needs_drop {

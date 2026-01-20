@@ -68,7 +68,7 @@ impl GcHead {
 
     /// Get type ID
     #[inline(always)]
-    pub fn get_type_idx(&self) -> u16 {
+    pub fn type_id(&self) -> u16 {
         (self.type_partition & 0xFFFF) as u16
     }
 
@@ -94,7 +94,7 @@ impl GcHead {
         type_registry: &TypeRegistry,
     ) -> unsafe fn(*mut u8, &mut GcTracer) {
         type_registry
-            .with_idx(self.get_type_idx(), |t| t.trace_fn)
+            .with_type_id(self.type_id(), |t| t.trace_fn)
             .unwrap()
     }
 }
@@ -174,9 +174,10 @@ impl<T> GcRef<T> {
         unsafe { &mut *self.as_mut_ptr() }
     }
 
-    /// Create weak reference
-    pub fn downgrade(&self, context: &mut crate::GcHeap) -> crate::weak::GcWeak<T> {
-        context.downgrade(self)
+    /// Downgrade to weakref
+    #[inline(always)]
+    pub fn downgrade(&self, heap: &mut crate::GcHeap) -> crate::weak::GcWeak<T> {
+        heap.downgrade(self)
     }
 
     /// check if this is root object
@@ -211,7 +212,7 @@ impl<T> GcRef<T> {
 
         // Check if pointer is valid
         let header = NonNull::new(header_ptr)?;
-        let type_id = unsafe { header.as_ref().get_type_idx() };
+        let type_id = unsafe { header.as_ref().type_id() };
 
         // Verify function pointer matches
         let expected_dispose_fn = if std::mem::needs_drop::<T>() {
@@ -229,7 +230,7 @@ impl<T> GcRef<T> {
         // Check if function pointer matches
         context
             .type_registry
-            .with_idx(type_id, |t| (t.trace_fn, t.dispose_fn))
+            .with_type_id(type_id, |t| (t.trace_fn, t.dispose_fn))
             .and_then(|(trace, dispose)| {
                 if dispose as usize == expected_dispose_fn as usize
                     && trace as usize == expected_trace_fn as usize

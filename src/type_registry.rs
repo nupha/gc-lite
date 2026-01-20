@@ -28,7 +28,7 @@ impl TypeRegistry {
     pub(crate) fn new() -> Self {
         let mut entries: Vec<TypeInfo> = Vec::with_capacity(16);
 
-        // type index #0 is not used.
+        // type slot #0 is not used.
         entries.push(TypeInfo {
             type_name: "",
             size: 0,
@@ -45,13 +45,12 @@ impl TypeRegistry {
     }
 
     #[inline(always)]
-    pub fn type_idx_of<T: GcTracable + 'static>(&self) -> Option<u16> {
-        let type_ident = std::any::TypeId::of::<T>();
-        self.type_to_id.get(&type_ident).copied()
+    pub fn type_id_of<T: GcTracable + 'static>(&self) -> Option<u16> {
+        self.type_to_id.get(&std::any::TypeId::of::<T>()).copied()
     }
 
     /// Register new type
-    fn register<T: GcTracable + 'static>(&mut self) -> u16 {
+    pub(crate) fn register<T: GcTracable + 'static>(&mut self) -> u16 {
         let type_ident = std::any::TypeId::of::<T>();
         let type_name = std::any::type_name::<T>();
 
@@ -81,42 +80,38 @@ impl TypeRegistry {
         }
     }
 
-    /// Get or register type
-    #[inline(always)]
-    pub(crate) fn get_or_register<T: GcTracable + 'static>(&mut self) -> u16 {
-        self.register::<T>()
-    }
-
     /// Get type information by type index
     #[inline(always)]
-    pub(crate) fn with_idx<R>(&self, type_idx: u16, f: impl FnOnce(&TypeInfo) -> R) -> Option<R> {
-        debug_assert!(type_idx != 0);
-        self.entries.get(type_idx as usize).map(f)
+    pub(crate) fn with_type_id<R>(
+        &self,
+        type_id: u16,
+        f: impl FnOnce(&TypeInfo) -> R,
+    ) -> Option<R> {
+        debug_assert!(type_id != 0);
+        self.entries.get(type_id as usize).map(f)
     }
 }
 
 /// Generic trace function, used to call trace method of specific type
-pub(super) unsafe fn trace_fn<T: GcTracable>(data_ptr: *mut u8, tracer: &mut GcTracer) {
+unsafe fn trace_fn<T: GcTracable>(data_ptr: *mut u8, tracer: &mut GcTracer) {
     let typed_ref: &T = unsafe { &*data_ptr.cast::<T>() };
     typed_ref.trace(tracer);
 }
 
-pub(super) unsafe fn noop_trace_fn(_: *mut u8, _: &mut GcTracer) {}
+unsafe fn noop_trace_fn(_: *mut u8, _: &mut GcTracer) {}
 
 /// Generic dispose function, used to call drop_in_place of specific type
-pub(super) unsafe fn dispose_fn<T>(data_ptr: *mut u8) {
+unsafe fn dispose_fn<T>(data_ptr: *mut u8) {
     let typed_ptr = data_ptr as *mut T;
     unsafe { std::ptr::drop_in_place(typed_ptr) };
 }
 
 /// Empty dispose function, for types that don't need Drop
-pub(super) unsafe fn noop_dispose_fn(_data_ptr: *mut u8) {
-    // Do nothing
-}
+unsafe fn noop_dispose_fn(_data_ptr: *mut u8) {}
 
 impl GcHeap {
     #[inline(always)]
-    pub fn type_idx_of<T: GcTracable + 'static>(&self) -> Option<u16> {
-        self.type_registry.type_idx_of::<T>()
+    pub fn type_id_of<T: GcTracable + 'static>(&self) -> Option<u16> {
+        self.type_registry.type_id_of::<T>()
     }
 }

@@ -53,6 +53,7 @@ impl GcPartition {
     }
 
     /// Check if garbage collection is needed
+    #[inline(always)]
     pub fn should_gc(&self) -> bool {
         // If GC threshold > 0 and memory usage reaches threshold, trigger GC
         // gc_threshold = 0 means automatic GC is disabled
@@ -60,6 +61,7 @@ impl GcPartition {
     }
 
     /// Accumulate memory usage
+    #[inline]
     pub(crate) fn add_mem_use(&mut self, size: usize) -> bool {
         if let Some(limit) = self.memory_limit {
             if self.memory_used + size > limit {
@@ -71,6 +73,7 @@ impl GcPartition {
     }
 
     /// Decrement memory usage
+    #[inline(always)]
     pub(crate) fn dec_mem_use(&mut self, size: usize) {
         debug_assert!(self.memory_used >= size);
         self.memory_used = self.memory_used.saturating_sub(size);
@@ -80,8 +83,8 @@ impl GcPartition {
     ///
     /// A return value of 0 means automatic GC is disabled
     #[inline(always)]
-    pub fn gc_threshold(&self) -> Option<usize> {
-        Some(self.gc_threshold)
+    pub fn gc_threshold(&self) -> usize {
+        self.gc_threshold
     }
 
     /// Set garbage collection threshold (bytes)
@@ -171,7 +174,7 @@ mod tests {
         let partition = manager.partition(id).unwrap();
         assert_eq!(partition.name, "test");
         assert_eq!(partition.memory_limit, Some(1024));
-        assert_eq!(partition.gc_threshold(), Some(0)); // Default threshold is 0, automatic GC disabled
+        assert_eq!(partition.gc_threshold(), 0); // Default threshold is 0, automatic GC disabled
 
         // Clean up partition
         manager.remove_partition(id);
@@ -207,7 +210,7 @@ mod tests {
 
         partition.set_gc_threshold(0);
         assert!(!partition.should_gc());
-        assert_eq!(partition.gc_threshold(), Some(0));
+        assert_eq!(partition.gc_threshold(), 0);
     }
 
     #[test]
