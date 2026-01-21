@@ -4,7 +4,7 @@
 use std::{collections::HashMap, marker::PhantomData, ptr::NonNull};
 
 use crate::{
-    GcError, GcResult, GcTracer,
+    GcError, GcPartition, GcResult, GcTracer,
     allocator::Allocator,
     node::{GcHead, GcRef},
     partition::{GcPartitionId, GcPartitionMgr},
@@ -69,8 +69,14 @@ impl GcHeap {
 
     /// Get partition information
     #[inline(always)]
-    pub fn partition(&self, partition_id: GcPartitionId) -> Option<&crate::partition::GcPartition> {
+    pub fn partition(&self, partition_id: GcPartitionId) -> Option<&GcPartition> {
         self.partitions.partition(partition_id)
+    }
+
+    /// Get partition information
+    #[inline(always)]
+    pub fn partition_mut(&mut self, partition_id: GcPartitionId) -> Option<&mut GcPartition> {
+        self.partitions.partition_mut(partition_id)
     }
 
     /// Get all partition IDs

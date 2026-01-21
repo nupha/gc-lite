@@ -52,6 +52,25 @@ impl GcPartition {
         self.memory_limit
     }
 
+    /// Set memory limit, 0 for unlimited.
+    /// if limit less than currently used memory, limit bring up to used memory instead,
+    /// then align limit to 1024 byte.
+    /// returns the actual memory limit applied.
+    pub fn set_memory_limit(&mut self, limit: usize) -> usize {
+        if limit == 0 {
+            self.memory_limit = None;
+            0
+        } else {
+            let n = std::cmp::max(self.memory_used, limit);
+            let n = ((n + 1023) >> 10) << 10; // align to 1024
+            self.memory_limit = Some(n);
+            if self.gc_threshold >= n {
+                self.gc_threshold = n - (n >> 2); // 0.75x of
+            }
+            n
+        }
+    }
+
     /// Check if garbage collection is needed
     #[inline(always)]
     pub fn should_gc(&self) -> bool {
@@ -96,8 +115,20 @@ impl GcPartition {
     ///
     /// # Notes
     /// This method does not perform validation, caller should ensure threshold validity
-    pub fn set_gc_threshold(&mut self, threshold: usize) {
-        self.gc_threshold = threshold;
+    pub fn set_gc_threshold(&mut self, threshold: usize) -> usize {
+        if threshold > 0
+            && let Some(limit) = self.memory_limit
+        {
+            let n = std::cmp::min(
+                threshold,
+                limit * 8 / 10, // 0.8x of max
+            );
+            self.gc_threshold = n;
+            n
+        } else {
+            self.gc_threshold = threshold;
+            threshold
+        }
     }
 }
 
