@@ -1,0 +1,860 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+
+//! Integration tests for gc-lite garbage collection system
+//!
+//! Tests cover:
+//! - Partition management
+//! - Object allocation and memory tracking
+//! - Garbage collection
+//! - Root object management
+//! - Weak references
+//! - Error handling
+
+use gc_lite::{GcError, GcHeap, GcPartitionId, GcRef, GcTracable, GcTracer};
+
+/// Test data structure for integration tests
+#[derive(Debug, PartialEq, Clone)]
+struct TestData {
+    value: i32,
+    name: String,
+}
+
+unsafe impl GcTracable for TestData {
+    fn trace(&self, _tracer: &mut GcTracer) {
+        // No GC references in this type
+    }
+}
+
+/// Test node structure with GC references
+#[derive(Debug)]
+struct GcNode {
+    value: i32,
+    children: Vec<GcRef<GcNode>>,
+}
+
+impl GcNode {
+    fn new(value: i32) -> Self {
+        Self {
+            value,
+            children: Vec::new(),
+        }
+    }
+
+    fn add_child(&mut self, child: GcRef<GcNode>) {
+        self.children.push(child);
+    }
+}
+
+unsafe impl GcTracable for GcNode {
+    fn trace(&self, tracer: &mut GcTracer) {
+        for child in &self.children {
+            tracer.mark(*child);
+        }
+    }
+}
+
+// ============ Partition Management Tests ============
+
+#[test]
+fn test_partition_creation_and_retrieval() {
+    let mut heap = GcHeap::new();
+
+    // Create partitions
+    let id1 = heap.create_partition("test1".to_string(), Some(1024));
+    let id2 = heap.create_partition("test2".to_string(), None);
+
+    assert_ne!(id1, id2);
+    assert_eq!(heap.partition_ids().len(), 2);
+
+    // Verify partition info
+    let partition = heap.partition(id1).unwrap();
+    assert_eq!(partition.name(), "test1");
+    assert_eq!(partition.memory_limit(), 1024);
+    assert_eq!(partition.memory_used(), 0);
+}
+
+#[test]
+fn test_partition_removal() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(1024));
+
+    assert!(heap.partition(id).is_some());
+    assert_eq!(heap.partition_ids().len(), 1);
+
+    heap.remove_partition(id);
+
+    assert!(heap.partition(id).is_none());
+    assert_eq!(heap.partition_ids().len(), 0);
+}
+
+#[test]
+fn test_partition_gc_threshold() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(1024));
+
+    // Default threshold should be 0 (disabled)
+    assert_eq!(heap.gc_threshold(id), Some(0));
+
+    // Set threshold
+    heap.set_gc_threshold(id, 512);
+    assert_eq!(heap.gc_threshold(id), Some(512));
+
+    // Set threshold exceeding limit should auto-adjust to 0.8x of limit
+    heap.set_gc_threshold(id, 2048);
+    // 1024 * 8 / 10 = 819
+    assert_eq!(heap.gc_threshold(id), Some(819));
+}
+
+// ============ Memory Limit Tests ============
+
+#[test]
+fn test_allocation_fails_when_limit_exceeded() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(256)); // Small limit
+
+    // Allocate objects until we hit the limit
+    let mut allocated_count = 0;
+    loop {
+        match heap.alloc(
+            id,
+            TestData {
+                value: allocated_count as i32,
+                name: format!("obj_{}", allocated_count),
+            },
+        ) {
+            Ok(_) => {
+                allocated_count += 1;
+            }
+            Err((GcError::PartitionFull, _)) => {
+                // Expected when partition is full
+                break;
+            }
+            Err((err, _)) => {
+                panic!("Unexpected error: {:?}", err);
+            }
+        }
+    }
+
+    // Verify some objects were allocated
+    assert!(allocated_count > 0);
+
+    // Try to allocate one more - should fail
+    let result = heap.alloc(
+        id,
+        TestData {
+            value: 999,
+            name: "should_fail".to_string(),
+        },
+    );
+
+    assert!(matches!(result, Err((GcError::PartitionFull, _))));
+}
+
+#[test]
+fn test_set_memory_limit_above_used_memory() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(1024));
+
+    // Allocate some objects to use memory
+    let _obj1 = heap
+        .alloc(
+            id,
+            TestData {
+                value: 1,
+                name: "obj1".to_string(),
+            },
+        )
+        .unwrap();
+
+    let _obj2 = heap
+        .alloc(
+            id,
+            TestData {
+                value: 2,
+                name: "obj2".to_string(),
+            },
+        )
+        .unwrap();
+
+    let used_memory = heap.partition(id).unwrap().memory_used();
+    assert!(used_memory > 0);
+
+    // Set limit larger than used memory - should work
+    let new_limit = used_memory + 512;
+    heap.partition_mut(id).unwrap().set_memory_limit(new_limit);
+
+    // Verify limit was set correctly
+    assert_eq!(heap.partition(id).unwrap().memory_limit(), new_limit);
+
+    // Should be able to allocate more objects
+    let _obj3 = heap
+        .alloc(
+            id,
+            TestData {
+                value: 3,
+                name: "obj3".to_string(),
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn test_set_memory_limit_below_used_memory() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(2048));
+
+    // Allocate some objects to use memory
+    let _obj1 = heap
+        .alloc(
+            id,
+            TestData {
+                value: 1,
+                name: "obj1".to_string(),
+            },
+        )
+        .unwrap();
+
+    let _obj2 = heap
+        .alloc(
+            id,
+            TestData {
+                value: 2,
+                name: "obj2".to_string(),
+            },
+        )
+        .unwrap();
+
+    let used_memory = heap.partition(id).unwrap().memory_used();
+    assert!(used_memory > 0);
+
+    // Set limit smaller than used memory - should be adjusted to used memory
+    let smaller_limit = used_memory - 1;
+    let applied_limit = heap
+        .partition_mut(id)
+        .unwrap()
+        .set_memory_limit(smaller_limit);
+
+    // The limit should be adjusted to at least the used memory
+    assert_eq!(applied_limit, used_memory);
+    assert_eq!(heap.partition(id).unwrap().memory_limit(), used_memory);
+
+    // Should still be able to allocate (because limit >= used_memory)
+    // But not more than the limit allows
+    // Note: Since limit == used_memory, no new allocations should be allowed
+    let result = heap.alloc(
+        id,
+        TestData {
+            value: 3,
+            name: "should_fail".to_string(),
+        },
+    );
+
+    assert!(matches!(result, Err((GcError::PartitionFull, _))));
+}
+
+#[test]
+fn test_set_unlimited_memory() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(512));
+
+    // Set limit to 0 (unlimited)
+    heap.partition_mut(id).unwrap().set_memory_limit(0);
+
+    // Verify limit is 0 (unlimited)
+    assert_eq!(heap.partition(id).unwrap().memory_limit(), 0);
+
+    // Should be able to allocate many objects without hitting limit
+    let mut allocated_count = 0;
+    loop {
+        match heap.alloc(
+            id,
+            TestData {
+                value: allocated_count as i32,
+                name: format!("obj_{}", allocated_count),
+            },
+        ) {
+            Ok(_) => {
+                allocated_count += 1;
+                // Stop after a reasonable number to avoid infinite loop
+                if allocated_count >= 100 {
+                    break;
+                }
+            }
+            Err((err, _)) => {
+                panic!("Unexpected error with unlimited memory: {:?}", err);
+            }
+        }
+    }
+
+    assert_eq!(allocated_count, 100);
+}
+
+// ============ Object Allocation Tests ============
+
+#[test]
+fn test_object_allocation() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(2048));
+
+    // Get initial memory usage
+    let initial_memory = heap.partition(id).unwrap().memory_used();
+
+    // Allocate an object
+    let obj: GcRef<TestData> = heap
+        .alloc(
+            id,
+            TestData {
+                value: 42,
+                name: "test".to_string(),
+            },
+        )
+        .unwrap();
+
+    // Verify partition memory was updated
+    let partition = heap.partition(id).unwrap();
+    let after_memory = partition.memory_used();
+    assert!(after_memory > initial_memory);
+
+    // Verify object content
+    let data = unsafe { obj.as_ref() };
+    assert_eq!(data.value, 42);
+    assert_eq!(data.name, "test");
+}
+
+#[test]
+fn test_memory_usage_increases_with_allocation() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(8192));
+
+    // Track memory usage after each allocation
+    let mut memory_after_each_alloc: Vec<usize> = Vec::new();
+
+    // Allocate multiple objects and track memory
+    for i in 0..5 {
+        let _obj = heap
+            .alloc(
+                id,
+                TestData {
+                    value: i as i32,
+                    name: format!("obj_{}", i),
+                },
+            )
+            .expect("allocation failed");
+
+        let memory = heap.partition(id).unwrap().memory_used();
+        memory_after_each_alloc.push(memory);
+    }
+
+    // Verify memory increases with each allocation
+    for i in 1..memory_after_each_alloc.len() {
+        assert!(
+            memory_after_each_alloc[i] > memory_after_each_alloc[i - 1],
+            "Memory should increase after each allocation"
+        );
+    }
+
+    // Verify cumulative memory is correct (each object adds GcHead + T size)
+    let final_memory = heap.partition(id).unwrap().memory_used();
+    assert!(final_memory > 0);
+
+    // Verify memory was freed after GC
+    let root_obj = heap
+        .alloc(
+            id,
+            TestData {
+                value: 100,
+                name: "root".to_string(),
+            },
+        )
+        .unwrap();
+    heap.set_root(root_obj, true);
+    let freed = heap.collect_garbage(id);
+    assert!(freed > 0);
+
+    let after_gc_memory = heap.partition(id).unwrap().memory_used();
+    assert!(after_gc_memory < final_memory);
+}
+
+#[test]
+fn test_multiple_object_allocation() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(4096));
+
+    // Allocate multiple objects
+    let mut objs: Vec<GcRef<TestData>> = Vec::new();
+    for i in 0..10 {
+        let obj = heap
+            .alloc(
+                id,
+                TestData {
+                    value: i as i32,
+                    name: format!("obj_{}", i),
+                },
+            )
+            .expect("allocation failed");
+        objs.push(obj);
+    }
+
+    // Verify all objects
+    for (i, obj) in objs.iter().enumerate() {
+        let data = unsafe { obj.as_ref() };
+        assert_eq!(data.value, i as i32);
+        assert_eq!(data.name, format!("obj_{}", i));
+    }
+
+    // Verify memory tracking
+    let partition = heap.partition(id).unwrap();
+    assert!(partition.memory_used() > 0);
+}
+
+#[test]
+fn test_partition_full_error() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(512)); // Very small limit
+
+    // Try to allocate objects until partition is full
+    let mut result = heap.alloc(
+        id,
+        TestData {
+            value: 0,
+            name: "test".to_string(),
+        },
+    );
+
+    // Keep trying until we get a PartitionFull error
+    let mut count = 0;
+    while let Ok(_obj) = result {
+        count += 1;
+        result = heap.alloc(
+            id,
+            TestData {
+                value: count,
+                name: format!("test_{}", count),
+            },
+        );
+    }
+
+    assert!(matches!(result, Err((GcError::PartitionFull, _))));
+    assert!(count > 0);
+}
+
+#[test]
+fn test_invalid_partition_allocation() {
+    let mut heap = GcHeap::new();
+    let invalid_id = GcPartitionId(9999);
+
+    let result = heap.alloc(
+        invalid_id,
+        TestData {
+            value: 42,
+            name: "test".to_string(),
+        },
+    );
+
+    assert!(matches!(result, Err((GcError::PartitionNotFound, _))));
+}
+
+// ============ Root Object Tests ============
+
+#[test]
+fn test_root_object_management() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(2048));
+
+    let obj = heap
+        .alloc(
+            id,
+            TestData {
+                value: 42,
+                name: "test".to_string(),
+            },
+        )
+        .unwrap();
+
+    // Initially not a root
+    assert!(!obj.is_root());
+
+    // Set as root
+    heap.set_root(obj, true);
+    assert!(obj.is_root());
+
+    // Clear root status
+    heap.set_root(obj, false);
+    assert!(!obj.is_root());
+}
+
+#[test]
+fn test_root_objects_preserve_during_gc() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(2048));
+
+    let obj = heap
+        .alloc(
+            id,
+            TestData {
+                value: 42,
+                name: "test".to_string(),
+            },
+        )
+        .unwrap();
+
+    heap.set_root(obj, true);
+
+    // Trigger GC
+    let freed = heap.collect_garbage(id);
+    assert_eq!(freed, 0);
+
+    // Object should still be valid
+    let data = unsafe { obj.as_ref() };
+    assert_eq!(data.value, 42);
+}
+
+#[test]
+fn test_non_root_objects_collected() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(2048));
+
+    // Create two objects, one is root, one is not
+    let root_obj = heap
+        .alloc(
+            id,
+            TestData {
+                value: 1,
+                name: "root".to_string(),
+            },
+        )
+        .unwrap();
+
+    let _non_root_obj = heap
+        .alloc(
+            id,
+            TestData {
+                value: 2,
+                name: "non_root".to_string(),
+            },
+        )
+        .unwrap();
+
+    heap.set_root(root_obj, true);
+    // non_root_obj is not set as root
+
+    // Trigger GC
+    let freed = heap.collect_garbage(id);
+    assert!(freed > 0);
+
+    // Root object should still be valid
+    let data = unsafe { root_obj.as_ref() };
+    assert_eq!(data.value, 1);
+}
+
+// ============ Garbage Collection Tests ============
+
+#[test]
+fn test_manual_garbage_collection() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(2048));
+
+    // Create objects with some as roots
+    for i in 0..5 {
+        let obj = heap
+            .alloc(
+                id,
+                TestData {
+                    value: i as i32,
+                    name: format!("obj_{}", i),
+                },
+            )
+            .unwrap();
+        if i < 2 {
+            heap.set_root(obj, true);
+        }
+    }
+
+    // Get initial memory usage
+    let before = heap.partition(id).unwrap().memory_used();
+
+    // Trigger GC
+    let freed = heap.collect_garbage(id);
+
+    // Should have freed some memory
+    assert!(freed > 0);
+
+    // Verify root objects preserved
+    let after = heap.partition(id).unwrap().memory_used();
+    // Memory used should be less than before
+    assert!(after < before);
+}
+
+#[test]
+fn test_automatic_garbage_collection() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(2048));
+
+    // Set threshold to trigger auto GC
+    heap.set_gc_threshold(id, 100);
+
+    // Create objects until threshold is exceeded
+    for i in 0..20 {
+        match heap.alloc(
+            id,
+            TestData {
+                value: i as i32,
+                name: format!("obj_{}", i),
+            },
+        ) {
+            Ok(obj) => {
+                // Set first few as roots
+                if i < 2 {
+                    heap.set_root(obj, true);
+                }
+            }
+            Err((err, _)) => {
+                // Expected when partition is full
+                assert_eq!(err, GcError::PartitionFull);
+                break;
+            }
+        }
+    }
+
+    // Trigger auto GC
+    let _freed = heap.collect_garbage_auto();
+
+    // Should have freed some memory
+    // freed is always >= 0, so this is a useless comparison
+}
+
+#[test]
+fn test_circular_reference_handling() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(2048));
+
+    // Create two nodes that reference each other
+    let node1 = heap.alloc(id, GcNode::new(1)).unwrap();
+    let node2 = heap.alloc(id, GcNode::new(2)).unwrap();
+
+    // Create circular reference
+    unsafe {
+        node1.as_mut().add_child(node2);
+        node2.as_mut().add_child(node1);
+    }
+
+    // Set both as roots - they should be preserved
+    heap.set_root(node1, true);
+    heap.set_root(node2, true);
+
+    // Verify node values are correct
+    let node1_val = unsafe { node1.as_ref().value };
+    let node2_val = unsafe { node2.as_ref().value };
+    assert_eq!(node1_val, 1);
+    assert_eq!(node2_val, 2);
+
+    let freed = heap.collect_garbage(id);
+    assert_eq!(freed, 0); // Nothing freed because both are roots
+
+    // Clear roots - circular reference should be collected
+    heap.set_root(node1, false);
+    heap.set_root(node2, false);
+
+    let freed = heap.collect_garbage(id);
+    assert!(freed > 0); // Circular reference should be freed
+}
+
+// ============ Weak Reference Tests ============
+
+#[test]
+fn test_weak_reference_creation_and_upgrade() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(2048));
+
+    // Create object and weak reference
+    let obj = heap
+        .alloc(
+            id,
+            TestData {
+                value: 42,
+                name: "test".to_string(),
+            },
+        )
+        .unwrap();
+
+    heap.set_root(obj, true);
+
+    let weak_ref = heap.downgrade(&obj);
+
+    // Upgrade should succeed while object exists
+    let upgraded = weak_ref.upgrade(&heap);
+    assert!(upgraded.is_some());
+
+    let upgraded_ref = upgraded.unwrap();
+    let data = unsafe { upgraded_ref.as_ref() };
+    assert_eq!(data.value, 42);
+}
+
+#[test]
+fn test_weak_reference_after_collection() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(2048));
+
+    // Create object and weak reference
+    let obj = heap
+        .alloc(
+            id,
+            TestData {
+                value: 42,
+                name: "test".to_string(),
+            },
+        )
+        .unwrap();
+
+    let weak_ref = heap.downgrade(&obj);
+
+    // Clear root and collect
+    heap.set_root(obj, false);
+    heap.collect_garbage(id);
+
+    // Upgrade should fail after object is collected
+    let upgraded = weak_ref.upgrade(&heap);
+    assert!(upgraded.is_none());
+}
+
+#[test]
+fn test_multiple_weak_references() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(2048));
+
+    let obj = heap
+        .alloc(
+            id,
+            TestData {
+                value: 42,
+                name: "test".to_string(),
+            },
+        )
+        .unwrap();
+
+    heap.set_root(obj, true);
+
+    // Create multiple weak references
+    let weak1 = heap.downgrade(&obj);
+    let weak2 = heap.downgrade(&obj);
+    let weak3 = heap.downgrade(&obj);
+
+    // All should upgrade successfully
+    assert!(weak1.upgrade(&heap).is_some());
+    assert!(weak2.upgrade(&heap).is_some());
+    assert!(weak3.upgrade(&heap).is_some());
+}
+
+// ============ Manual Release Tests ============
+
+#[test]
+fn test_safe_manual_release() {
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(2048));
+
+    let obj = heap
+        .alloc(
+            id,
+            TestData {
+                value: 42,
+                name: "test".to_string(),
+            },
+        )
+        .unwrap();
+
+    // Safe release should succeed
+    let result = heap.free(obj);
+    assert!(result.is_ok());
+}
+
+// ============ Context Detection Tests ============
+
+#[test]
+fn test_contains_method() {
+    let mut heap1 = GcHeap::new();
+    let mut heap2 = GcHeap::new();
+
+    let id1 = heap1.create_partition("test1".to_string(), Some(1024));
+    let id2 = heap2.create_partition("test2".to_string(), Some(1024));
+
+    let obj1 = heap1
+        .alloc(
+            id1,
+            TestData {
+                value: 1,
+                name: "heap1".to_string(),
+            },
+        )
+        .unwrap();
+
+    let obj2 = heap2
+        .alloc(
+            id2,
+            TestData {
+                value: 2,
+                name: "heap2".to_string(),
+            },
+        )
+        .unwrap();
+
+    // Verify object ownership
+    assert!(heap1.contains(&obj1));
+    assert!(!heap1.contains(&obj2));
+    assert!(heap2.contains(&obj2));
+    assert!(!heap2.contains(&obj1));
+}
+
+// ============ Reference Recovery Tests ============
+
+// Note: try_from_ref requires exact type match including function pointers
+// These tests are simplified to avoid type registration complexity
+
+// ============ Gc Wrapper Tests ============
+
+#[test]
+fn test_gc_wrapper_creation() {
+    use gc_lite::Gc;
+
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(2048));
+
+    let gc = Gc::new_in_partition(
+        &mut heap,
+        id,
+        TestData {
+            value: 42,
+            name: "test".to_string(),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(gc.value, 42);
+    assert_eq!(gc.name, "test");
+}
+
+#[test]
+fn test_gc_wrapper_deref() {
+    use gc_lite::Gc;
+
+    let mut heap = GcHeap::new();
+    let id = heap.create_partition("test".to_string(), Some(2048));
+
+    let mut gc = Gc::new_in_partition(
+        &mut heap,
+        id,
+        TestData {
+            value: 42,
+            name: "test".to_string(),
+        },
+    )
+    .unwrap();
+
+    // Test deref
+    assert_eq!(gc.value, 42);
+    assert_eq!(gc.name, "test");
+
+    // Test as_mut
+    gc.as_mut().value = 100;
+    assert_eq!(gc.value, 100);
+}

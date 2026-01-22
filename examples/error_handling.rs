@@ -214,10 +214,10 @@ fn demonstrate_gc_threshold_errors() -> GcResult<()> {
     // Test setting threshold exceeding memory limit
     println!("4. Test setting threshold exceeding memory limit...");
     context.set_gc_threshold(partition_id, 2048);
-    // Since threshold exceeds memory limit, will automatically set to memory limit value 1024
-    assert_eq!(context.gc_threshold(partition_id), Some(1024));
+    // Since threshold exceeds memory limit, will be capped at 0.8x of limit (1024 * 8 / 10 = 819)
+    assert_eq!(context.gc_threshold(partition_id), Some(819));
     println!(
-        "  ✓ Setting threshold exceeding memory limit automatically adjusted to memory limit value"
+        "  ✓ Setting threshold exceeding memory limit automatically adjusted to 0.8x of memory limit"
     );
 
     // Test disabling automatic GC

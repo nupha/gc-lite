@@ -161,7 +161,7 @@ fn benchmark_memory_efficiency() {
     // Get partition memory usage
     if let Some(partition_info) = context.partition(partition) {
         let used = partition_info.memory_used();
-        let limit = partition_info.memory_limit().unwrap_or(0);
+        let limit = partition_info.memory_limit();
         let efficiency = if limit > 0 {
             (used as f64 / limit as f64) * 100.0
         } else {

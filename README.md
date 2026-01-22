@@ -13,12 +13,13 @@ A Partitioned Garbage Collector.
 ## Core Components
 
 - **GcHeap**: Garbage collection heap, manages the lifecycle of all partitions and objects
-- **PartitionId**: Partition identifier
-- **PartitionInfo**: Partition information including memory usage
+- **GcPartitionId**: Partition identifier
+- **GcPartition**: Partition information including memory usage
 - **Gc<T>**: GC pointer wrapper providing safe object access
 - **GcRef<T>**: Underlying GC reference for internal operations
 - **GcWeak<T>**: Weak reference that doesn't prevent object collection
 - **GcTracable** trait: Defines behavior that objects to be garbage collected must implement
+- **GcTracer**: Tracer for marking reachable objects during GC
 
 ## Basic Usage
 
@@ -61,10 +62,17 @@ let partition2 = heap.create_partition("partition2".to_string(), Some(512));
 // Get partition information
 if let Some(partition) = heap.partition(partition1) {
     println!("Partition: {}, Memory usage: {}/{}",
-        partition.name,
+        partition.name(),
         partition.memory_used(),
-        partition.memory_limit().unwrap_or(0));
+        partition.memory_limit());
 }
+
+// Set memory limit (0 means unlimited)
+heap.partition_mut(partition1).unwrap().set_memory_limit(2048);
+
+// Get/set GC threshold
+heap.set_gc_threshold(partition1, 1024);
+let threshold = heap.gc_threshold(partition1).unwrap();
 
 // Delete partition (must be empty)
 heap.remove_partition(partition2);
@@ -157,11 +165,96 @@ cargo run --example basic_usage
 cargo test
 ```
 
+## Manual Memory Release
+
+```rust
+use gc_lite::{GcHeap, GcResult};
+
+// Safely release an object (checks for references)
+let obj = heap.alloc(partition_id, String::from("test")).map_err(|(err, _)| err)?;
+// ... use obj ...
+let result = heap.free(obj);
+match result {
+    Ok(_) => println!("Object released successfully"),
+    Err(GcError::InvalidReference) => println!("Object is still referenced"),
+    _ => println!("Release failed"),
+}
+```
+
+## Context Detection
+
+```rust
+use gc_lite::GcHeap;
+
+let mut heap1 = GcHeap::new();
+let mut heap2 = GcHeap::new();
+
+let id1 = heap1.create_partition("p1".to_string(), Some(1024));
+let id2 = heap2.create_partition("p2".to_string(), Some(1024));
+
+let obj1 = heap1.alloc(id1, 42).unwrap();
+let obj2 = heap2.alloc(id2, 100).unwrap();
+
+// Check if object belongs to a heap
+assert!(heap1.contains(&obj1));
+assert!(!heap1.contains(&obj2));
+```
+
+## Gc Wrapper
+
+```rust
+use gc_lite::{Gc, GcHeap, GcTracable};
+
+#[derive(Debug)]
+struct Data {
+    value: i32,
+}
+
+unsafe impl GcTracable for Data {
+    fn trace(&self, _tracer: &mut gc_lite::GcTracer) {}
+}
+
+let mut heap = GcHeap::new();
+let id = heap.create_partition("test".to_string(), Some(1024));
+
+let gc = Gc::new_in_partition(&mut heap, id, Data { value: 42 }).unwrap();
+
+// Deref access
+assert_eq!(gc.value, 42);
+
+// Mutable access
+gc.as_mut().value = 100;
+assert_eq!(gc.value, 100);
+
+// Set as root
+gc.set_root(&mut heap, true);
+```
+
+## Error Handling
+
+```rust
+use gc_lite::{GcError, GcHeap};
+
+let mut heap = GcHeap::new();
+let id = heap.create_partition("test".to_string(), Some(64)); // Small limit
+
+// Try to allocate large object
+let result = heap.alloc(id, [0u8; 1024]);
+match result {
+    Ok(_) => println!("Allocated"),
+    Err((GcError::PartitionFull, _)) => println!("Partition is full"),
+    Err((GcError::AllocationFailed, _)) => println!("Memory allocation failed"),
+    Err((GcError::PartitionNotFound, _)) => println!("Partition not found"),
+    Err((GcError::InvalidReference, _)) => println!("Invalid reference"),
+}
+```
+
 ## Notes
 
 - All objects on the heap must implement the `GcTracable` trait
 - Only root objects or objects referenced by root objects (directly or indirectly) will be retained
 - Weak references don't prevent objects from being garbage collected
 - Circular references can be broken through weak references
-- Default partitions cannot be deleted
-- Partitions must be empty to be deleted
+- Setting memory limit to 0 means unlimited
+- If memory limit is set below current usage, it will be adjusted to current usage
+- Manual release (`heap.free()`) checks if object is referenced before releasing

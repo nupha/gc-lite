@@ -57,7 +57,8 @@ fn main() -> GcResult<()> {
     println!("\nPartition status:");
     for partition_id in heap.partition_ids() {
         if let Some(partition) = heap.partition(partition_id) {
-            let usage = if let Some(limit) = partition.memory_limit() {
+            let limit = partition.memory_limit();
+            let usage = if limit > 0 {
                 format!(
                     "{}/{} bytes ({:.1}%)",
                     partition.memory_used(),

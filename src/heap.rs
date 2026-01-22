@@ -10,6 +10,7 @@ use crate::{
     partition::{GcPartitionId, GcPartitionMgr},
     trace::GcTracable,
     type_registry::TypeRegistry,
+    unlikely,
 };
 
 pub struct GcHeap {
@@ -107,8 +108,9 @@ impl GcHeap {
     pub fn set_gc_threshold(&mut self, partition_id: GcPartitionId, threshold: usize) {
         if let Some(partition) = self.partitions.partition_mut(partition_id) {
             partition.set_gc_threshold(if threshold > 0 {
-                if let Some(lim) = partition.memory_limit() {
-                    if threshold > lim { lim } else { threshold }
+                let lim = partition.memory_limit();
+                if lim > 0 && threshold > lim {
+                    lim
                 } else {
                     threshold
                 }
@@ -151,62 +153,68 @@ impl GcHeap {
         partition_id: GcPartitionId,
         data: T,
     ) -> Result<GcRef<T>, (GcError, T)> {
-        let partition = match self.partitions.partition_mut(partition_id) {
-            Some(partition) => partition,
-            None => return Err((GcError::PartitionNotFound, data)),
-        };
+        match self.partitions.partition_mut(partition_id) {
+            Some(par) => {
+                let size = std::mem::size_of::<T>();
+                let gross_size = std::mem::size_of::<GcHead>() + size;
 
-        let size = std::mem::size_of::<T>();
-        let gross_size = std::mem::size_of::<GcHead>() + size as usize;
+                if unlikely(par.memory_limit > 0 && par.memory_used + gross_size > par.memory_limit)
+                {
+                    return Err((GcError::PartitionFull, data));
+                } else {
+                    // Type information
+                    let type_idx = self.type_registry.register::<T>();
+                    debug_assert!(type_idx != 0);
 
-        // Check partition quota
-        if !partition.add_mem_use(gross_size) {
-            return Err((GcError::PartitionFull, data));
-        }
+                    // Allocate memory
+                    let ptr = match Allocator::allocate(gross_size) {
+                        Some(p) => p,
+                        None => {
+                            return Err((GcError::AllocationFailed, data));
+                        }
+                    };
 
-        // Type information
-        let type_idx = self.type_registry.register::<T>();
-        debug_assert!(type_idx != 0);
+                    unsafe {
+                        // Initialize header
+                        let header_ptr = ptr.as_ptr().cast::<GcHead>();
 
-        // Allocate memory
-        let ptr = match Allocator::allocate(gross_size) {
-            Some(p) => p,
+                        (*header_ptr) = GcHead {
+                            flags: 0, // marked=false, root=false
+                            type_partition: ((partition_id.0 as u32) << 16) | (type_idx as u32),
+                            weak_ref_index: 0xFFFF, // no weak ref
+                            next: None,
+                        };
+
+                        #[cfg(debug_assertions)]
+                        {
+                            (*header_ptr).flags = super::node::GC_HEAD_MAGIC;
+                        }
+
+                        // Initialize data
+                        let data_ptr = ptr.as_ptr().add(std::mem::size_of::<GcHead>()).cast::<T>();
+                        std::ptr::write(data_ptr, data);
+
+                        debug_assert!((*header_ptr).type_id() != 0);
+
+                        // Add to partition list
+                        let header = NonNull::new_unchecked(header_ptr);
+                        self.add_to_partition_list(partition_id, header);
+
+                        // Update memory usage
+                        if let Some(par) = self.partitions.partition_mut(partition_id) {
+                            par.add_mem_use(gross_size);
+                        }
+
+                        Ok(GcRef {
+                            head_ptr: header,
+                            _marker: PhantomData,
+                        })
+                    }
+                }
+            }
             None => {
-                partition.dec_mem_use(gross_size);
-                return Err((GcError::AllocationFailed, data));
+                return Err((GcError::PartitionNotFound, data));
             }
-        };
-
-        unsafe {
-            // Initialize header
-            let header_ptr = ptr.as_ptr().cast::<GcHead>();
-
-            (*header_ptr) = GcHead {
-                flags: 0, // marked=false, root=false
-                type_partition: ((partition_id.0 as u32) << 16) | (type_idx as u32),
-                weak_ref_index: 0xFFFF, // no weak ref
-                next: None,
-            };
-
-            #[cfg(debug_assertions)]
-            {
-                (*header_ptr).flags = super::node::GC_HEAD_MAGIC;
-            }
-
-            // Initialize data
-            let data_ptr = ptr.as_ptr().add(std::mem::size_of::<GcHead>()).cast::<T>();
-            std::ptr::write(data_ptr, data);
-
-            debug_assert!((*header_ptr).type_id() != 0);
-
-            // Add to partition list
-            let header = NonNull::new_unchecked(header_ptr);
-            self.add_to_partition_list(partition_id, header);
-
-            Ok(GcRef {
-                head_ptr: header,
-                _marker: PhantomData,
-            })
         }
     }
 
