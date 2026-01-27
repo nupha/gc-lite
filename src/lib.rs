@@ -13,7 +13,7 @@ mod weak;
 
 pub use {
     heap::GcHeap,
-    node::{Gc, GcRef},
+    node::{Gc, GcHead, GcRef},
     partition::{GcPartition, GcPartitionId},
     trace::{GcTracable, GcTracer},
     weak::GcWeak,

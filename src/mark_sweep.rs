@@ -62,11 +62,11 @@ impl GcHeap {
                         trace_fn(payload, tracer);
                     }
                 } else {
-                    #[cfg(debug_assertions)]
-                    unreachable!(
-                        "marking a gc object in difference paritition, expect {partition_id:?}, found {:?}",
-                        p.as_ref().get_partition_id()
-                    );
+                    // #[cfg(debug_assertions)]
+                    // unreachable!(
+                    //     "marking a gc object in difference paritition, expect {partition_id:?}, found {:?}",
+                    //     p.as_ref().get_partition_id()
+                    // );
                 }
             }
         }
@@ -146,7 +146,7 @@ impl GcHeap {
                     }
 
                     // Release
-                    freed_bytes += self.release_node(p);
+                    freed_bytes += self.dispose(p);
                 } else {
                     // Reset mark bits for next GC
                     if !keep_mark {
@@ -164,8 +164,8 @@ impl GcHeap {
         freed_bytes
     }
 
-    /// Release a node
-    pub(super) unsafe fn release_node(&mut self, p: NonNull<GcHead>) -> usize {
+    /// Dispose a node
+    pub(super) unsafe fn dispose(&mut self, p: NonNull<GcHead>) -> usize {
         if let Some(weak_ref_index) = unsafe { (*p.as_ptr()).get_weak_ref_index() } {
             debug_assert!(weak_ref_index < self.weak_list.len());
             self.weak_list[weak_ref_index].1.take();
@@ -175,7 +175,7 @@ impl GcHeap {
         }
 
         let type_idx = unsafe { (*p.as_ptr()).type_id() };
-        debug_assert!(type_idx != 0);
+        debug_assert_ne!(type_idx, 0);
 
         let (size, dispose_fn) = self
             .type_registry

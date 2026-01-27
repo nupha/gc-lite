@@ -288,6 +288,31 @@ impl GcPartitionMgr {
 
         root
     }
+
+    /// Check if the given partition ID is an ancestor of the specified partition
+    ///
+    /// # Parameters
+    /// - `id`: The partition ID to check
+    /// - `ancestor`: The potential ancestor partition ID
+    ///
+    /// # Returns
+    /// `true` if `potential_ancestor` is an ancestor of `id`, `false` otherwise
+    pub fn is_ancestor_of(&self, id: GcPartitionId, ancestor: GcPartitionId) -> bool {
+        let mut current_id = id;
+
+        while current_id != GcPartitionId::NONE {
+            if current_id == ancestor {
+                return true;
+            }
+            if let Some(partition) = self.partitions.get(&current_id) {
+                current_id = partition.parent;
+            } else {
+                break;
+            }
+        }
+
+        false
+    }
 }
 
 impl GcHeap {
@@ -341,6 +366,23 @@ impl GcHeap {
     #[inline(always)]
     pub fn partition_ids(&self) -> Vec<GcPartitionId> {
         self.partitions.partition_ids()
+    }
+
+    /// Check if the given partition is an ancestor of another partition
+    ///
+    /// # Parameters
+    /// - `ancestor`: The partition be ancestor
+    /// - `descendant`: The partition be descendant
+    ///
+    /// # Returns
+    /// `true` if `ancestor` is an ancestor of `descendant`, `false` otherwise
+    #[inline(always)]
+    pub fn check_partition_ancestor(
+        &self,
+        ancestor: GcPartitionId,
+        descendant: GcPartitionId,
+    ) -> bool {
+        self.partitions.is_ancestor_of(descendant, ancestor)
     }
 }
 
@@ -573,5 +615,36 @@ mod tests {
         assert_eq!(manager.root_of(root_id), root_id);
         assert_eq!(manager.root_of(child_id), root_id);
         assert_eq!(manager.root_of(grandchild_id), root_id);
+    }
+
+    #[test]
+    fn test_is_ancestor_of() {
+        let mut manager = GcPartitionMgr::new();
+
+        let root_id = manager.create_partition(Some(2048), GcPartitionId::NONE);
+        let child_id = manager.create_partition(Some(1024), root_id);
+        let grandchild_id = manager.create_partition(Some(512), child_id);
+        let sibling_id = manager.create_partition(Some(256), root_id);
+
+        // A partition is always an ancestor of itself
+        assert!(manager.is_ancestor_of(root_id, root_id));
+        assert!(manager.is_ancestor_of(child_id, child_id));
+        assert!(manager.is_ancestor_of(grandchild_id, grandchild_id));
+        assert!(manager.is_ancestor_of(sibling_id, sibling_id));
+
+        // Root is ancestor of everyone
+        assert!(manager.is_ancestor_of(child_id, root_id));
+        assert!(manager.is_ancestor_of(grandchild_id, root_id));
+        assert!(manager.is_ancestor_of(sibling_id, root_id));
+
+        // Child is ancestor of grandchild
+        assert!(manager.is_ancestor_of(grandchild_id, child_id));
+
+        // Not ancestor checks
+        assert!(!manager.is_ancestor_of(root_id, child_id)); // root has no ancestor
+        assert!(!manager.is_ancestor_of(child_id, grandchild_id)); // child is not ancestor of grandchild
+        assert!(!manager.is_ancestor_of(child_id, sibling_id));
+        assert!(!manager.is_ancestor_of(sibling_id, grandchild_id));
+        assert!(!manager.is_ancestor_of(grandchild_id, sibling_id));
     }
 }

@@ -3,7 +3,7 @@
 
 use std::{marker::PhantomData, ptr::NonNull};
 
-use crate::{GcPartitionId, GcTracable, GcTracer, type_registry::TypeRegistry};
+use crate::{GcHeap, GcPartitionId, GcTracable, GcTracer, type_registry::TypeRegistry};
 
 #[cfg(debug_assertions)]
 pub(super) const GC_HEAD_MAGIC: u8 = 0x50;
@@ -100,6 +100,7 @@ impl GcHead {
 }
 
 /// Garbage collection reference
+#[repr(transparent)]
 pub struct GcRef<T> {
     pub(super) head_ptr: NonNull<GcHead>,
     pub(super) _marker: PhantomData<T>,
@@ -200,7 +201,7 @@ impl<T> GcRef<T> {
     ///
     /// # Safety
     /// Caller must ensure the passed reference indeed comes from a valid GcRef object.
-    pub fn try_from_ref(context: &crate::GcHeap, data_ref: &T) -> Option<Self>
+    pub fn try_from_ref(heap: &GcHeap, data_ref: &T) -> Option<Self>
     where
         T: GcTracable,
     {
@@ -228,8 +229,7 @@ impl<T> GcRef<T> {
         }
 
         // Check if function pointer matches
-        context
-            .type_registry
+        heap.type_registry
             .with_type_id(type_id, |t| (t.trace_fn, t.dispose_fn))
             .and_then(|(trace, dispose)| {
                 if dispose as usize == expected_dispose_fn as usize
@@ -263,14 +263,28 @@ impl<T> GcRef<T> {
         }
     }
 
+    #[inline(always)]
+    pub fn head_ptr(&self) -> NonNull<GcHead> {
+        self.head_ptr
+    }
+
     #[cfg(debug_assertions)]
     pub fn test_valid(&self) -> bool {
         unsafe { self.head_ptr.as_ref().test_valid() }
     }
+}
 
-    #[cfg(debug_assertions)]
-    pub fn head_ptr(&self) -> *const () {
-        self.head_ptr.cast().as_ptr()
+impl GcRef<()> {
+    /// Unsafe conversion from GcHead raw pointer to untyped GcRef<()>.
+    ///
+    /// Safety
+    /// You must ensure GcHead raw pointer comes from GcRef<T>, otherwise consequences are unpredictable.
+    #[inline(always)]
+    pub unsafe fn from_head_ptr(head_ptr: NonNull<GcHead>) -> Self {
+        Self {
+            head_ptr,
+            _marker: PhantomData,
+        }
     }
 }
 

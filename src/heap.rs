@@ -113,11 +113,7 @@ impl GcHeap {
         }
     }
 
-    //
-    // Object Allocation
-    //
-
-    /// Allocate a new object in partition
+    /// Allocate in partition
     pub fn alloc<T: GcTracable>(
         &mut self,
         partition_id: GcPartitionId,
@@ -168,7 +164,7 @@ impl GcHeap {
 
                         // Add to partition list
                         let header = NonNull::new_unchecked(header_ptr);
-                        self.add_to_partition_list(partition_id, header);
+                        self.attach(partition_id, header);
 
                         // Update memory usage with rollup to parent partitions
                         let _ = self
@@ -188,9 +184,9 @@ impl GcHeap {
         }
     }
 
-    /// Add object to partition list
+    /// Attach a node to chain
     #[inline(always)]
-    fn add_to_partition_list(&mut self, partition_id: GcPartitionId, node: NonNull<GcHead>) {
+    pub(crate) fn attach(&mut self, partition_id: GcPartitionId, node: NonNull<GcHead>) {
         let head = self.partition_heads.entry(partition_id).or_insert(None);
         unsafe {
             (*node.as_ptr()).next = *head;
@@ -198,33 +194,79 @@ impl GcHeap {
         }
     }
 
-    /// Set/unset partition root object status
-    pub fn set_root<T>(&mut self, gc_ref: GcRef<T>, is_root: bool) {
-        unsafe {
-            let mut header = gc_ref.head_ptr;
-            let partition_id = (*header.as_ptr()).get_partition_id();
+    /// Remove a node from chain
+    pub(crate) fn detach(&mut self, node: NonNull<GcHead>) {
+        let partition_id = unsafe { node.as_ref().get_partition_id() };
+        if partition_id != GcPartitionId::NONE {
+            let head = self.partition_heads.get_mut(&partition_id).unwrap();
 
-            // 设置/清除根对象标记
-            header.as_mut().set_root(is_root);
+            let mut current = *head;
+            let mut prev: Option<NonNull<GcHead>> = None;
+
+            while let Some(header) = current {
+                unsafe {
+                    if header == node {
+                        // take out from chain
+                        if let Some(mut p) = prev {
+                            p.as_mut().next = header.as_ref().next;
+                        } else {
+                            *head = header.as_ref().next;
+                        }
+
+                        if node.as_ref().is_root() {
+                            if let Some(roots) = self.partition_roots.get_mut(&partition_id) {
+                                roots.retain(|p| node != *p);
+                            }
+                            (*node.as_ptr()).set_root(false);
+                        }
+
+                        // clear partition id
+                        (*node.as_ptr()).type_partition = node.as_ref().type_id() as _;
+
+                        return;
+                    }
+
+                    prev = Some(header);
+                    current = header.as_ref().next;
+                }
+            }
+
+            #[cfg(debug_assertions)]
+            unreachable!("node not exist");
+        }
+    }
+
+    /// Set/unset partition root object status
+    pub(crate) fn set_root_internal(&mut self, node: NonNull<GcHead>, is_root: bool) {
+        unsafe {
+            let pid = (*node.as_ptr()).get_partition_id();
+
+            (*node.as_ptr()).set_root(is_root);
 
             if is_root {
                 // Add to partition's root object list, create if doesn't exist
                 let roots = self
                     .partition_roots
-                    .entry(partition_id)
+                    .entry(pid)
                     .or_insert_with(|| Vec::with_capacity(8));
-                if !roots.contains(&header) {
-                    roots.push(header);
+                if !roots.contains(&node) {
+                    roots.push(node);
                 }
             } else {
                 // Remove from partition's root object list
-                if let Some(roots) = self.partition_roots.get_mut(&partition_id) {
-                    if let Some(pos) = roots.iter().position(|&r| r == header) {
+                if let Some(roots) = self.partition_roots.get_mut(&pid) {
+                    if let Some(pos) = roots.iter().position(|&r| r == node) {
                         roots.swap_remove(pos);
                     }
                 }
             }
         }
+    }
+
+    /// Set/unset partition root object status
+    #[inline(always)]
+    pub fn set_root<T>(&mut self, gc_ref: GcRef<T>, is_root: bool) {
+        self.set_root_internal(gc_ref.head_ptr, is_root);
     }
 
     //
@@ -279,28 +321,22 @@ impl GcHeap {
     pub unsafe fn free_unchecked<T>(&mut self, gc_ref: GcRef<T>) -> GcResult<usize> {
         let header = gc_ref.head_ptr;
         let partition_id = unsafe { header.as_ref().get_partition_id() };
+        debug_assert_ne!(partition_id, GcPartitionId::NONE);
 
-        // 验证分区是否存在
-        if self.partitions.partition(partition_id).is_none() {
-            return Err(GcError::PartitionNotFound);
-        }
-
-        // 验证对象是否来自这个上下文的分配
         if !self.contains_internal(header) {
+            // not allocated in this heap
             return Err(GcError::InvalidReference);
         }
 
-        // If object is a root object, remove root object mark first
+        // If object is a root object, unset root
         if let Some(roots) = self.partition_roots.get_mut(&partition_id) {
             if let Some(i) = roots.iter().position(|&r| r == header) {
                 roots.swap_remove(i);
             }
         }
 
-        // Remove object from partition list
-        self.remove_from_partition_list(partition_id, header)?;
-
-        unsafe { Ok(self.release_node(header)) }
+        self.detach(header);
+        unsafe { Ok(self.dispose(header)) }
     }
 
     //
@@ -388,7 +424,7 @@ impl GcHeap {
         self.contains_internal(gc_ref.head_ptr)
     }
 
-    /// Verify object is allocated from this context
+    /// Verify object is allocated from this heap
     fn contains_internal(&self, header: NonNull<GcHead>) -> bool {
         unsafe {
             let partition_id = header.as_ref().get_partition_id();
@@ -413,39 +449,95 @@ impl GcHeap {
         }
     }
 
-    /// Remove specified object from partition list
-    fn remove_from_partition_list(
-        &mut self,
-        partition_id: GcPartitionId,
-        target: NonNull<GcHead>,
-    ) -> GcResult<()> {
-        let head = self
-            .partition_heads
-            .get_mut(&partition_id)
-            .ok_or(GcError::PartitionNotFound)?;
-
-        let mut current = *head;
-        let mut prev: Option<NonNull<GcHead>> = None;
-
-        unsafe {
-            while let Some(header) = current {
-                if header == target {
-                    // Found target object, remove from list
-                    if let Some(prev_header) = prev {
-                        (*prev_header.as_ptr()).next = (*header.as_ptr()).next;
-                    } else {
-                        *head = (*header.as_ptr()).next;
-                    }
-                    return Ok(());
-                }
-
-                prev = Some(header);
-                current = (*header.as_ptr()).next;
+    /// Promote `node` to ancestor partition.
+    pub fn promote_to(&mut self, node: NonNull<GcHead>, dest: GcPartitionId) {
+        let is_root = unsafe { node.as_ref().is_root() };
+        let partition_id = unsafe { node.as_ref().get_partition_id() };
+        if partition_id != GcPartitionId::NONE {
+            if partition_id == dest {
+                return;
             }
+
+            debug_assert!(self.check_partition_ancestor(partition_id, dest));
+            self.detach(node);
         }
 
-        // If object not found, return error
-        Err(GcError::InvalidReference)
+        // Update the object's partition ID
+        unsafe {
+            let type_idx = node.as_ref().type_id();
+            debug_assert_ne!(type_idx, 0);
+            (*node.as_ptr()).type_partition = ((dest.0 as u32) << 16) | (type_idx as u32);
+        }
+
+        self.attach(dest, node);
+        if is_root {
+            self.set_root_internal(node, true);
+        }
+    }
+
+    /// Promote all objects from a partition to its parent partition
+    ///
+    /// This method moves all GC objects from the specified partition to its parent partition.
+    /// If the partition is already a root partition (no parent), this method does nothing.
+    ///
+    /// # Parameters
+    /// - `partition_id`: The ID of the partition whose objects should be promoted
+    pub fn promote_all(&mut self, partition_id: GcPartitionId) {
+        match self.partition(partition_id) {
+            Some(p) if p.is_root() => {}
+            None => {}
+            Some(p) => {
+                let parent = p.parent;
+
+                // Take source partition's chain head
+                let src_head = match self
+                    .partition_heads
+                    .get_mut(&partition_id)
+                    .and_then(Option::take)
+                {
+                    Some(h) => h,
+                    None => return,
+                };
+
+                // 1. migrate nodes
+                let mut current = Some(src_head);
+                let mut last: NonNull<GcHead> = NonNull::dangling();
+
+                while let Some(node) = current {
+                    unsafe {
+                        // Update the object's partition ID (high 16-bits)
+                        let type_idx = node.as_ref().type_id();
+                        debug_assert_ne!(type_idx, 0);
+                        debug_assert_eq!(node.as_ref().get_partition_id(), partition_id);
+
+                        (*node.as_ptr()).type_partition =
+                            ((parent.0 as u32) << 16) | (type_idx as u32);
+
+                        last = node;
+                        current = node.as_ref().next;
+                    }
+                }
+
+                // Get dest partition head, create if doesn't exist
+                let dest_head = self.partition_heads.entry(parent).or_insert(None);
+                unsafe {
+                    (*last.as_ptr()).next = *dest_head;
+                }
+                // Relink all nodes to parent's list
+                dest_head.replace(src_head);
+
+                // 2. migrate roots info
+                if let Some(roots) = self.partition_roots.remove(&partition_id)
+                    && !roots.is_empty()
+                {
+                    if let Some(lst) = self.partition_roots.get_mut(&parent) {
+                        lst.extend_from_slice(&roots);
+                    } else {
+                        self.partition_roots.insert(parent, roots);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -465,4 +557,163 @@ pub(super) unsafe fn dispose_fn<T>(data_ptr: *mut u8) {
 /// Empty dispose function, for types that don't need Drop
 pub(super) unsafe fn noop_dispose_fn(_data_ptr: *mut u8) {
     // Do nothing
+}
+
+#[cfg(test)]
+mod heap_tests {
+    use super::*;
+
+    #[test]
+    fn test_promote_all() {
+        let mut heap = GcHeap::new();
+
+        // Create root and child partitions
+        let root_id = heap.create_root_partition(4096);
+        let child_id = heap.create_sub_partition(root_id);
+
+        // Allocate some objects in child partition
+        let obj1: GcRef<i32> = heap.alloc(child_id, 42).unwrap();
+        let obj2: GcRef<String> = heap.alloc(child_id, "hello".to_string()).unwrap();
+
+        // Verify objects are in child partition
+        let child_head = heap.partition_heads.get(&child_id).copied().flatten();
+        assert!(child_head.is_some(), "Objects should be in child partition");
+
+        // Verify partition ID before promote
+        unsafe {
+            let pid1 = obj1.head_ptr.as_ref().get_partition_id();
+            let pid2 = obj2.head_ptr.as_ref().get_partition_id();
+            assert_eq!(
+                pid1, child_id,
+                "Object1 should be in child partition before promote"
+            );
+            assert_eq!(
+                pid2, child_id,
+                "Object2 should be in child partition before promote"
+            );
+        }
+
+        // Promote all objects to parent
+        heap.promote_all(child_id);
+
+        // Verify child partition is now empty
+        let child_head_after = heap.partition_heads.get(&child_id).copied().flatten();
+        assert!(
+            child_head_after.is_none(),
+            "Child partition should be empty after promote"
+        );
+
+        // Verify objects are now in root partition
+        let root_head = heap.partition_heads.get(&root_id).copied().flatten();
+        assert!(root_head.is_some(), "Objects should be in root partition");
+
+        // Verify partition ID after promote
+        unsafe {
+            let pid1 = obj1.head_ptr.as_ref().get_partition_id();
+            let pid2 = obj2.head_ptr.as_ref().get_partition_id();
+            assert_eq!(
+                pid1, root_id,
+                "Object1 should be in root partition after promote"
+            );
+            assert_eq!(
+                pid2, root_id,
+                "Object2 should be in root partition after promote"
+            );
+        }
+    }
+
+    #[test]
+    fn test_promote_all_root_partition() {
+        let mut heap = GcHeap::new();
+
+        // Create root partition (no parent)
+        let root_id = heap.create_root_partition(4096);
+
+        // Allocate an object in root partition
+        let obj: GcRef<i32> = heap.alloc(root_id, 100).unwrap();
+
+        // Get the head before promote
+        let root_head_before = heap.partition_heads.get(&root_id).copied().flatten();
+        assert!(root_head_before.is_some());
+
+        // Verify partition ID before promote
+        unsafe {
+            let pid = obj.head_ptr.as_ref().get_partition_id();
+            assert_eq!(pid, root_id, "Object should be in root partition");
+        }
+
+        // Promote all on root partition should do nothing
+        heap.promote_all(root_id);
+
+        // Objects should still be in root partition
+        let root_head_after = heap.partition_heads.get(&root_id).copied().flatten();
+        assert!(
+            root_head_after.is_some(),
+            "Root partition should unchanged after promote"
+        );
+
+        // Verify partition ID is unchanged after promote
+        unsafe {
+            let pid = obj.head_ptr.as_ref().get_partition_id();
+            assert_eq!(
+                pid, root_id,
+                "Object should still be in root partition after promote"
+            );
+        }
+    }
+
+    #[test]
+    fn test_promote_all_updates_partition_roots() {
+        let mut heap = GcHeap::new();
+
+        // Create root and child partitions
+        let root_id = heap.create_root_partition(4096);
+        let child_id = heap.create_sub_partition(root_id);
+
+        // Allocate and mark objects as root in child partition
+        let obj1: GcRef<i32> = heap.alloc(child_id, 42).unwrap();
+        let obj2: GcRef<String> = heap.alloc(child_id, "hello".to_string()).unwrap();
+
+        // Mark both as root objects
+        heap.set_root(obj1, true);
+        heap.set_root(obj2, true);
+
+        // Verify root objects are in child's partition_roots
+        let child_roots = heap.partition_roots.get(&child_id);
+        assert!(child_roots.is_some(), "Child partition should have roots");
+        assert_eq!(
+            child_roots.unwrap().len(),
+            2,
+            "Child partition should have 2 root objects"
+        );
+
+        // Verify parent partition has no roots yet
+        let parent_roots_before = heap.partition_roots.get(&root_id);
+        assert!(
+            parent_roots_before.is_none() || parent_roots_before.unwrap().is_empty(),
+            "Parent partition should have no roots before promote"
+        );
+
+        // Promote all objects to parent
+        heap.promote_all(child_id);
+
+        // Verify child partition's roots are cleared
+        let child_roots_after = heap.partition_roots.get(&child_id);
+        assert!(
+            child_roots_after.is_none() || child_roots_after.unwrap().is_empty(),
+            "Child partition should have no roots after promote"
+        );
+
+        // Verify root objects are now in parent's partition_roots
+        let parent_roots = heap.partition_roots.get(&root_id);
+        assert!(
+            parent_roots.is_some(),
+            "Parent partition should have roots after promote"
+        );
+        assert_eq!(
+            parent_roots.unwrap().len(),
+            2,
+            "Parent partition should have 2 root objects"
+        );
+    }
 }
