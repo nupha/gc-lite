@@ -39,7 +39,7 @@ fn demonstrate_out_of_memory() -> GcResult<()> {
     println!("1. Create limited memory partition...");
 
     let mut context = GcHeap::new();
-    let partition_id = context.create_partition("limited".to_string(), Some(2048)); // 2KB limit
+    let partition_id = context.create_root_partition(2048); // 2KB limit
 
     // Allocate first large object (1KB + header)
     println!("2. Allocate first large object...");
@@ -86,7 +86,7 @@ fn demonstrate_safe_free_validation() -> GcResult<()> {
     println!("1. Create test object...");
 
     let mut context = GcHeap::new();
-    let partition_id = context.create_partition("test".to_string(), Some(1024));
+    let partition_id = context.create_root_partition(1024);
 
     let data = TestData {
         value: 42,
@@ -106,7 +106,7 @@ fn demonstrate_safe_free_validation() -> GcResult<()> {
 
     println!("4. Test cross-context release...");
     let mut another_context = GcHeap::new();
-    let another_partition_id = another_context.create_partition("another".to_string(), Some(1024));
+    let another_partition_id = another_context.create_root_partition(1024);
     let another_data = TestData {
         value: 100,
         name: "another".to_string(),
@@ -172,7 +172,7 @@ fn demonstrate_partition_management_errors() -> GcResult<()> {
     println!("  ✓ Removing non-existent partition silently fails");
 
     println!("\n2. Test non-empty partition deletion...");
-    let partition_id = context.create_partition("non_empty".to_string(), Some(1024));
+    let partition_id = context.create_root_partition(1024);
 
     // Allocate objects in partition
     let obj = context
@@ -198,7 +198,7 @@ fn demonstrate_gc_threshold_errors() -> GcResult<()> {
     println!("1. Test GC threshold API...");
 
     let mut context = GcHeap::new();
-    let partition_id = context.create_partition("threshold_test".to_string(), Some(1024));
+    let partition_id = context.create_root_partition(1024);
 
     // Test default values
     println!("2. Test default threshold...");
@@ -241,7 +241,7 @@ fn demonstrate_reference_detection_errors() -> GcResult<()> {
     println!("1. Test reference detection...");
 
     let mut context = GcHeap::new();
-    let partition_id = context.create_partition("ref_test".to_string(), Some(1024));
+    let partition_id = context.create_root_partition(1024);
 
     // Create two mutually referencing nodes
     let node1 = Node {

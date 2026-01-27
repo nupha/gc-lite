@@ -4,7 +4,7 @@
 use std::{collections::HashMap, marker::PhantomData, ptr::NonNull};
 
 use crate::{
-    GcError, GcPartition, GcResult, GcTracer,
+    GcError, GcResult, GcTracer,
     allocator::Allocator,
     node::{GcHead, GcRef},
     partition::{GcPartitionId, GcPartitionMgr},
@@ -54,36 +54,6 @@ impl GcHeap {
             weak_list: Vec::new(),
             type_registry: TypeRegistry::new(),
         }
-    }
-
-    //
-    // Partition Management
-    //
-
-    /// Create a new partition
-    pub fn create_partition(&mut self, name: String, memory_limit: Option<usize>) -> GcPartitionId {
-        let id = self.partitions.create_partition(name, memory_limit);
-        self.partition_heads.insert(id, None);
-        self.partition_roots.insert(id, Vec::new());
-        id
-    }
-
-    /// Get partition information
-    #[inline(always)]
-    pub fn partition(&self, partition_id: GcPartitionId) -> Option<&GcPartition> {
-        self.partitions.partition(partition_id)
-    }
-
-    /// Get partition information
-    #[inline(always)]
-    pub fn partition_mut(&mut self, partition_id: GcPartitionId) -> Option<&mut GcPartition> {
-        self.partitions.partition_mut(partition_id)
-    }
-
-    /// Get all partition IDs
-    #[inline(always)]
-    pub fn partition_ids(&self) -> Vec<GcPartitionId> {
-        self.partitions.partition_ids()
     }
 
     /// Get garbage collection threshold for partition (bytes)
@@ -200,10 +170,10 @@ impl GcHeap {
                         let header = NonNull::new_unchecked(header_ptr);
                         self.add_to_partition_list(partition_id, header);
 
-                        // Update memory usage
-                        if let Some(par) = self.partitions.partition_mut(partition_id) {
-                            par.add_mem_use(gross_size);
-                        }
+                        // Update memory usage with rollup to parent partitions
+                        let _ = self
+                            .partitions
+                            .update_mem_use(partition_id, gross_size as i32);
 
                         Ok(GcRef {
                             head_ptr: header,

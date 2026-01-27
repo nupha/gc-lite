@@ -15,7 +15,7 @@ fn main() -> GcResult<()> {
     println!("=== Advanced features example of partitioned garbage collection system ===");
 
     let mut heap = GcHeap::new();
-    let partition = heap.create_partition("advanced".to_string(), Some(2048));
+    let partition = heap.create_root_partition(2048);
 
     // Demonstrate weak reference functionality
     println!("\n=== Weak reference functionality demonstration ===");
@@ -266,8 +266,8 @@ fn demonstrate_cross_context_detection() -> GcResult<()> {
     let mut context1 = GcHeap::new();
     let mut context2 = GcHeap::new();
 
-    let partition1 = context1.create_partition("context1".to_string(), Some(1024));
-    let partition2 = context2.create_partition("context2".to_string(), Some(1024));
+    let partition1 = context1.create_root_partition(1024);
+    let partition2 = context2.create_root_partition(1024);
 
     let obj1 = context1
         .alloc(

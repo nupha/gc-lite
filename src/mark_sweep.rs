@@ -157,10 +157,9 @@ impl GcHeap {
             }
         }
 
-        // Update partition memory usage
-        if let Some(partition) = self.partitions.partition_mut(partition_id) {
-            partition.dec_mem_use(freed_bytes);
-        }
+        // Update partition memory usage with rollup to parent partitions
+        self.partitions
+            .update_mem_use(partition_id, -(freed_bytes as i32));
 
         freed_bytes
     }
