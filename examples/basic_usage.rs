@@ -229,7 +229,7 @@ unsafe impl GcTracable for TestNode {
     fn trace(&self, tracer: &mut gc_lite::GcTracer) {
         // Trace all child nodes
         for child in &self.children {
-            tracer.mark(*child);
+            tracer.add(*child);
         }
     }
 }

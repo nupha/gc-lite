@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::ptr::NonNull;
+use std::{marker::PhantomData, ptr::NonNull};
 
-use crate::{GcHeap, GcRef, node::GcHead};
+use crate::{GcHeap, GcPartitionId, GcRef, node::GcHead};
 
 /// Garbage collection object tracing trait
 ///
@@ -18,64 +18,141 @@ pub unsafe trait GcTracable: 'static {
 }
 
 /// Tracer, used to trace object references during marking phase
-pub struct GcTracer {
-    /// GC objects pending Mark (stores raw pointer and type information)
-    pub(super) mark_cache: Vec<NonNull<GcHead>>,
+pub struct GcTracer<'a> {
+    pub(super) heap: NonNull<GcHeap>,
+    pub(super) partition_id: GcPartitionId,
+
+    /// pending nodes to be marked later
+    pub(super) pendings: Vec<NonNull<GcHead>>,
+
+    _mark: PhantomData<&'a ()>,
 }
 
-impl GcTracer {
-    #[inline(always)]
-    pub fn new() -> Self {
-        Self {
-            mark_cache: Vec::new(),
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GcTraceOp {
+    Stop,
+    TraceInto,
+    TraceLater,
+}
+
+impl GcTracer<'_> {
+    /// trace handler to mark node
+    #[allow(non_snake_case)]
+    pub fn MARK_FUNC(mut h: NonNull<GcHead>) -> GcTraceOp {
+        unsafe {
+            if !h.as_ref().is_marked() {
+                h.as_mut().set_marked(true);
+                GcTraceOp::TraceInto
+            } else {
+                GcTraceOp::Stop
+            }
         }
     }
 
     #[inline(always)]
-    pub fn with_capacity(cap: usize) -> Self {
+    pub fn new(heap: &GcHeap, partition_id: GcPartitionId) -> Self {
         Self {
-            mark_cache: Vec::with_capacity(cap),
+            heap: NonNull::from(heap),
+            partition_id,
+            pendings: Vec::new(),
+            _mark: PhantomData,
         }
     }
 
-    /// Add a GC reference to pending list
     #[inline(always)]
-    pub fn mark<T: GcTracable>(&mut self, gc_ref: GcRef<T>) {
-        self.mark_cache.push(gc_ref.head_ptr);
+    pub fn with_capacity(heap: &GcHeap, partition_id: GcPartitionId, cap: usize) -> Self {
+        Self {
+            heap: NonNull::from(heap),
+            partition_id,
+            pendings: Vec::with_capacity(cap),
+            _mark: PhantomData,
+        }
     }
 
-    /// Get next pending header pointer
-    #[inline(always)]
-    pub(crate) fn next_header(&mut self) -> Option<NonNull<GcHead>> {
-        self.mark_cache.pop()
-    }
+    pub fn trace(
+        &mut self,
+        nodes: impl Iterator<Item = NonNull<GcHead>>,
+        handle: impl Fn(NonNull<GcHead>) -> GcTraceOp,
+    ) {
+        let tt = unsafe { &self.heap.as_ref().type_registry };
 
-    /// apply pending marks in cache
-    #[inline(always)]
-    pub fn commit_marks(&mut self, heap: &GcHeap) {
-        while let Some(p) = self.mark_cache.pop() {
+        for ptr in nodes {
             unsafe {
-                let head = p.as_ptr();
-                if !(*head).is_marked() {
-                    (*head).set_marked(true);
+                if ptr.as_ref().get_partition_id() == self.partition_id {
+                    match handle(ptr) {
+                        GcTraceOp::TraceInto => {
+                            let trace_fn = ptr.as_ref().get_trace_fn(tt);
+                            let payload = ptr.cast::<u8>().add(std::mem::size_of::<GcHead>());
+                            trace_fn(payload.as_ptr(), self);
+                        }
+                        GcTraceOp::TraceLater => {
+                            self.pendings.push(ptr);
+                        }
+                        GcTraceOp::Stop => {}
+                    }
+                }
+            }
+        }
 
-                    let payload = (head as *mut u8).add(std::mem::size_of::<GcHead>());
-                    let trace_fn = (*head).get_trace_fn(&heap.type_registry);
-                    trace_fn(payload, self);
+        if !self.pendings.is_empty() {
+            self.commit_with(handle);
+        }
+    }
+
+    /// commit to trace pending nodes
+    fn commit_with(&mut self, handle: impl Fn(NonNull<GcHead>) -> GcTraceOp) {
+        let tt = unsafe { &self.heap.as_ref().type_registry };
+
+        while let Some(ptr) = self.pendings.pop() {
+            unsafe {
+                debug_assert_eq!(ptr.as_ref().get_partition_id(), self.partition_id);
+
+                match handle(ptr) {
+                    GcTraceOp::TraceInto => {
+                        let trace_fn = ptr.as_ref().get_trace_fn(tt);
+                        let payload = ptr.cast::<u8>().add(std::mem::size_of::<GcHead>());
+                        trace_fn(payload.as_ptr(), self);
+                    }
+                    GcTraceOp::TraceLater => {
+                        self.pendings.push(ptr);
+                    }
+                    GcTraceOp::Stop => {}
                 }
             }
         }
     }
 
-    /// clear pending marks
-    pub(crate) fn clear(&mut self) {
-        self.mark_cache.clear();
+    #[inline(always)]
+    pub fn trace_roots(&mut self, handle: impl Fn(NonNull<GcHead>) -> GcTraceOp) {
+        if let Some(roots) = unsafe { self.heap.as_ref().partition_roots.get(&self.partition_id) } {
+            self.trace(roots.iter().copied(), &handle);
+        }
     }
-}
 
-impl Default for GcTracer {
-    fn default() -> Self {
-        Self::new()
+    /// Add a node to be traced later
+    #[inline(always)]
+    pub fn add<T: GcTracable>(&mut self, gc_ref: GcRef<T>) {
+        if unsafe { gc_ref.head_ptr().as_ref().get_partition_id() } == self.partition_id {
+            self.pendings.push(gc_ref.head_ptr);
+        }
+    }
+
+    #[deprecated(note = "use ::add() instead")]
+    #[inline(always)]
+    pub fn mark<T: GcTracable>(&mut self, gc_ref: GcRef<T>) {
+        self.add(gc_ref);
+    }
+
+    /// commit to trace pending nodes
+    #[deprecated]
+    pub fn commit(&mut self) {
+        self.commit_with(Self::MARK_FUNC);
+    }
+
+    /// clear pendings
+    pub(crate) fn clear(&mut self) {
+        self.pendings.clear();
     }
 }
 
@@ -135,29 +212,5 @@ unsafe impl<T: GcTracable> GcTracable for Box<T> {
     #[inline(always)]
     fn trace(&self, tracer: &mut GcTracer) {
         self.as_ref().trace(tracer);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_tracer_basic() {
-        let mut tracer = GcTracer::new();
-        assert!(tracer.mark_cache.is_empty());
-        assert_eq!(tracer.next_header(), None);
-    }
-
-    #[test]
-    fn test_basic_types_collect() {
-        let number = 42;
-        let string = String::from("test");
-
-        let mut tracer = GcTracer::new();
-        number.trace(&mut tracer);
-        string.trace(&mut tracer);
-
-        assert!(tracer.mark_cache.is_empty());
     }
 }

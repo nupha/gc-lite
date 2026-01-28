@@ -296,17 +296,21 @@ impl GcPartitionMgr {
     /// - `ancestor`: The potential ancestor partition ID
     ///
     /// # Returns
-    /// `true` if `potential_ancestor` is an ancestor of `id`, `false` otherwise
+    /// `true` if `ancestor` is an ancestor of `id`, `false` otherwise
     pub fn is_ancestor_of(&self, id: GcPartitionId, ancestor: GcPartitionId) -> bool {
-        let mut current_id = id;
+        debug_assert_ne!(id, GcPartitionId::NONE);
+        debug_assert_ne!(ancestor, GcPartitionId::NONE);
 
+        let mut current_id = id;
         while current_id != GcPartitionId::NONE {
             if current_id == ancestor {
                 return true;
-            }
-            if let Some(partition) = self.partitions.get(&current_id) {
-                current_id = partition.parent;
+            } else if let Some(p) = self.partitions.get(&current_id) {
+                current_id = p.parent;
             } else {
+                #[cfg(debug_assertions)]
+                unreachable!();
+                #[cfg(not(debug_assertions))]
                 break;
             }
         }

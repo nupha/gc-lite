@@ -17,23 +17,16 @@ pub struct NodeIterator<'a> {
 }
 
 impl<'a> NodeIterator<'a> {
-    /// Create iterator from partition list head
-    pub(crate) fn new(partition_head: Option<NonNull<GcHead>>) -> Self {
+    /// Create iterator from chain head
+    pub(crate) fn new(head: Option<NonNull<GcHead>>) -> Self {
         Self {
-            current: partition_head,
+            current: head,
             _marker: std::marker::PhantomData,
         }
     }
 
-    /// Create iterator from GcContext and partition ID
-    pub(crate) fn from_context(context: &'a GcHeap, partition_id: GcPartitionId) -> Self {
-        let partition_head = context
-            .partition_heads
-            .get(&partition_id)
-            .copied()
-            .flatten();
-
-        Self::new(partition_head)
+    pub(crate) fn from_heap(heap: &'a GcHeap, partition_id: GcPartitionId) -> Self {
+        Self::new(heap.partition_heads.get(&partition_id).copied().flatten())
     }
 }
 
@@ -41,12 +34,11 @@ impl<'a> Iterator for NodeIterator<'a> {
     type Item = NonNull<GcHead>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let current = self.current?;
+        let cur = self.current?;
         unsafe {
-            let result = current;
-            self.current = (*current.as_ptr()).next;
-            Some(result)
+            self.current = (*cur.as_ptr()).next;
         }
+        Some(cur)
     }
 }
 
@@ -54,6 +46,6 @@ impl GcHeap {
     /// Get node iterator for specified partition
     #[inline(always)]
     pub fn partition_node_iter(&self, partition_id: GcPartitionId) -> NodeIterator<'_> {
-        NodeIterator::from_context(self, partition_id)
+        NodeIterator::from_heap(self, partition_id)
     }
 }

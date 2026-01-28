@@ -11,7 +11,7 @@ pub(super) struct TypeInfo {
     pub(super) size: usize,
     pub(super) needs_drop: bool,
     pub(super) trace_fn: unsafe fn(*mut u8, &mut GcTracer),
-    pub(super) dispose_fn: unsafe fn(*mut u8),
+    pub(super) dispose_fn: Option<unsafe fn(*mut u8)>,
 }
 
 /// Type registry
@@ -34,7 +34,7 @@ impl TypeRegistry {
             size: 0,
             needs_drop: false,
             trace_fn: noop_trace_fn,
-            dispose_fn: noop_dispose_fn,
+            dispose_fn: None,
         });
 
         Self {
@@ -67,9 +67,9 @@ impl TypeRegistry {
                 needs_drop: std::mem::needs_drop::<T>(),
                 trace_fn: trace_fn::<T>,
                 dispose_fn: if std::mem::needs_drop::<T>() {
-                    dispose_fn::<T>
+                    Some(dispose_fn::<T>)
                 } else {
-                    noop_dispose_fn
+                    None
                 },
             };
             self.entries.push(info);

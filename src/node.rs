@@ -3,7 +3,11 @@
 
 use std::{marker::PhantomData, ptr::NonNull};
 
-use crate::{GcHeap, GcPartitionId, GcTracable, GcTracer, type_registry::TypeRegistry};
+use crate::{
+    GcHeap, GcPartitionId, GcTracable, GcTracer,
+    heap::{dispose_fn, trace_fn},
+    type_registry::TypeRegistry,
+};
 
 #[cfg(debug_assertions)]
 pub(super) const GC_HEAD_MAGIC: u8 = 0x50;
@@ -16,7 +20,7 @@ pub struct GcHead {
     /// Partition ID + Type IDX (16 bits each)
     pub(super) type_partition: u32,
     /// Weak reference index, u16::MAX means none
-    pub(super) weak_ref_index: u16,
+    pub(super) weakref_index: u16,
     /// Pointer to next object (for list traversal)
     pub(super) next: Option<NonNull<GcHead>>,
 }
@@ -74,18 +78,18 @@ impl GcHead {
 
     /// Get weak reference index
     #[inline(always)]
-    pub fn get_weak_ref_index(&self) -> Option<usize> {
-        if self.weak_ref_index == u16::MAX {
-            None
+    pub(crate) fn weakref_index(&self) -> Option<usize> {
+        if self.weakref_index != u16::MAX {
+            Some(self.weakref_index as usize)
         } else {
-            Some(self.weak_ref_index as usize)
+            None
         }
     }
 
     /// Set weak reference index
     #[inline(always)]
-    pub(super) fn set_weak_ref_index(&mut self, index: Option<usize>) {
-        self.weak_ref_index = index.map(|i| i as u16).unwrap_or(u16::MAX);
+    pub(super) fn set_weakref_index(&mut self, index: Option<usize>) {
+        self.weakref_index = index.map(|i| i as u16).unwrap_or(u16::MAX);
     }
 
     #[inline(always)]
@@ -216,24 +220,28 @@ impl<T> GcRef<T> {
         let type_id = unsafe { header.as_ref().type_id() };
 
         // Verify function pointer matches
-        let expected_dispose_fn = if std::mem::needs_drop::<T>() {
-            crate::heap::dispose_fn::<T>
+        let expected_dispose_fn: Option<unsafe fn(*mut u8)> = if std::mem::needs_drop::<T>() {
+            Some(dispose_fn::<T>)
         } else {
-            crate::heap::noop_dispose_fn
+            None
         };
-        let expected_trace_fn = crate::heap::trace_fn::<T>;
+        let expected_trace_fn: unsafe fn(*mut u8, &mut GcTracer) = trace_fn::<T>;
 
         // If type index is 0, not a valid GC object
         if type_id == 0 {
             return None;
         }
 
-        // Check if function pointer matches
+        // Check if trace/dispose callback matches
         heap.type_registry
             .with_type_id(type_id, |t| (t.trace_fn, t.dispose_fn))
             .and_then(|(trace, dispose)| {
-                if dispose as usize == expected_dispose_fn as usize
-                    && trace as usize == expected_trace_fn as usize
+                if std::ptr::fn_addr_eq(trace, expected_trace_fn)
+                    && match (dispose, expected_dispose_fn) {
+                        (Some(a), Some(b)) => std::ptr::fn_addr_eq(a, b),
+                        (None, None) => true,
+                        _ => false,
+                    }
                 {
                     Some(Self {
                         head_ptr: header,

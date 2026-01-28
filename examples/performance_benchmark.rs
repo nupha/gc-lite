@@ -280,7 +280,7 @@ struct GraphNode {
 unsafe impl GcTracable for GraphNode {
     fn trace(&self, tracer: &mut GcTracer) {
         for neighbor in &self.neighbors {
-            tracer.mark(*neighbor);
+            tracer.add(*neighbor);
         }
     }
 }

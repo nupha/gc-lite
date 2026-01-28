@@ -332,7 +332,7 @@ struct Node {
 unsafe impl GcTracable for Node {
     fn trace(&self, tracer: &mut gc_lite::GcTracer) {
         if let Some(next) = self.next {
-            tracer.mark(next);
+            tracer.add(next);
         }
     }
 }

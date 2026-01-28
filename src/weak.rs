@@ -64,7 +64,7 @@ impl GcHeap {
         unsafe {
             let node = gc_ref.head_ptr.as_ptr();
 
-            if let Some(index) = (*node).get_weak_ref_index() {
+            if let Some(index) = (*node).weakref_index() {
                 // Weakref already exists, reuse it
                 let (ver, _ptr) = self.weak_list[index as usize];
                 debug_assert!(!_ptr.is_none());
@@ -86,7 +86,7 @@ impl GcHeap {
                         n
                     });
 
-                (*node).set_weak_ref_index(Some(i));
+                (*node).set_weakref_index(Some(i));
 
                 // Set slot to point to current object, increment version number
                 let curr_ver = self.weak_list[i].0;

@@ -11,8 +11,11 @@ impl GcHeap {
     /// Collect garbage on given partition
     pub fn collect_garbage(&mut self, partition_id: GcPartitionId) -> usize {
         if self.partitions.partition(partition_id).is_some() {
-            let mut tracer = GcTracer::new();
-            self.mark_roots(partition_id, &mut tracer);
+            self.clear_marks(partition_id);
+
+            let mut tr = GcTracer::with_capacity(self, partition_id, 64);
+            tr.trace_roots(GcTracer::MARK_FUNC);
+
             self.sweep(partition_id)
         } else {
             0
@@ -20,6 +23,7 @@ impl GcHeap {
     }
 
     /// Automatic garbage collection (check all partitions)
+    #[deprecated]
     pub fn collect_garbage_auto(&mut self) -> usize {
         let mut total_freed = 0;
 
@@ -32,41 +36,44 @@ impl GcHeap {
         total_freed
     }
 
+    /// clear mark of each node in partition
+    pub fn clear_marks(&mut self, partition_id: GcPartitionId) {
+        for mut n in self.partition_node_iter(partition_id) {
+            unsafe {
+                n.as_mut().set_marked(false);
+            }
+        }
+    }
+
     /// Mark from partition roots
+    #[deprecated(note = "use GcTracer::trace_roots() instead")]
     pub fn mark_roots(&mut self, partition_id: GcPartitionId, tracer: &mut GcTracer) {
         if let Some(roots) = self.partition_roots.get(&partition_id) {
-            for p in roots {
+            for ptr in roots {
                 unsafe {
-                    debug_assert_eq!(p.as_ref().get_partition_id(), partition_id);
+                    let head = ptr.as_ref();
+                    debug_assert_eq!(head.get_partition_id(), partition_id);
 
-                    if !(*p.as_ptr()).is_marked() {
-                        (*p.as_ptr()).set_marked(true);
+                    if !head.is_marked() {
+                        (*ptr.as_ptr()).set_marked(true);
 
-                        let payload = (p.as_ptr() as *mut u8).add(std::mem::size_of::<GcHead>());
-                        let trace_fn = (*p.as_ptr()).get_trace_fn(&self.type_registry);
-                        trace_fn(payload, tracer);
+                        let trace_fn = head.get_trace_fn(&self.type_registry);
+                        let payload = ptr.cast::<u8>().add(std::mem::size_of::<GcHead>());
+                        trace_fn(payload.as_ptr(), tracer);
                     }
                 }
             }
         }
 
-        while let Some(p) = tracer.next_header() {
+        while let Some(p) = tracer.pendings.pop() {
             unsafe {
-                if p.as_ref().get_partition_id() == partition_id {
-                    let head = p.as_ptr();
-                    if !(*head).is_marked() {
-                        (*head).set_marked(true);
+                let head = p.as_ptr();
+                if (*head).get_partition_id() == partition_id && !(*head).is_marked() {
+                    (*head).set_marked(true);
 
-                        let payload = (head as *mut u8).add(std::mem::size_of::<GcHead>());
-                        let trace_fn = (*head).get_trace_fn(&self.type_registry);
-                        trace_fn(payload, tracer);
-                    }
-                } else {
-                    // #[cfg(debug_assertions)]
-                    // unreachable!(
-                    //     "marking a gc object in difference paritition, expect {partition_id:?}, found {:?}",
-                    //     p.as_ref().get_partition_id()
-                    // );
+                    let payload = (head as *mut u8).add(std::mem::size_of::<GcHead>());
+                    let trace_fn = (*head).get_trace_fn(&self.type_registry);
+                    trace_fn(payload, tracer);
                 }
             }
         }
@@ -92,14 +99,14 @@ impl GcHeap {
         excl_types: Option<&[u16]>,
         keep_mark: bool,
     ) -> usize {
-        let head = match self.partition_heads.get_mut(&partition_id) {
-            Some(head) => *head,
+        let chain = match self.partition_heads.get_mut(&partition_id) {
+            Some(p) => *p,
             None => {
                 return 0;
             }
         };
 
-        let mut current = head;
+        let mut current = chain;
         let mut prev: Option<NonNull<GcHead>> = None;
         let mut freed_bytes = 0;
 
@@ -145,7 +152,6 @@ impl GcHeap {
                         }
                     }
 
-                    // Release
                     freed_bytes += self.dispose(p);
                 } else {
                     // Reset mark bits for next GC
@@ -165,57 +171,40 @@ impl GcHeap {
     }
 
     /// Dispose a node
-    pub(super) unsafe fn dispose(&mut self, p: NonNull<GcHead>) -> usize {
-        if let Some(weak_ref_index) = unsafe { (*p.as_ptr()).get_weak_ref_index() } {
-            debug_assert!(weak_ref_index < self.weak_list.len());
-            self.weak_list[weak_ref_index].1.take();
+    pub(super) unsafe fn dispose(&mut self, node: NonNull<GcHead>) -> usize {
+        let type_idx = unsafe { (*node.as_ptr()).type_id() };
+        debug_assert_ne!(type_idx, 0);
+
+        // clear weakref
+        if let Some(weakref_index) = unsafe { (*node.as_ptr()).weakref_index() } {
+            debug_assert!(weakref_index < self.weak_list.len());
             unsafe {
-                (*p.as_ptr()).set_weak_ref_index(None);
+                self.weak_list.get_unchecked_mut(weakref_index).1.take();
+                (*node.as_ptr()).set_weakref_index(None);
             }
         }
 
-        let type_idx = unsafe { (*p.as_ptr()).type_id() };
-        debug_assert_ne!(type_idx, 0);
-
         let (size, dispose_fn) = self
             .type_registry
-            .with_type_id(type_idx, |t| {
-                (
-                    t.size,
-                    if t.needs_drop {
-                        Some(t.dispose_fn)
-                    } else {
-                        None
-                    },
-                )
-            })
+            .with_type_id(type_idx, |t| (t.size, t.dispose_fn))
             .unwrap();
 
         let gross_size = std::mem::size_of::<GcHead>() + size;
 
-        // 调用dispose函数
         if let Some(f) = dispose_fn {
-            let payload_ptr = unsafe { (p.as_ptr() as *mut u8).add(std::mem::size_of::<GcHead>()) };
-            unsafe { f(payload_ptr) };
+            unsafe {
+                let payload = (node.as_ptr() as *mut u8).add(std::mem::size_of::<GcHead>());
+                f(payload);
+            }
         }
 
-        // 释放内存
         Allocator::deallocate(
-            unsafe { NonNull::new_unchecked(p.as_ptr().cast::<u8>()) },
+            unsafe { NonNull::new_unchecked(node.as_ptr().cast::<u8>()) },
             gross_size,
         );
 
         gross_size
     }
-
-    // /// Release object list
-    // fn release(&mut self, free_list: impl Iterator<Item = NonNull<GcHead>>) -> usize {
-    //     let mut size = 0;
-    //     for node in free_list.into_iter() {
-    //         size += unsafe { self.release_node(node) };
-    //     }
-    //     size
-    // }
 
     // /// Analyze object dependencies and release in topological order
     // fn release_with_dependency_analysis(

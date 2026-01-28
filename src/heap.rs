@@ -147,7 +147,7 @@ impl GcHeap {
                         (*header_ptr) = GcHead {
                             flags: 0, // marked=false, root=false
                             type_partition: ((partition_id.0 as u32) << 16) | (type_idx as u32),
-                            weak_ref_index: 0xFFFF, // no weak ref
+                            weakref_index: 0xFFFF, // no weak ref
                             next: None,
                         };
 
@@ -319,11 +319,11 @@ impl GcHeap {
     /// - 如果对象是根对象，会先将其从根对象列表中移除
     /// - 释放后，该引用将变为无效，不应再使用
     pub unsafe fn free_unchecked<T>(&mut self, gc_ref: GcRef<T>) -> GcResult<usize> {
-        let header = gc_ref.head_ptr;
+        let header = gc_ref.head_ptr();
         let partition_id = unsafe { header.as_ref().get_partition_id() };
         debug_assert_ne!(partition_id, GcPartitionId::NONE);
 
-        if !self.contains_internal(header) {
+        if !self.contains(header) {
             // not allocated in this heap
             return Err(GcError::InvalidReference);
         }
@@ -339,10 +339,6 @@ impl GcHeap {
         unsafe { Ok(self.dispose(header)) }
     }
 
-    //
-    // Other
-    //
-
     /// Check if object is referenced by other objects
     fn is_node_referenced<T>(&mut self, gc_ref: GcRef<T>) -> GcResult<bool> {
         unsafe {
@@ -355,27 +351,22 @@ impl GcHeap {
             }
 
             // Verify object is allocated from this context
-            if !self.contains_internal(target) {
+            if !self.contains(target) {
                 return Err(GcError::InvalidReference);
             }
 
-            let mut referenced = false;
-            let mut tracer = GcTracer::new();
+            // Check if specified object references target object master -> slave
+            let check_obj_reference =
+                |master: NonNull<GcHead>, slave: NonNull<GcHead>, tracer: &mut GcTracer| -> bool {
+                    // Call master's trace function to trace all objects it references
+                    let payload = (master.as_ptr() as *mut u8).add(std::mem::size_of::<GcHead>());
+                    let trace_fn = master.as_ref().get_trace_fn(&self.type_registry);
+                    tracer.clear();
+                    trace_fn(payload, tracer);
 
-            // Check if specified object references target object source -> target
-            let check_obj_reference = |source: NonNull<GcHead>,
-                                       target: NonNull<GcHead>,
-                                       tracer: &mut crate::trace::GcTracer|
-             -> bool {
-                // Call source object's trace function to trace all objects it references
-                let payload_ptr = (source.as_ptr() as *mut u8).add(std::mem::size_of::<GcHead>());
-                let trace_fn = source.as_ref().get_trace_fn(&self.type_registry);
-                tracer.clear();
-                trace_fn(payload_ptr, tracer);
-
-                // Check if target object is included in trace results
-                tracer.mark_cache.iter().any(|h| *h == target)
-            };
+                    // Check if target object is included in trace results
+                    tracer.pendings.iter().any(|h| *h == slave)
+                };
 
             // Get partition list head, manually traverse to avoid borrow conflicts
             let head = match self.partition_heads.get(&partition_id) {
@@ -383,7 +374,10 @@ impl GcHeap {
                 None => return Ok(false),
             };
 
+            let mut referenced = false;
+            let mut tracer = GcTracer::new(self, partition_id);
             let mut current = head;
+
             while let Some(node) = current {
                 if node != target {
                     // Check if this object references target object
@@ -408,26 +402,26 @@ impl GcHeap {
         }
     }
 
-    /// Check if GcRef is allocated from this context
-    ///
-    /// # Parameters
-    /// - `gc_ref`: Garbage collection reference to check
-    ///
-    /// # Return Value
-    /// - `true`: If the reference is allocated by this GcHeap
-    /// - `false`: If the reference is not allocated by this GcHeap
-    ///
-    /// # Notes
-    /// This method only checks if the reference is from the current context, it does not check if the reference is still valid
-    #[inline(always)]
-    pub fn contains<T>(&self, gc_ref: &GcRef<T>) -> bool {
-        self.contains_internal(gc_ref.head_ptr)
-    }
+    // /// Check if GcRef is allocated from this context
+    // ///
+    // /// # Parameters
+    // /// - `gc_ref`: Garbage collection reference to check
+    // ///
+    // /// # Return Value
+    // /// - `true`: If the reference is allocated by this GcHeap
+    // /// - `false`: If the reference is not allocated by this GcHeap
+    // ///
+    // /// # Notes
+    // /// This method only checks if the reference is from the current context, it does not check if the reference is still valid
+    // #[inline(always)]
+    // pub fn contains<T>(&self, gc_ref: &GcRef<T>) -> bool {
+    //     self.contains_internal(gc_ref.head_ptr)
+    // }
 
-    /// Verify object is allocated from this heap
-    fn contains_internal(&self, header: NonNull<GcHead>) -> bool {
+    /// Check if node is allocated in this heap
+    pub fn contains(&self, node: NonNull<GcHead>) -> bool {
         unsafe {
-            let partition_id = header.as_ref().get_partition_id();
+            let partition_id = node.as_ref().get_partition_id();
 
             // Check if partition exists
             if self.partitions.partition(partition_id).is_none() {
@@ -437,11 +431,11 @@ impl GcHeap {
             // Check if object is in partition's list
             if let Some(head) = self.partition_heads.get(&partition_id) {
                 let mut current = *head;
-                while let Some(node) = current {
-                    if node == header {
+                while let Some(p) = current {
+                    if p == node {
                         return true;
                     }
-                    current = (*node.as_ptr()).next;
+                    current = (*p.as_ptr()).next;
                 }
             }
 
@@ -552,11 +546,6 @@ pub(super) unsafe fn trace_fn<T: GcTracable>(data_ptr: *mut u8, tracer: &mut cra
 pub(super) unsafe fn dispose_fn<T>(data_ptr: *mut u8) {
     let typed_ptr = data_ptr as *mut T;
     unsafe { std::ptr::drop_in_place(typed_ptr) };
-}
-
-/// Empty dispose function, for types that don't need Drop
-pub(super) unsafe fn noop_dispose_fn(_data_ptr: *mut u8) {
-    // Do nothing
 }
 
 #[cfg(test)]
