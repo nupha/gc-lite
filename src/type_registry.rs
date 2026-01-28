@@ -7,11 +7,12 @@ use crate::{GcHeap, GcTracable, GcTracer};
 
 #[derive(Debug)]
 pub(super) struct TypeInfo {
-    pub(super) type_name: &'static str,
-    pub(super) size: usize,
-    pub(super) needs_drop: bool,
+    pub(super) size: u32,
     pub(super) trace_fn: unsafe fn(*mut u8, &mut GcTracer),
     pub(super) dispose_fn: Option<unsafe fn(*mut u8)>,
+
+    #[cfg(debug_assertions)]
+    pub(super) type_name: &'static str,
 }
 
 /// Type registry
@@ -19,9 +20,7 @@ pub(crate) struct TypeRegistry {
     /// type_info registry list
     entries: Vec<TypeInfo>,
     /// type ident to idx lookup table
-    type_to_id: HashMap<std::any::TypeId, u16>,
-    /// type name to type id lookup table
-    type_name_to_id: HashMap<&'static str, u16>,
+    type_to_idx: HashMap<std::any::TypeId, u8>,
 }
 
 impl TypeRegistry {
@@ -32,49 +31,50 @@ impl TypeRegistry {
         entries.push(TypeInfo {
             type_name: "",
             size: 0,
-            needs_drop: false,
             trace_fn: noop_trace_fn,
             dispose_fn: None,
         });
 
         Self {
             entries,
-            type_to_id: HashMap::new(),
-            type_name_to_id: HashMap::new(),
+            type_to_idx: HashMap::with_capacity(8),
         }
     }
 
     #[inline(always)]
-    pub fn type_id_of<T: GcTracable + 'static>(&self) -> Option<u16> {
-        self.type_to_id.get(&std::any::TypeId::of::<T>()).copied()
+    pub fn type_id_of<T: GcTracable + 'static>(&self) -> Option<u8> {
+        self.type_to_idx.get(&std::any::TypeId::of::<T>()).copied()
     }
 
     /// Register new type
-    pub(crate) fn register<T: GcTracable + 'static>(&mut self) -> u16 {
+    pub(crate) fn register<T: GcTracable + 'static>(&mut self) -> u8 {
         let type_ident = std::any::TypeId::of::<T>();
         let type_name = std::any::type_name::<T>();
 
-        if let Some(&idx) = self.type_to_id.get(&type_ident) {
+        if let Some(&idx) = self.type_to_idx.get(&type_ident) {
             idx
         } else {
             // Create type entry
-            let type_idx = self.entries.len() as u16;
+            let type_idx = self.entries.len();
             debug_assert!(type_idx != 0);
+            if type_idx == u8::MAX as usize {
+                panic!("too may node types: 255 in max");
+            }
+            let type_idx = type_idx as u8;
 
             let info = TypeInfo {
-                type_name,
-                size: std::mem::size_of::<T>(),
-                needs_drop: std::mem::needs_drop::<T>(),
+                size: std::mem::size_of::<T>() as u32,
                 trace_fn: trace_fn::<T>,
                 dispose_fn: if std::mem::needs_drop::<T>() {
                     Some(dispose_fn::<T>)
                 } else {
                     None
                 },
+                #[cfg(debug_assertions)]
+                type_name,
             };
             self.entries.push(info);
-            self.type_to_id.insert(type_ident, type_idx);
-            self.type_name_to_id.insert(type_name, type_idx);
+            self.type_to_idx.insert(type_ident, type_idx);
 
             type_idx
         }
@@ -82,11 +82,7 @@ impl TypeRegistry {
 
     /// Get type information by type index
     #[inline(always)]
-    pub(crate) fn with_type_id<R>(
-        &self,
-        type_id: u16,
-        f: impl FnOnce(&TypeInfo) -> R,
-    ) -> Option<R> {
+    pub(crate) fn with_type_id<R>(&self, type_id: u8, f: impl FnOnce(&TypeInfo) -> R) -> Option<R> {
         debug_assert!(type_id != 0);
         self.entries.get(type_id as usize).map(f)
     }
@@ -102,16 +98,12 @@ unsafe fn noop_trace_fn(_: *mut u8, _: &mut GcTracer) {}
 
 /// Generic dispose function, used to call drop_in_place of specific type
 unsafe fn dispose_fn<T>(data_ptr: *mut u8) {
-    let typed_ptr = data_ptr as *mut T;
-    unsafe { std::ptr::drop_in_place(typed_ptr) };
+    unsafe { std::ptr::drop_in_place(data_ptr.cast::<T>()) };
 }
-
-/// Empty dispose function, for types that don't need Drop
-unsafe fn noop_dispose_fn(_data_ptr: *mut u8) {}
 
 impl GcHeap {
     #[inline(always)]
-    pub fn type_id_of<T: GcTracable + 'static>(&self) -> Option<u16> {
+    pub fn type_id_of<T: GcTracable + 'static>(&self) -> Option<u8> {
         self.type_registry.type_id_of::<T>()
     }
 }

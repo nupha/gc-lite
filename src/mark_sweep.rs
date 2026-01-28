@@ -4,7 +4,7 @@
 use std::ptr::NonNull;
 
 use crate::{
-    GcHeap, allocator::Allocator, node::GcHead, partition::GcPartitionId, trace::GcTracer,
+    GcHeap, allocator::GcAllocator, node::GcHead, partition::GcPartitionId, trace::GcTracer,
 };
 
 impl GcHeap {
@@ -95,8 +95,8 @@ impl GcHeap {
         &mut self,
         partition_id: GcPartitionId,
         force: bool,
-        incl_types: Option<&[u16]>,
-        excl_types: Option<&[u16]>,
+        incl_types: Option<&[u8]>,
+        excl_types: Option<&[u8]>,
         keep_mark: bool,
     ) -> usize {
         let chain = match self.partition_heads.get_mut(&partition_id) {
@@ -186,7 +186,7 @@ impl GcHeap {
 
         let (size, dispose_fn) = self
             .type_registry
-            .with_type_id(type_idx, |t| (t.size, t.dispose_fn))
+            .with_type_id(type_idx, |t| (t.size as usize, t.dispose_fn))
             .unwrap();
 
         let gross_size = std::mem::size_of::<GcHead>() + size;
@@ -198,7 +198,7 @@ impl GcHeap {
             }
         }
 
-        Allocator::deallocate(
+        GcAllocator::deallocate(
             unsafe { NonNull::new_unchecked(node.as_ptr().cast::<u8>()) },
             gross_size,
         );

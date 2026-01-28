@@ -5,7 +5,7 @@ use std::{collections::HashMap, marker::PhantomData, ptr::NonNull};
 
 use crate::{
     GcError, GcResult, GcTracer,
-    allocator::Allocator,
+    allocator::GcAllocator,
     node::{GcHead, GcHeadFlag, GcRef},
     partition::{GcPartitionId, GcPartitionMgr},
     trace::GcTracable,
@@ -133,7 +133,7 @@ impl GcHeap {
                     debug_assert!(type_idx != 0);
 
                     // Allocate memory
-                    let ptr = match Allocator::allocate(gross_size) {
+                    let ptr = match GcAllocator::allocate(gross_size) {
                         Some(p) => p,
                         None => {
                             return Err((GcError::AllocationFailed, data));
@@ -149,15 +149,16 @@ impl GcHeap {
                                 #[cfg(debug_assertions)]
                                 {
                                     0xFF00_0000
+                                        | ((type_idx as u32) << 8)
                                         | (GcHeadFlag::empty().union(GcHeadFlag::MAGIC_NUM).bits()
                                             as u32)
                                 }
                                 #[cfg(not(debug_assertions))]
                                 {
-                                    0xFF00_0000
+                                    0xFF00_0000 | ((type_idx as u32) << 8)
                                 }
                             },
-                            type_partition: ((partition_id.0 as u32) << 16) | (type_idx as u32),
+                            partition: 0, // NONE
                             next: None,
                         };
 
@@ -189,23 +190,26 @@ impl GcHeap {
         }
     }
 
-    /// Attach a node to chain
-    #[inline(always)]
+    /// Attach a node to partition
+    #[inline]
     pub(crate) fn attach(&mut self, partition_id: GcPartitionId, node: NonNull<GcHead>) {
-        let head = self.partition_heads.entry(partition_id).or_insert(None);
         unsafe {
-            (*node.as_ptr()).next = *head;
-            *head = Some(node);
+            debug_assert_eq!(node.as_ref().get_partition_id(), GcPartitionId::NONE);
+            (*node.as_ptr()).set_partition_id(partition_id);
+
+            let chain = self.partition_heads.entry(partition_id).or_insert(None);
+            (*node.as_ptr()).next = *chain;
+            *chain = Some(node);
         }
     }
 
-    /// Remove a node from chain
+    /// Remove a node from partition
     pub(crate) fn detach(&mut self, node: NonNull<GcHead>) {
         let partition_id = unsafe { node.as_ref().get_partition_id() };
         if partition_id != GcPartitionId::NONE {
-            let head = self.partition_heads.get_mut(&partition_id).unwrap();
+            let chain = self.partition_heads.get_mut(&partition_id).unwrap();
 
-            let mut current = *head;
+            let mut current = *chain;
             let mut prev: Option<NonNull<GcHead>> = None;
 
             while let Some(header) = current {
@@ -215,7 +219,7 @@ impl GcHeap {
                         if let Some(mut p) = prev {
                             p.as_mut().next = header.as_ref().next;
                         } else {
-                            *head = header.as_ref().next;
+                            *chain = header.as_ref().next;
                         }
 
                         if node.as_ref().is_root() {
@@ -226,7 +230,7 @@ impl GcHeap {
                         }
 
                         // clear partition id
-                        (*node.as_ptr()).type_partition = node.as_ref().type_id() as _;
+                        (*node.as_ptr()).partition = GcPartitionId::NONE.0 as _;
 
                         return;
                     }
@@ -461,14 +465,8 @@ impl GcHeap {
             self.detach(node);
         }
 
-        // Update the object's partition ID
-        unsafe {
-            let type_idx = node.as_ref().type_id();
-            debug_assert_ne!(type_idx, 0);
-            (*node.as_ptr()).type_partition = ((dest.0 as u32) << 16) | (type_idx as u32);
-        }
-
         self.attach(dest, node);
+
         if is_root {
             self.set_root_internal(node, true);
         }
@@ -504,14 +502,9 @@ impl GcHeap {
 
                 while let Some(node) = current {
                     unsafe {
-                        // Update the object's partition ID (high 16-bits)
-                        let type_idx = node.as_ref().type_id();
-                        debug_assert_ne!(type_idx, 0);
+                        // Update the node's partition ID
                         debug_assert_eq!(node.as_ref().get_partition_id(), partition_id);
-
-                        (*node.as_ptr()).type_partition =
-                            ((parent.0 as u32) << 16) | (type_idx as u32);
-
+                        (*node.as_ptr()).partition = parent.0 as _;
                         last = node;
                         current = node.as_ref().next;
                     }

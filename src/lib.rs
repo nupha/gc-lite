@@ -10,6 +10,7 @@ mod partition;
 mod trace;
 mod type_registry;
 mod weak;
+mod xref;
 
 pub use {
     heap::GcHeap,

@@ -28,16 +28,24 @@ bitflags::bitflags! {
 pub struct GcHead {
     /// Attributes of node:
     /// * bit 24-31: weak reference index, u8::MAX means none
+    /// * bit 8-16:  type id
     /// * bit 0-7:   flags
     pub(super) attrs: u32,
 
-    /// Partition ID + Type IDX (16 bits each)
-    pub(super) type_partition: u32,
+    /// XRef partition id (16bit) + Partition id (16bit)
+    pub(super) partition: u32,
+
     /// Pointer to next object (for list traversal)
     pub(super) next: Option<NonNull<GcHead>>,
 }
 
 impl GcHead {
+    /// Get type id
+    #[inline(always)]
+    pub fn type_id(&self) -> u8 {
+        ((self.attrs & 0xFF00) >> 8) as u8
+    }
+
     #[inline(always)]
     pub(crate) fn flags(&self) -> GcHeadFlag {
         GcHeadFlag::from_bits_truncate(self.attrs as u8)
@@ -86,13 +94,16 @@ impl GcHead {
     /// Get partition ID
     #[inline(always)]
     pub fn get_partition_id(&self) -> GcPartitionId {
-        crate::partition::GcPartitionId((self.type_partition >> 16) as u16)
+        GcPartitionId(self.partition as u16)
     }
 
-    /// Get type ID
+    /// Set partition ID
     #[inline(always)]
-    pub fn type_id(&self) -> u16 {
-        (self.type_partition & 0xFFFF) as u16
+    pub(crate) fn set_partition_id(&mut self, id: GcPartitionId) {
+        debug_assert!(
+            self.get_partition_id() == GcPartitionId::NONE || self.get_partition_id() == id
+        );
+        self.partition = self.partition & 0xFFFF_0000 | id.0 as u32;
     }
 
     #[inline(always)]

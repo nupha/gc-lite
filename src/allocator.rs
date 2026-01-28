@@ -6,9 +6,9 @@ use std::{
     ptr::NonNull,
 };
 
-pub(crate) struct Allocator;
+pub(crate) struct GcAllocator;
 
-impl Allocator {
+impl GcAllocator {
     /// Allocate memory of specified size
     pub fn allocate(size: usize) -> Option<NonNull<u8>> {
         if size == 0 {
@@ -49,12 +49,12 @@ mod tests {
 
     #[test]
     fn test_allocate_deallocate() {
-        let ptr = Allocator::allocate(100).unwrap();
-        Allocator::deallocate(ptr, 100);
+        let ptr = GcAllocator::allocate(100).unwrap();
+        GcAllocator::deallocate(ptr, 100);
     }
 
     #[test]
     fn test_zero_allocation() {
-        debug_assert!(Allocator::allocate(0).is_none());
+        debug_assert!(GcAllocator::allocate(0).is_none());
     }
 }

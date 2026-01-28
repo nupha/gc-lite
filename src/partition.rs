@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::Cell, collections::HashMap};
+use std::{
+    cell::Cell,
+    collections::{HashMap, HashSet},
+};
 
 use crate::GcHeap;
 
@@ -292,16 +295,16 @@ impl GcPartitionMgr {
     /// Check if the given partition ID is an ancestor of the specified partition
     ///
     /// # Parameters
-    /// - `id`: The partition ID to check
+    /// - `this`: The target partition to check
     /// - `ancestor`: The potential ancestor partition ID
     ///
     /// # Returns
-    /// `true` if `ancestor` is an ancestor of `id`, `false` otherwise
-    pub fn is_ancestor_of(&self, id: GcPartitionId, ancestor: GcPartitionId) -> bool {
-        debug_assert_ne!(id, GcPartitionId::NONE);
+    /// `true` if `ancestor` is an ancestor of `this`, `false` otherwise
+    pub fn is_ancestor_of(&self, this: GcPartitionId, ancestor: GcPartitionId) -> bool {
+        debug_assert_ne!(this, GcPartitionId::NONE);
         debug_assert_ne!(ancestor, GcPartitionId::NONE);
 
-        let mut current_id = id;
+        let mut current_id = this;
         while current_id != GcPartitionId::NONE {
             if current_id == ancestor {
                 return true;
@@ -316,6 +319,48 @@ impl GcPartitionMgr {
         }
 
         false
+    }
+
+    /// Find the nearest common parent partition of two partitions
+    ///
+    /// # Parameters
+    /// - `p1`: First partition ID
+    /// - `p2`: Second partition ID
+    ///
+    /// # Returns
+    /// The nearest common parent partition ID, or `GcPartitionId::NONE` if no common ancestor
+    pub fn common_parent(&self, p1: GcPartitionId, p2: GcPartitionId) -> GcPartitionId {
+        // Edge cases
+        if p1 == GcPartitionId::NONE || p2 == GcPartitionId::NONE {
+            return GcPartitionId::NONE;
+        } else if p1 == p2 {
+            return p1;
+        }
+
+        // Collect p1's ancestors into a HashSet
+        let mut ancestors = HashSet::new();
+        let mut current = p1;
+        while current != GcPartitionId::NONE {
+            ancestors.insert(current);
+            match self.partitions.get(&current) {
+                Some(partition) => current = partition.parent,
+                None => return GcPartitionId::NONE,
+            }
+        }
+
+        // Find the first ancestor of p2 that is in the set
+        current = p2;
+        while current != GcPartitionId::NONE {
+            if ancestors.contains(&current) {
+                return current;
+            }
+            match self.partitions.get(&current) {
+                Some(partition) => current = partition.parent,
+                None => return GcPartitionId::NONE,
+            }
+        }
+
+        GcPartitionId::NONE
     }
 }
 
@@ -375,18 +420,27 @@ impl GcHeap {
     /// Check if the given partition is an ancestor of another partition
     ///
     /// # Parameters
-    /// - `ancestor`: The partition be ancestor
-    /// - `descendant`: The partition be descendant
+    /// - `upper`: The partition supposed to be ancestor
+    /// - `lower`: The partition supposed to be descendant
     ///
     /// # Returns
-    /// `true` if `ancestor` is an ancestor of `descendant`, `false` otherwise
+    /// `true` if `upper` is an ancestor of `lower`, `false` otherwise
     #[inline(always)]
-    pub fn check_partition_ancestor(
-        &self,
-        ancestor: GcPartitionId,
-        descendant: GcPartitionId,
-    ) -> bool {
-        self.partitions.is_ancestor_of(descendant, ancestor)
+    pub fn check_partition_ancestor(&self, upper: GcPartitionId, lower: GcPartitionId) -> bool {
+        self.partitions.is_ancestor_of(lower, upper)
+    }
+
+    /// Find the nearest common parent partition of two partitions
+    ///
+    /// # Parameters
+    /// - `p1`: First partition ID
+    /// - `p2`: Second partition ID
+    ///
+    /// # Returns
+    /// The nearest common parent partition ID, or `GcPartitionId::NONE` if no common ancestor
+    #[inline(always)]
+    pub fn common_parent(&self, p1: GcPartitionId, p2: GcPartitionId) -> GcPartitionId {
+        self.partitions.common_parent(p1, p2)
     }
 }
 
@@ -650,5 +704,104 @@ mod tests {
         assert!(!manager.is_ancestor_of(child_id, sibling_id));
         assert!(!manager.is_ancestor_of(sibling_id, grandchild_id));
         assert!(!manager.is_ancestor_of(grandchild_id, sibling_id));
+    }
+
+    #[test]
+    fn test_common_parent() {
+        let mut manager = GcPartitionMgr::new();
+
+        // Create hierarchy:
+        // root_id
+        //   ├── child1_id
+        //   │   └── grandchild1_id
+        //   └── child2_id
+        //       └── grandchild2_id
+        let root_id = manager.create_partition(Some(2048), GcPartitionId::NONE);
+        let child1_id = manager.create_partition(Some(1024), root_id);
+        let child2_id = manager.create_partition(Some(1024), root_id);
+        let grandchild1_id = manager.create_partition(Some(512), child1_id);
+        let grandchild2_id = manager.create_partition(Some(512), child2_id);
+
+        // Same partition
+        assert_eq!(manager.common_parent(root_id, root_id), root_id);
+        assert_eq!(manager.common_parent(child1_id, child1_id), child1_id);
+        assert_eq!(
+            manager.common_parent(grandchild1_id, grandchild1_id),
+            grandchild1_id
+        );
+
+        // Direct parent-child
+        assert_eq!(manager.common_parent(child1_id, root_id), root_id);
+        assert_eq!(manager.common_parent(root_id, child1_id), root_id);
+        assert_eq!(manager.common_parent(grandchild1_id, child1_id), child1_id);
+        assert_eq!(manager.common_parent(child1_id, grandchild1_id), child1_id);
+
+        // Sibling partitions - common parent is the root
+        assert_eq!(manager.common_parent(child1_id, child2_id), root_id);
+        assert_eq!(manager.common_parent(child2_id, child1_id), root_id);
+
+        // Grandchild from different subtrees - common parent is root
+        assert_eq!(
+            manager.common_parent(grandchild1_id, grandchild2_id),
+            root_id
+        );
+        assert_eq!(
+            manager.common_parent(grandchild2_id, grandchild1_id),
+            root_id
+        );
+
+        // Grandchild and child from different subtrees
+        assert_eq!(manager.common_parent(grandchild1_id, child2_id), root_id);
+        assert_eq!(manager.common_parent(child1_id, grandchild2_id), root_id);
+    }
+
+    #[test]
+    fn test_common_parent_none_cases() {
+        let mut manager = GcPartitionMgr::new();
+
+        let root_id = manager.create_partition(Some(2048), GcPartitionId::NONE);
+        let child_id = manager.create_partition(Some(1024), root_id);
+
+        // NONE cases
+        assert_eq!(
+            manager.common_parent(GcPartitionId::NONE, child_id),
+            GcPartitionId::NONE
+        );
+        assert_eq!(
+            manager.common_parent(child_id, GcPartitionId::NONE),
+            GcPartitionId::NONE
+        );
+        assert_eq!(
+            manager.common_parent(GcPartitionId::NONE, GcPartitionId::NONE),
+            GcPartitionId::NONE
+        );
+
+        // Clean up
+        manager.remove_partition(root_id);
+    }
+
+    #[test]
+    fn test_common_parent_different_trees() {
+        let mut manager = GcPartitionMgr::new();
+
+        // Create two separate root partitions (different trees)
+        let root1_id = manager.create_partition(Some(2048), GcPartitionId::NONE);
+        let root2_id = manager.create_partition(Some(2048), GcPartitionId::NONE);
+        let child1_id = manager.create_partition(Some(1024), root1_id);
+        let child2_id = manager.create_partition(Some(1024), root2_id);
+
+        // Different trees should have no common parent
+        assert_eq!(
+            manager.common_parent(child1_id, child2_id),
+            GcPartitionId::NONE
+        );
+        assert_eq!(
+            manager.common_parent(root1_id, root2_id),
+            GcPartitionId::NONE
+        );
+
+        // Clean up
+        manager.remove_partition(root1_id);
+        manager.remove_partition(root2_id);
     }
 }
