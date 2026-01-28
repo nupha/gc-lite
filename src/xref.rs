@@ -20,8 +20,8 @@ impl GcHead {
 
 impl GcHeap {
     /// Updates the node's cross-reference partition to a more general ancestor.
-    /// Only updates if from_partition is higher than both node's partition and the existing xref.
-    pub fn set_xref(&mut self, from_partition: GcPartitionId, node: &mut GcHead) {
+    /// Returns true if node's xref was updated, false if not.
+    pub fn set_xref(&mut self, from_partition: GcPartitionId, node: &mut GcHead) -> bool {
         debug_assert_ne!(from_partition, GcPartitionId::NONE);
 
         let node_pid = node.get_partition_id();
@@ -31,31 +31,36 @@ impl GcHeap {
         let up = self.common_parent(node_pid, from_partition);
         debug_assert_ne!(up, GcPartitionId::NONE);
 
+        // If up equals node_partition, from_partition is not higher - no update
         if up == node_pid {
-            return;
+            return false;
         }
 
-        // Step 2: Get existing xref (xref0)
+        // Get existing xref (xref0)
         let xref0 = node.xref_partition();
 
         if xref0 == GcPartitionId::NONE {
             node.set_xref_partition(up);
-            return;
+            return true;
         }
 
         // Step 3: Check if from_partition is the parent of xref0
         if self.check_partition_ancestor(from_partition, xref0) {
             node.set_xref_partition(from_partition);
-            return;
+            return true;
         }
 
         // Step 4: Find common parent of (xref0, up)
         let up = self.common_parent(xref0, up);
         debug_assert_ne!(up, GcPartitionId::NONE);
 
+        // Update if up differs from xref0
         if up != xref0 {
             node.set_xref_partition(up);
+            return true;
         }
+
+        false
     }
 }
 
@@ -84,7 +89,7 @@ mod xref_tests {
     }
 
     /// 测试场景1: from_partition 比 node_partition 更上级, xref0 不存在
-    /// 预期: xref 设置为 up
+    /// 预期: 返回 true, xref 更新
     #[test]
     fn test_set_xref_no_existing_xref() {
         let mut heap = GcHeap::new();
@@ -104,12 +109,14 @@ mod xref_tests {
             assert_eq!(node.as_ref().xref_partition(), GcPartitionId::NONE);
         }
 
-        // 调用 set_xref
-        heap.set_xref(from_pid, unsafe { &mut *node.as_ptr() });
+        let result = heap.set_xref(from_pid, unsafe { &mut *node.as_ptr() });
+        assert!(
+            result,
+            "set_xref should return true when xref does not exist"
+        );
 
-        // 预期: xref 设置为 up (Root)
         unsafe {
-            assert_eq!(node.as_ref().xref_partition(), root_id);
+            assert_eq!(node.as_ref().xref_partition(), from_pid);
         }
     }
 
