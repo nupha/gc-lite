@@ -145,15 +145,14 @@ impl GcHeap {
                         let header_ptr = ptr.as_ptr().cast::<GcHead>();
 
                         (*header_ptr) = GcHead {
-                            flags: 0, // marked=false, root=false
+                            flags: 0xFFFF_0000, // no weak ref
                             type_partition: ((partition_id.0 as u32) << 16) | (type_idx as u32),
-                            weakref_index: 0xFFFF, // no weak ref
                             next: None,
                         };
 
                         #[cfg(debug_assertions)]
                         {
-                            (*header_ptr).flags = super::node::GC_HEAD_MAGIC;
+                            (*header_ptr).flags |= super::node::GC_HEAD_MAGIC as u32;
                         }
 
                         // Initialize data

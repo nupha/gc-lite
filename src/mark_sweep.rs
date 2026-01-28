@@ -177,7 +177,11 @@ impl GcHeap {
 
         // clear weakref
         if let Some(weakref_index) = unsafe { (*node.as_ptr()).weakref_index() } {
-            debug_assert!(weakref_index < self.weak_list.len());
+            debug_assert!(
+                weakref_index < self.weak_list.len(),
+                "{weakref_index}, {:?}",
+                self.weak_list.len()
+            );
             unsafe {
                 self.weak_list.get_unchecked_mut(weakref_index).1.take();
                 (*node.as_ptr()).set_weakref_index(None);

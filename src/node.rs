@@ -12,15 +12,13 @@ use crate::{
 #[cfg(debug_assertions)]
 pub(super) const GC_HEAD_MAGIC: u8 = 0x50;
 
-/// GC object header
+/// GC node head info
 #[repr(C)]
 pub struct GcHead {
-    /// Mark bits (reachable status) and other flags
-    pub(super) flags: u8,
+    /// High 16bit: weak reference index, u16::MAX means none
+    pub(super) flags: u32,
     /// Partition ID + Type IDX (16 bits each)
     pub(super) type_partition: u32,
-    /// Weak reference index, u16::MAX means none
-    pub(super) weakref_index: u16,
     /// Pointer to next object (for list traversal)
     pub(super) next: Option<NonNull<GcHead>>,
 }
@@ -29,7 +27,7 @@ impl GcHead {
     #[cfg(debug_assertions)]
     #[inline(always)]
     pub fn test_valid(&self) -> bool {
-        self.flags & GC_HEAD_MAGIC == GC_HEAD_MAGIC
+        (self.flags as u8) & GC_HEAD_MAGIC == GC_HEAD_MAGIC
     }
 
     /// Set/clear mark bit
@@ -79,8 +77,9 @@ impl GcHead {
     /// Get weak reference index
     #[inline(always)]
     pub(crate) fn weakref_index(&self) -> Option<usize> {
-        if self.weakref_index != u16::MAX {
-            Some(self.weakref_index as usize)
+        let w = (self.flags >> 16) as u16;
+        if w != u16::MAX {
+            Some(w as usize)
         } else {
             None
         }
@@ -89,7 +88,8 @@ impl GcHead {
     /// Set weak reference index
     #[inline(always)]
     pub(super) fn set_weakref_index(&mut self, index: Option<usize>) {
-        self.weakref_index = index.map(|i| i as u16).unwrap_or(u16::MAX);
+        self.flags = (self.flags & 0x0000_FFFF)
+            | ((index.map(|i| i as u16).unwrap_or(u16::MAX) as u32) << 16);
     }
 
     #[inline(always)]
