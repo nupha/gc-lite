@@ -175,15 +175,11 @@ impl GcHeap {
         let type_idx = unsafe { (*node.as_ptr()).type_id() };
         debug_assert_ne!(type_idx, 0);
 
-        // clear weakref
         if let Some(w) = unsafe { (*node.as_ptr()).weakref_index() } {
-            debug_assert!(
-                (w as usize) < self.weak_list.len(),
-                "{w}, {:?}",
-                self.weak_list.len()
-            );
+            // clear weak slot node pointer - the slot is free now.
+            debug_assert!((w as usize) < self.weak_slots.len());
             unsafe {
-                self.weak_list.get_unchecked_mut(w as usize).1.take();
+                self.weak_slots.get_unchecked_mut(w as usize).1.take();
                 (*node.as_ptr()).set_weakref_index(None);
             }
         }

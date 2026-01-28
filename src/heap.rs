@@ -21,7 +21,7 @@ pub struct GcHeap {
     /// LUT: Root object lists for each partition
     pub(super) partition_roots: HashMap<GcPartitionId, Vec<NonNull<GcHead>>>,
     /// Weak reference list, each slot stores (version, GcHeader)
-    pub(super) weak_list: Vec<(u16, Option<NonNull<GcHead>>)>,
+    pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
     /// Type registry
     pub(super) type_registry: crate::type_registry::TypeRegistry,
 }
@@ -51,7 +51,7 @@ impl GcHeap {
             partitions,
             partition_heads: HashMap::with_capacity(8),
             partition_roots: HashMap::with_capacity(8),
-            weak_list: Vec::new(),
+            weak_slots: Vec::new(),
             type_registry: TypeRegistry::new(),
         }
     }

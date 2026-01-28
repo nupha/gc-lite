@@ -26,6 +26,12 @@ impl<T> Clone for GcWeak<T> {
 
 impl<T> Copy for GcWeak<T> {}
 
+impl<T> Default for GcWeak<T> {
+    fn default() -> Self {
+        Self::new(0xFF, 0xFFFF)
+    }
+}
+
 impl<T> std::fmt::Debug for GcWeak<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "GcWeak({}#{})", self.slot_index(), self.version())
@@ -60,57 +66,52 @@ impl<T> GcWeak<T> {
 
 impl GcHeap {
     /// Create weak reference.
-    ///
-    /// # Safety
-    /// Each gc ref can have 254 weakrefs in max, exceed this count will cause panic.
     pub fn downgrade<T>(&mut self, gc_ref: &GcRef<T>) -> GcWeak<T> {
         let mut node = gc_ref.head_ptr;
 
         if let Some(w) = unsafe { node.as_ref().weakref_index() } {
             // Weakref already exists, reuse it
-            debug_assert!((w as usize) < self.weak_list.len());
-            let (ver, _ptr) = unsafe { self.weak_list.get_unchecked(w as usize) };
-            debug_assert!(!_ptr.is_none());
+            debug_assert!((w as usize) < self.weak_slots.len());
+            let (ver, _ptr) = unsafe { self.weak_slots.get_unchecked(w as usize) };
+            debug_assert!(_ptr.is_some());
             GcWeak::new(w, *ver)
         } else {
+            if self.weak_slots.len() == u8::MAX as usize {
+                panic!("too may living weakrefs");
+            }
+
             // Find a free slot
             let i = self
-                .weak_list
+                .weak_slots
                 .iter()
                 .position(|(_, slot)| slot.is_none())
                 .unwrap_or_else(|| {
                     // No free slots, extend list
-                    let n = self.weak_list.len();
-                    self.weak_list.push((1, None)); // Initial version number is 1
+                    let n = self.weak_slots.len();
+                    self.weak_slots.push((u16::MAX, None));
                     n
                 });
 
-            if i < u8::MAX as usize {
-                unsafe {
-                    node.as_mut().set_weakref_index(Some(i as u8));
-                }
-            } else {
-                panic!("too may weakrefs for node {gc_ref:?}");
-            }
-
-            // Set slot to point to current object, increment version number
-            let curr_ver = unsafe { self.weak_list.get_unchecked(i).0 };
-            let version = if curr_ver == u16::MAX {
-                1
-            } else {
-                curr_ver + 1
-            };
             unsafe {
-                *self.weak_list.get_unchecked_mut(i) = (version, Some(gc_ref.head_ptr));
-            }
+                node.as_mut().set_weakref_index(Some(i as u8));
 
-            GcWeak::new(i as _, version)
+                // Set slot `i` with node pointer and new version number
+                let curr_ver = self.weak_slots.get_unchecked(i).0;
+                let version = if curr_ver == u16::MAX {
+                    1
+                } else {
+                    curr_ver + 1
+                };
+                *self.weak_slots.get_unchecked_mut(i) = (version, Some(gc_ref.head_ptr));
+
+                GcWeak::new(i as _, version)
+            }
         }
     }
 
     /// Upgrade weak reference
     pub fn upgrade<T>(&self, weak_ref: &GcWeak<T>) -> Option<GcRef<T>> {
-        self.weak_list
+        self.weak_slots
             .get(weak_ref.slot_index() as usize)
             .and_then(|(version, node)| {
                 if *version == weak_ref.version() {
@@ -129,14 +130,14 @@ impl GcHeap {
 }
 
 impl GcHead {
-    /// Get weak reference index
+    /// Get weak index
     #[inline(always)]
     pub(crate) fn weakref_index(&self) -> Option<u8> {
         let w = (self.attrs >> 24) as u8;
         if w != u8::MAX { Some(w) } else { None }
     }
 
-    /// Set weak reference index
+    /// Set weak index
     #[inline(always)]
     pub(crate) fn set_weakref_index(&mut self, index: Option<u8>) {
         self.attrs =
