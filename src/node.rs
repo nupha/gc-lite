@@ -9,14 +9,26 @@ use crate::{
     type_registry::TypeRegistry,
 };
 
-#[cfg(debug_assertions)]
-pub(super) const GC_HEAD_MAGIC: u8 = 0x50;
+bitflags::bitflags! {
+    #[repr(transparent)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct GcHeadFlag :u8 {
+        /// is marked
+        const MARKED = 1 << 0;
+        /// is root node
+        const ROOT = 1 << 1;
+
+        #[cfg(debug_assertions)]
+        const MAGIC_NUM = 1 << 7;
+    }
+}
 
 /// GC node head info
 #[repr(C)]
 pub struct GcHead {
-    /// High 16bit: weak reference index, u16::MAX means none
-    pub(super) flags: u32,
+    /// Attributes of node:
+    /// * 24-31 bit: weak reference index, u8::MAX means none
+    pub(super) attrs: u32,
     /// Partition ID + Type IDX (16 bits each)
     pub(super) type_partition: u32,
     /// Pointer to next object (for list traversal)
@@ -24,42 +36,49 @@ pub struct GcHead {
 }
 
 impl GcHead {
+    #[inline(always)]
+    pub(crate) fn flags(&self) -> GcHeadFlag {
+        GcHeadFlag::from_bits_truncate(self.attrs as u8)
+    }
+
     #[cfg(debug_assertions)]
     #[inline(always)]
     pub fn test_valid(&self) -> bool {
-        (self.flags as u8) & GC_HEAD_MAGIC == GC_HEAD_MAGIC
-    }
-
-    /// Set/clear mark bit
-    #[inline(always)]
-    pub(super) fn set_marked(&mut self, marked: bool) {
-        if marked {
-            self.flags |= 0x01;
-        } else {
-            self.flags &= !0x01;
-        }
+        self.flags().contains(GcHeadFlag::MAGIC_NUM)
     }
 
     /// Check if marked
     #[inline(always)]
     pub fn is_marked(&self) -> bool {
-        (self.flags & 0x01) != 0
+        self.flags().contains(GcHeadFlag::MARKED)
     }
 
-    /// Set/clear root object mark bit
-    #[inline(always)]
-    pub(super) fn set_root(&mut self, is_root: bool) {
-        if is_root {
-            self.flags |= 0x02;
+    /// Set/clear mark flag
+    pub(super) fn set_marked(&mut self, mark: bool) {
+        let mut f = self.flags();
+        if mark {
+            f.insert(GcHeadFlag::MARKED);
         } else {
-            self.flags &= !0x02;
+            f.remove(GcHeadFlag::MARKED);
         }
+        self.attrs = (self.attrs & !0xFF) | (f.bits() as u32);
     }
 
-    /// 检查是否为根对象
+    /// Check if root node
     #[inline(always)]
     pub fn is_root(&self) -> bool {
-        (self.flags & 0x02) != 0
+        self.flags().contains(GcHeadFlag::ROOT)
+    }
+
+    /// Set/clear root object flag
+    pub(super) fn set_root(&mut self, is_root: bool) {
+        let mut f = self.flags();
+        if is_root {
+            f.insert(GcHeadFlag::ROOT);
+        } else {
+            f.remove(GcHeadFlag::ROOT);
+        }
+        self.attrs = (self.attrs & !0xFF) | (f.bits() as u32);
     }
 
     /// Get partition ID
@@ -72,24 +91,6 @@ impl GcHead {
     #[inline(always)]
     pub fn type_id(&self) -> u16 {
         (self.type_partition & 0xFFFF) as u16
-    }
-
-    /// Get weak reference index
-    #[inline(always)]
-    pub(crate) fn weakref_index(&self) -> Option<usize> {
-        let w = (self.flags >> 16) as u16;
-        if w != u16::MAX {
-            Some(w as usize)
-        } else {
-            None
-        }
-    }
-
-    /// Set weak reference index
-    #[inline(always)]
-    pub(super) fn set_weakref_index(&mut self, index: Option<usize>) {
-        self.flags = (self.flags & 0x0000_FFFF)
-            | ((index.map(|i| i as u16).unwrap_or(u16::MAX) as u32) << 16);
     }
 
     #[inline(always)]

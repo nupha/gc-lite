@@ -3,7 +3,7 @@
 
 use std::marker::PhantomData;
 
-use crate::{GcRef, heap::GcHeap};
+use crate::{GcHead, GcRef, heap::GcHeap};
 
 /// Weak reference
 pub struct GcWeak<T> {
@@ -59,8 +59,11 @@ impl<T> GcWeak<T> {
 }
 
 impl GcHeap {
-    /// Create weak reference
-    pub fn downgrade<T>(&mut self, gc_ref: &GcRef<T>) -> crate::weak::GcWeak<T> {
+    /// Create weak reference.
+    ///
+    /// # Safety
+    /// Each gc ref can have 254 weakrefs in max, exceed this count will cause panic.
+    pub fn downgrade<T>(&mut self, gc_ref: &GcRef<T>) -> GcWeak<T> {
         unsafe {
             let node = gc_ref.head_ptr.as_ptr();
 
@@ -86,7 +89,11 @@ impl GcHeap {
                         n
                     });
 
-                (*node).set_weakref_index(Some(i));
+                if i < u8::MAX as usize {
+                    (*node).set_weakref_index(Some(i as u8));
+                } else {
+                    panic!("too may weakrefs for node {gc_ref:?}");
+                }
 
                 // Set slot to point to current object, increment version number
                 let curr_ver = self.weak_list[i].0;
@@ -123,6 +130,22 @@ impl GcHeap {
                     _marker: PhantomData,
                 })
             })
+    }
+}
+
+impl GcHead {
+    /// Get weak reference index
+    #[inline(always)]
+    pub(crate) fn weakref_index(&self) -> Option<u8> {
+        let w = (self.attrs >> 24) as u8;
+        if w != u8::MAX { Some(w) } else { None }
+    }
+
+    /// Set weak reference index
+    #[inline(always)]
+    pub(crate) fn set_weakref_index(&mut self, index: Option<u8>) {
+        self.attrs =
+            (self.attrs & 0x00FF_FFFF) | ((index.map(|i| i).unwrap_or(u8::MAX) as u32) << 24);
     }
 }
 

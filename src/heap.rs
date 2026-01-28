@@ -6,7 +6,7 @@ use std::{collections::HashMap, marker::PhantomData, ptr::NonNull};
 use crate::{
     GcError, GcResult, GcTracer,
     allocator::Allocator,
-    node::{GcHead, GcRef},
+    node::{GcHead, GcHeadFlag, GcRef},
     partition::{GcPartitionId, GcPartitionMgr},
     trace::GcTracable,
     type_registry::TypeRegistry,
@@ -145,15 +145,21 @@ impl GcHeap {
                         let header_ptr = ptr.as_ptr().cast::<GcHead>();
 
                         (*header_ptr) = GcHead {
-                            flags: 0xFFFF_0000, // no weak ref
+                            attrs: {
+                                #[cfg(debug_assertions)]
+                                {
+                                    0xFF00_0000
+                                        | (GcHeadFlag::empty().union(GcHeadFlag::MAGIC_NUM).bits()
+                                            as u32)
+                                }
+                                #[cfg(not(debug_assertions))]
+                                {
+                                    0xFF00_0000
+                                }
+                            },
                             type_partition: ((partition_id.0 as u32) << 16) | (type_idx as u32),
                             next: None,
                         };
-
-                        #[cfg(debug_assertions)]
-                        {
-                            (*header_ptr).flags |= super::node::GC_HEAD_MAGIC as u32;
-                        }
 
                         // Initialize data
                         let data_ptr = ptr.as_ptr().add(std::mem::size_of::<GcHead>()).cast::<T>();
