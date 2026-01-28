@@ -27,8 +27,10 @@ bitflags::bitflags! {
 #[repr(C)]
 pub struct GcHead {
     /// Attributes of node:
-    /// * 24-31 bit: weak reference index, u8::MAX means none
+    /// * bit 24-31: weak reference index, u8::MAX means none
+    /// * bit 0-7:   flags
     pub(super) attrs: u32,
+
     /// Partition ID + Type IDX (16 bits each)
     pub(super) type_partition: u32,
     /// Pointer to next object (for list traversal)

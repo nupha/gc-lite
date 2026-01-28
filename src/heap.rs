@@ -20,8 +20,8 @@ pub struct GcHeap {
     pub(super) partition_heads: HashMap<GcPartitionId, Option<NonNull<GcHead>>>,
     /// LUT: Root object lists for each partition
     pub(super) partition_roots: HashMap<GcPartitionId, Vec<NonNull<GcHead>>>,
-    /// Weak reference list, each slot stores (version, CompactGcHeader)
-    pub(super) weak_list: Vec<(u32, Option<NonNull<GcHead>>)>,
+    /// Weak reference list, each slot stores (version, GcHeader)
+    pub(super) weak_list: Vec<(u16, Option<NonNull<GcHead>>)>,
     /// Type registry
     pub(super) type_registry: crate::type_registry::TypeRegistry,
 }
