@@ -45,7 +45,7 @@ impl<'a> Iterator for NodeIterator<'a> {
 impl GcHeap {
     /// Get node iterator for specified partition
     #[inline(always)]
-    pub fn partition_node_iter(&self, partition_id: GcPartitionId) -> NodeIterator<'_> {
+    pub fn nodes_iter(&self, partition_id: GcPartitionId) -> NodeIterator<'_> {
         NodeIterator::from_heap(self, partition_id)
     }
 }

@@ -21,6 +21,7 @@ pub unsafe trait GcTracable: 'static {
 pub struct GcTracer<'a> {
     pub(super) heap: NonNull<GcHeap>,
     pub(super) partition_id: GcPartitionId,
+    pub(super) opaque: *mut (),
 
     /// pending nodes to be marked later
     pub(super) pendings: Vec<NonNull<GcHead>>,
@@ -36,7 +37,7 @@ pub enum GcTraceOp {
     TraceLater,
 }
 
-impl GcTracer<'_> {
+impl<'a> GcTracer<'a> {
     /// trace handler to mark node
     #[allow(non_snake_case)]
     pub fn MARK_FUNC(mut h: NonNull<GcHead>) -> GcTraceOp {
@@ -50,24 +51,48 @@ impl GcTracer<'_> {
         }
     }
 
-    #[inline(always)]
-    pub fn new(heap: &GcHeap, partition_id: GcPartitionId) -> Self {
+    pub fn new_with_opaque(heap: &GcHeap, partition_id: GcPartitionId, opaque: *mut ()) -> Self {
         Self {
             heap: NonNull::from(heap),
             partition_id,
+            opaque,
             pendings: Vec::new(),
             _mark: PhantomData,
         }
     }
 
     #[inline(always)]
-    pub fn with_capacity(heap: &GcHeap, partition_id: GcPartitionId, cap: usize) -> Self {
+    pub fn new(heap: &GcHeap, partition_id: GcPartitionId) -> Self {
+        Self::new_with_opaque(heap, partition_id, std::ptr::null_mut())
+    }
+
+    pub fn with_capacity_opaque(
+        heap: &GcHeap,
+        partition_id: GcPartitionId,
+        cap: usize,
+        opaque: *mut (),
+    ) -> Self {
         Self {
             heap: NonNull::from(heap),
             partition_id,
+            opaque,
             pendings: Vec::with_capacity(cap),
             _mark: PhantomData,
         }
+    }
+
+    #[inline(always)]
+    pub fn with_capacity(heap: &GcHeap, partition_id: GcPartitionId, cap: usize) -> Self {
+        Self::with_capacity_opaque(heap, partition_id, cap, std::ptr::null_mut())
+    }
+
+    #[inline(always)]
+    pub const fn opaque(&self) -> *mut () {
+        self.opaque
+    }
+
+    pub fn set_opaque(&mut self, opaque: *mut ()) {
+        self.opaque = opaque.cast();
     }
 
     pub fn trace(&mut self, node: NonNull<GcHead>, handle: impl Fn(NonNull<GcHead>) -> GcTraceOp) {

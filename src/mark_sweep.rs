@@ -34,7 +34,7 @@ impl GcHeap {
 
     /// clear mark of each node in partition
     pub fn clear_marks(&mut self, partition_id: GcPartitionId) {
-        for mut n in self.partition_node_iter(partition_id) {
+        for mut n in self.nodes_iter(partition_id) {
             unsafe {
                 n.as_mut().set_marked(false);
             }
@@ -97,12 +97,12 @@ impl GcHeap {
                             new_chain = current; //chain head changed
                         }
 
-                        if p.as_ref().is_root() {
-                            // Remove from root list
-                            if let Some(lst) = self.partition_roots.get_mut(&partition_id) {
-                                if let Some(i) = lst.iter().position(|x| *x == p) {
-                                    lst.swap_remove(i);
-                                }
+                        // If root node: remove from root list
+                        if p.as_ref().is_root()
+                            && let Some(lst) = self.partition_roots.get_mut(&partition_id)
+                        {
+                            if let Some(i) = lst.iter().position(|x| *x == p) {
+                                lst.swap_remove(i);
                             }
                         }
 

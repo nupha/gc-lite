@@ -12,6 +12,8 @@ pub struct GcTypeInfo {
     pub(super) dispose_fn: Option<unsafe fn(*mut u8)>,
 
     #[cfg(debug_assertions)]
+    pub type_id: std::any::TypeId,
+    #[cfg(debug_assertions)]
     pub type_name: &'static str,
 }
 
@@ -29,10 +31,14 @@ impl TypeRegistry {
 
         // type slot #0 is not used.
         entries.push(GcTypeInfo {
-            type_name: "",
             size: 0,
             trace_fn: noop_trace_fn,
             dispose_fn: None,
+
+            #[cfg(debug_assertions)]
+            type_id: std::any::TypeId::of::<()>(),
+            #[cfg(debug_assertions)]
+            type_name: "",
         });
 
         Self {
@@ -42,25 +48,25 @@ impl TypeRegistry {
     }
 
     #[inline(always)]
-    pub fn type_id_of<T: GcTracable + 'static>(&self) -> Option<u8> {
+    pub fn gc_type_of<T: GcTracable + 'static>(&self) -> Option<u8> {
         self.type_to_idx.get(&std::any::TypeId::of::<T>()).copied()
     }
 
     /// Register new type
     pub(crate) fn register<T: GcTracable + 'static>(&mut self) -> u8 {
-        let type_ident = std::any::TypeId::of::<T>();
+        let type_id = std::any::TypeId::of::<T>();
         let type_name = std::any::type_name::<T>();
 
-        if let Some(&idx) = self.type_to_idx.get(&type_ident) {
+        if let Some(&idx) = self.type_to_idx.get(&type_id) {
             idx
         } else {
             // Create type entry
-            let type_idx = self.entries.len();
-            debug_assert!(type_idx != 0);
-            if type_idx == u8::MAX as usize {
+            let idx = self.entries.len();
+            debug_assert!(idx != 0);
+            if idx == u8::MAX as usize {
                 panic!("too may node types: 255 in max");
             }
-            let type_idx = type_idx as u8;
+            let gc_type_id = idx as u8;
 
             let info = GcTypeInfo {
                 size: std::mem::size_of::<T>() as u32,
@@ -70,13 +76,16 @@ impl TypeRegistry {
                 } else {
                     None
                 },
+
+                #[cfg(debug_assertions)]
+                type_id,
                 #[cfg(debug_assertions)]
                 type_name,
             };
             self.entries.push(info);
-            self.type_to_idx.insert(type_ident, type_idx);
+            self.type_to_idx.insert(type_id, gc_type_id);
 
-            type_idx
+            gc_type_id
         }
     }
 
@@ -92,23 +101,22 @@ impl TypeRegistry {
     }
 }
 
-/// Generic trace function, used to call trace method of specific type
-unsafe fn trace_fn<T: GcTracable>(data_ptr: *mut u8, tracer: &mut GcTracer) {
+unsafe fn noop_trace_fn(_: *mut u8, _: &mut GcTracer) {}
+
+pub(super) unsafe fn trace_fn<T: GcTracable>(data_ptr: *mut u8, tracer: &mut GcTracer) {
     let typed_ref: &T = unsafe { &*data_ptr.cast::<T>() };
     typed_ref.trace(tracer);
 }
 
-unsafe fn noop_trace_fn(_: *mut u8, _: &mut GcTracer) {}
-
 /// Generic dispose function, used to call drop_in_place of specific type
-unsafe fn dispose_fn<T>(data_ptr: *mut u8) {
+pub(super) unsafe fn dispose_fn<T>(data_ptr: *mut u8) {
     unsafe { std::ptr::drop_in_place(data_ptr.cast::<T>()) };
 }
 
 impl GcHeap {
     #[inline(always)]
     pub fn type_id_of<T: GcTracable + 'static>(&self) -> Option<u8> {
-        self.type_registry.type_id_of::<T>()
+        self.type_registry.gc_type_of::<T>()
     }
 
     #[cfg(debug_assertions)]

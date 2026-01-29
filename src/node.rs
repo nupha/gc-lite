@@ -5,8 +5,7 @@ use std::{marker::PhantomData, ptr::NonNull};
 
 use crate::{
     GcHeap, GcPartitionId, GcTracable, GcTracer,
-    heap::{dispose_fn, trace_fn},
-    type_registry::TypeRegistry,
+    type_registry::{TypeRegistry, dispose_fn, trace_fn},
 };
 
 bitflags::bitflags! {
@@ -40,7 +39,7 @@ pub struct GcHead {
 }
 
 impl GcHead {
-    /// Get type id
+    /// Get node gc type id
     #[inline(always)]
     pub fn gc_type_id(&self) -> u8 {
         ((self.attrs & 0xFF00) >> 8) as u8
@@ -114,6 +113,16 @@ impl GcHead {
         type_registry
             .with_type_id(self.gc_type_id(), |t| t.trace_fn)
             .unwrap()
+    }
+
+    /// get start pointer to payload data
+    #[cfg(debug_assertions)]
+    pub unsafe fn payload(&self) -> NonNull<u8> {
+        unsafe {
+            NonNull::from_ref(self)
+                .cast::<u8>()
+                .add(std::mem::size_of::<GcHead>())
+        }
     }
 }
 

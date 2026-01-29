@@ -391,74 +391,10 @@ impl GcHeap {
         }
     }
 
-    // /// Check if GcRef is allocated from this context
-    // ///
-    // /// # Parameters
-    // /// - `gc_ref`: Garbage collection reference to check
-    // ///
-    // /// # Return Value
-    // /// - `true`: If the reference is allocated by this GcHeap
-    // /// - `false`: If the reference is not allocated by this GcHeap
-    // ///
-    // /// # Notes
-    // /// This method only checks if the reference is from the current context, it does not check if the reference is still valid
-    // #[inline(always)]
-    // pub fn contains<T>(&self, gc_ref: &GcRef<T>) -> bool {
-    //     self.contains_internal(gc_ref.head_ptr)
-    // }
-
-    /// Check if node is allocated in this heap
+    /// Check if `node` was allocated in this heap
     pub fn contains(&self, node: NonNull<GcHead>) -> bool {
-        unsafe {
-            let partition_id = node.as_ref().get_partition_id();
-
-            // Check if partition exists
-            if self.partitions.partition(partition_id).is_none() {
-                return false;
-            }
-
-            // Check if object is in partition's list
-            if let Some(head) = self.partition_heads.get(&partition_id) {
-                let mut current = *head;
-                while let Some(p) = current {
-                    if p == node {
-                        return true;
-                    }
-                    current = (*p.as_ptr()).next;
-                }
-            }
-
-            false
-        }
-    }
-
-    /// Mirgate `node` to another partition.
-    pub fn migrate(&mut self, node: NonNull<GcHead>, dest: GcPartitionId) {
-        let src = unsafe {
-            (*node.as_ptr()).set_xref_partition(GcPartitionId::NONE);
-            node.as_ref().get_partition_id()
-        };
-
-        if src != dest || src == GcPartitionId::NONE {
-            self.detach(node);
-            self.attach(dest, node);
-
-            if src != GcPartitionId::NONE {
-                // migrate recursivly
-                let mut tr = GcTracer::new(self, src);
-                tr.trace(node, |n| unsafe {
-                    let xref = n.as_ref().xref_partition();
-
-                    let to = if xref == GcPartitionId::NONE {
-                        dest
-                    } else {
-                        self.common_parent2(dest, xref)
-                    };
-
-                    crate::GcTraceOp::TraceLater
-                });
-            }
-        }
+        self.nodes_iter(unsafe { node.as_ref().get_partition_id() })
+            .any(|p| p == node)
     }
 
     /// Promote all objects from a partition to its parent partition
@@ -468,6 +404,7 @@ impl GcHeap {
     ///
     /// # Parameters
     /// - `partition_id`: The ID of the partition whose objects should be promoted
+    #[deprecated(note = "this will be removed")]
     pub fn promote_all(&mut self, partition_id: GcPartitionId) {
         match self.partition(partition_id) {
             Some(p) if p.is_root() => {}
@@ -520,19 +457,6 @@ impl GcHeap {
             }
         }
     }
-}
-
-/// Generic trace function, used to call trace method of specific type
-pub(super) unsafe fn trace_fn<T: GcTracable>(data_ptr: *mut u8, tracer: &mut crate::GcTracer) {
-    let typed_ptr = data_ptr as *const T;
-    let typed_ref: &T = unsafe { &*typed_ptr };
-    typed_ref.trace(tracer);
-}
-
-/// Generic dispose function, used to call drop_in_place of specific type
-pub(super) unsafe fn dispose_fn<T>(data_ptr: *mut u8) {
-    let typed_ptr = data_ptr as *mut T;
-    unsafe { std::ptr::drop_in_place(typed_ptr) };
 }
 
 #[cfg(test)]
