@@ -1,34 +1,34 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::collections::HashMap;
+use std::{collections::HashMap, ptr::NonNull};
 
-use crate::{GcHeap, GcTracable, GcTracer};
+use crate::{GcHead, GcHeap, GcTracable, GcTracer};
 
 #[derive(Debug)]
-pub(super) struct TypeInfo {
-    pub(super) size: u32,
+pub struct GcTypeInfo {
+    pub size: u32,
     pub(super) trace_fn: unsafe fn(*mut u8, &mut GcTracer),
     pub(super) dispose_fn: Option<unsafe fn(*mut u8)>,
 
     #[cfg(debug_assertions)]
-    pub(super) type_name: &'static str,
+    pub type_name: &'static str,
 }
 
 /// Type registry
 pub(crate) struct TypeRegistry {
     /// type_info registry list
-    entries: Vec<TypeInfo>,
+    entries: Vec<GcTypeInfo>,
     /// type ident to idx lookup table
     type_to_idx: HashMap<std::any::TypeId, u8>,
 }
 
 impl TypeRegistry {
     pub(crate) fn new() -> Self {
-        let mut entries: Vec<TypeInfo> = Vec::with_capacity(16);
+        let mut entries: Vec<GcTypeInfo> = Vec::with_capacity(16);
 
         // type slot #0 is not used.
-        entries.push(TypeInfo {
+        entries.push(GcTypeInfo {
             type_name: "",
             size: 0,
             trace_fn: noop_trace_fn,
@@ -62,7 +62,7 @@ impl TypeRegistry {
             }
             let type_idx = type_idx as u8;
 
-            let info = TypeInfo {
+            let info = GcTypeInfo {
                 size: std::mem::size_of::<T>() as u32,
                 trace_fn: trace_fn::<T>,
                 dispose_fn: if std::mem::needs_drop::<T>() {
@@ -82,7 +82,11 @@ impl TypeRegistry {
 
     /// Get type information by type index
     #[inline(always)]
-    pub(crate) fn with_type_id<R>(&self, type_id: u8, f: impl FnOnce(&TypeInfo) -> R) -> Option<R> {
+    pub(crate) fn with_type_id<R>(
+        &self,
+        type_id: u8,
+        f: impl FnOnce(&GcTypeInfo) -> R,
+    ) -> Option<R> {
         debug_assert!(type_id != 0);
         self.entries.get(type_id as usize).map(f)
     }
@@ -105,5 +109,10 @@ impl GcHeap {
     #[inline(always)]
     pub fn type_id_of<T: GcTracable + 'static>(&self) -> Option<u8> {
         self.type_registry.type_id_of::<T>()
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn get_node_type(&self, node: NonNull<GcHead>) -> &GcTypeInfo {
+        unsafe { &self.type_registry.entries[node.as_ref().gc_type_id() as usize] }
     }
 }

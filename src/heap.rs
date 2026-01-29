@@ -143,7 +143,7 @@ impl GcHeap {
                         let data_ptr = ptr.as_ptr().add(std::mem::size_of::<GcHead>()).cast::<T>();
                         std::ptr::write(data_ptr, data);
 
-                        debug_assert!((*header_ptr).type_id() != 0);
+                        debug_assert!((*header_ptr).gc_type_id() != 0);
 
                         // Add to partition list
                         let header = NonNull::new_unchecked(header_ptr);

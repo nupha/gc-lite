@@ -42,7 +42,7 @@ pub struct GcHead {
 impl GcHead {
     /// Get type id
     #[inline(always)]
-    pub fn type_id(&self) -> u8 {
+    pub fn gc_type_id(&self) -> u8 {
         ((self.attrs & 0xFF00) >> 8) as u8
     }
 
@@ -112,7 +112,7 @@ impl GcHead {
         type_registry: &TypeRegistry,
     ) -> unsafe fn(*mut u8, &mut GcTracer) {
         type_registry
-            .with_type_id(self.type_id(), |t| t.trace_fn)
+            .with_type_id(self.gc_type_id(), |t| t.trace_fn)
             .unwrap()
     }
 }
@@ -231,7 +231,7 @@ impl<T> GcRef<T> {
 
         // Check if pointer is valid
         let header = NonNull::new(header_ptr)?;
-        let type_id = unsafe { header.as_ref().type_id() };
+        let type_id = unsafe { header.as_ref().gc_type_id() };
 
         // Verify function pointer matches
         let expected_dispose_fn: Option<unsafe fn(*mut u8)> = if std::mem::needs_drop::<T>() {

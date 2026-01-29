@@ -158,7 +158,7 @@ impl GcHeap {
         while let Some(p) = current {
             unsafe {
                 current = p.as_ref().next;
-                let type_idx = p.as_ref().type_id();
+                let type_idx = p.as_ref().gc_type_id();
 
                 let should_collect: bool = if !force && (*p.as_ptr()).is_marked() {
                     false
@@ -204,7 +204,7 @@ impl GcHeap {
 
     /// Dispose a node
     pub(super) unsafe fn dispose(&mut self, node: NonNull<GcHead>) -> usize {
-        let type_idx = unsafe { (*node.as_ptr()).type_id() };
+        let type_idx = unsafe { (*node.as_ptr()).gc_type_id() };
         debug_assert_ne!(type_idx, 0);
 
         if let Some(w) = unsafe { (*node.as_ptr()).weakref_index() } {
