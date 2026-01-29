@@ -33,7 +33,7 @@ impl GcHeap {
         }
 
         // Find common parent of (from_partition, node_partition) as up
-        let up = self.common_parent(from_partition, node_pid);
+        let up = self.common_parent2(from_partition, node_pid);
         debug_assert_ne!(up, GcPartitionId::NONE);
 
         if up == node_pid || up == xref0 {
@@ -44,7 +44,7 @@ impl GcHeap {
         }
 
         // Find common parent of (from_partition, xref0)
-        let up2 = self.common_parent(from_partition, xref0);
+        let up2 = self.common_parent2(from_partition, xref0);
         debug_assert_ne!(up2, GcPartitionId::NONE);
 
         // Update if the new common parent is more general than xref0

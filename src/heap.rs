@@ -452,7 +452,7 @@ impl GcHeap {
                     let to = if xref == GcPartitionId::NONE {
                         dest
                     } else {
-                        self.common_parent(dest, xref)
+                        self.common_parent2(dest, xref)
                     };
 
                     crate::GcTraceOp::TraceLater
