@@ -136,13 +136,6 @@ fn main() -> GcResult<()> {
 
     println!("  Allocated 5 objects in small partition");
 
-    // Trigger automatic garbage collection
-    let auto_freed = heap.collect_garbage_auto();
-    println!(
-        "  Automatic garbage collection freed {} bytes of memory",
-        auto_freed
-    );
-
     // Demonstrate weak references
     println!("\nDemonstrate weak references:");
     let weak_ref = heap.downgrade(&obj1);

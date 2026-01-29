@@ -70,14 +70,38 @@ impl GcTracer<'_> {
         }
     }
 
-    pub fn trace(
+    pub fn trace(&mut self, node: NonNull<GcHead>, handle: impl Fn(NonNull<GcHead>) -> GcTraceOp) {
+        let tt = unsafe { &self.heap.as_ref().type_registry };
+
+        unsafe {
+            if node.as_ref().get_partition_id() == self.partition_id {
+                match handle(node) {
+                    GcTraceOp::TraceInto => {
+                        let trace_fn = node.as_ref().get_trace_fn(tt);
+                        let payload = node.cast::<u8>().add(std::mem::size_of::<GcHead>());
+                        trace_fn(payload.as_ptr(), self);
+                    }
+                    GcTraceOp::TraceLater => {
+                        self.pendings.push(node);
+                    }
+                    GcTraceOp::Stop => {}
+                }
+            }
+        }
+
+        if !self.pendings.is_empty() {
+            self.commit_with(handle);
+        }
+    }
+
+    pub fn trace_iter(
         &mut self,
-        nodes: impl Iterator<Item = NonNull<GcHead>>,
+        iter: impl Iterator<Item = NonNull<GcHead>>,
         handle: impl Fn(NonNull<GcHead>) -> GcTraceOp,
     ) {
         let tt = unsafe { &self.heap.as_ref().type_registry };
 
-        for ptr in nodes {
+        for ptr in iter {
             unsafe {
                 if ptr.as_ref().get_partition_id() == self.partition_id {
                     match handle(ptr) {
@@ -126,7 +150,7 @@ impl GcTracer<'_> {
     #[inline(always)]
     pub fn trace_roots(&mut self, handle: impl Fn(NonNull<GcHead>) -> GcTraceOp) {
         if let Some(roots) = unsafe { self.heap.as_ref().partition_roots.get(&self.partition_id) } {
-            self.trace(roots.iter().copied(), &handle);
+            self.trace_iter(roots.iter().copied(), &handle);
         }
     }
 

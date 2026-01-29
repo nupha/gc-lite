@@ -90,29 +90,6 @@ impl GcHeap {
         }
     }
 
-    /// Remove partition
-    pub fn remove_partition(&mut self, partition_id: GcPartitionId) {
-        if self.partitions.partition(partition_id).is_some() {
-            // Perform garbage collection first to clean up unreachable objects
-            let _ = self.collect_garbage(partition_id);
-
-            self.partition_roots.remove(&partition_id);
-            let _ = self.sweep(partition_id);
-
-            debug_assert!(
-                self.partition_heads
-                    .get(&partition_id)
-                    .copied()
-                    .flatten()
-                    .is_none(),
-                "shouldn't have live nodes"
-            );
-
-            self.partitions.remove_partition(partition_id);
-            self.partition_heads.remove(&partition_id);
-        }
-    }
-
     /// Allocate in partition
     pub fn alloc<T: GcTracable>(
         &mut self,
@@ -193,6 +170,8 @@ impl GcHeap {
     /// Attach a node to partition
     #[inline]
     pub(crate) fn attach(&mut self, partition_id: GcPartitionId, node: NonNull<GcHead>) {
+        debug_assert_ne!(partition_id, GcPartitionId::NONE);
+
         unsafe {
             debug_assert_eq!(node.as_ref().get_partition_id(), GcPartitionId::NONE);
             (*node.as_ptr()).set_partition_id(partition_id);
@@ -206,6 +185,7 @@ impl GcHeap {
     /// Remove a node from partition
     pub(crate) fn detach(&mut self, node: NonNull<GcHead>) {
         let partition_id = unsafe { node.as_ref().get_partition_id() };
+
         if partition_id != GcPartitionId::NONE {
             let chain = self.partition_heads.get_mut(&partition_id).unwrap();
 
@@ -452,23 +432,32 @@ impl GcHeap {
         }
     }
 
-    /// Promote `node` to ancestor partition.
-    pub fn promote_to(&mut self, node: NonNull<GcHead>, dest: GcPartitionId) {
-        let is_root = unsafe { node.as_ref().is_root() };
-        let partition_id = unsafe { node.as_ref().get_partition_id() };
-        if partition_id != GcPartitionId::NONE {
-            if partition_id == dest {
-                return;
-            }
+    /// Mirgate `node` to another partition.
+    pub fn migrate(&mut self, node: NonNull<GcHead>, dest: GcPartitionId) {
+        let src = unsafe {
+            (*node.as_ptr()).set_xref_partition(GcPartitionId::NONE);
+            node.as_ref().get_partition_id()
+        };
 
-            debug_assert!(self.check_partition_ancestor(partition_id, dest));
+        if src != dest || src == GcPartitionId::NONE {
             self.detach(node);
-        }
+            self.attach(dest, node);
 
-        self.attach(dest, node);
+            if src != GcPartitionId::NONE {
+                // migrate recursivly
+                let mut tr = GcTracer::new(self, src);
+                tr.trace(node, |n| unsafe {
+                    let xref = n.as_ref().xref_partition();
 
-        if is_root {
-            self.set_root_internal(node, true);
+                    let to = if xref == GcPartitionId::NONE {
+                        dest
+                    } else {
+                        self.common_parent(dest, xref)
+                    };
+
+                    crate::GcTraceOp::TraceLater
+                });
+            }
         }
     }
 

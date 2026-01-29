@@ -3,7 +3,7 @@ use crate::{GcHead, GcHeap, GcPartitionId};
 impl GcHead {
     /// Get cross reference partition
     #[cfg(debug_assertions)]
-    pub(crate) fn xref_partition(&self) -> GcPartitionId {
+    pub fn xref_partition(&self) -> GcPartitionId {
         let p = (self.partition >> 16) as u16;
         GcPartitionId(p)
     }
@@ -25,33 +25,26 @@ impl GcHeap {
         debug_assert_ne!(from_partition, GcPartitionId::NONE);
 
         let node_pid = node.get_partition_id();
+        let xref0 = node.xref_partition();
         debug_assert_ne!(node_pid, GcPartitionId::NONE);
 
-        // Step 1: Find common parent of (from_partition, node_partition) as up
-        let up = self.common_parent(node_pid, from_partition);
-        debug_assert_ne!(up, GcPartitionId::NONE);
-
-        // If up equals node_partition, from_partition is not higher - no update
-        if up == node_pid {
-            return false;
+        if from_partition == node_pid || from_partition == xref0 {
+            return false; // no change
         }
 
-        // Get existing xref (xref0)
-        let xref0 = node.xref_partition();
+        // Find common parent of (from_partition, node_partition) as up
+        let mut up = self.common_parent(from_partition, node_pid);
+        debug_assert_ne!(up, GcPartitionId::NONE);
 
-        if xref0 == GcPartitionId::NONE {
+        if up == node_pid || up == xref0 {
+            return false; // no change
+        } else if xref0 == GcPartitionId::NONE {
             node.set_xref_partition(up);
             return true;
         }
 
-        // Step 3: Check if from_partition is the parent of xref0
-        if self.check_partition_ancestor(from_partition, xref0) {
-            node.set_xref_partition(from_partition);
-            return true;
-        }
-
-        // Step 4: Find common parent of (xref0, up)
-        let up = self.common_parent(xref0, up);
+        // Find common parent of (xref0, up)
+        up = self.common_parent(up, xref0);
         debug_assert_ne!(up, GcPartitionId::NONE);
 
         // Update if up differs from xref0

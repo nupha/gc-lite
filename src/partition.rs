@@ -4,9 +4,10 @@
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
+    ptr::NonNull,
 };
 
-use crate::GcHeap;
+use crate::{GcHead, GcHeap, GcTracer};
 
 thread_local! {
     /// Thread-local partition ID counter (starts from 1, 0 is invalid/null)
@@ -205,6 +206,7 @@ impl GcPartitionMgr {
     ///
     /// # Returns
     /// The removed partition if it existed
+    #[deprecated]
     pub fn remove_partition(&mut self, id: GcPartitionId) -> Option<GcPartition> {
         // Get parent ID before removing
         let parent_id = self.partitions.get(&id).map(|p| p.parent);
@@ -397,6 +399,72 @@ impl GcHeap {
         self.partition_heads.insert(id, None);
         self.partition_roots.insert(id, Vec::new());
         id
+    }
+
+    /// Remove partition
+    pub fn remove_partition(&mut self, partition_id: GcPartitionId) {
+        // recursively remove sub partitions
+        {
+            let (parent_id, mut children) =
+                if let Some(par) = self.partitions.partitions.get_mut(&partition_id) {
+                    (par.parent, std::mem::replace(&mut par.children, Vec::new()))
+                } else {
+                    return;
+                };
+
+            while let Some(child) = children.pop() {
+                self.remove_partition(child);
+            }
+
+            // Remove from parent's children list
+            if parent_id != GcPartitionId::NONE {
+                let parent_partition = self.partitions.partitions.get_mut(&parent_id).unwrap();
+                parent_partition
+                    .children
+                    .retain(|&child_id| child_id != parent_id);
+            }
+        }
+
+        // clean up unreachable nodes
+        self.collect_garbage(partition_id);
+
+        let mut tr = GcTracer::with_capacity(self, partition_id, 32);
+        let mut cur = self.partition_heads.get(&partition_id).copied().unwrap();
+
+        while let Some(mut node) = cur {
+            cur = unsafe { node.as_ref().next };
+
+            let dest = unsafe { node.as_ref().xref_partition() };
+            if dest != GcPartitionId::NONE {
+                // migrate to xref partition
+                debug_assert_ne!(dest, partition_id);
+
+                unsafe {
+                    node.as_mut().set_root(false);
+                    node.as_mut().set_marked(false);
+                    node.as_mut().partition = 0; // clear partition & xref
+                }
+                self.attach(dest, node);
+
+                // recursivly set xref
+                tr.trace(node, |mut n| unsafe {
+                    let xref = n.as_ref().xref_partition();
+                    if xref == GcPartitionId::NONE {
+                        n.as_mut().set_xref_partition(dest)
+                    } else {
+                        let up = self.common_parent(dest, xref);
+                        if up != dest {
+                            n.as_mut().set_xref_partition(up);
+                        }
+                    };
+
+                    crate::GcTraceOp::TraceInto
+                });
+            }
+        }
+
+        self.partitions.partitions.remove(&partition_id);
+        self.partition_roots.remove(&partition_id);
     }
 
     /// Get partition information

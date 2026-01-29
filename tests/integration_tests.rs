@@ -586,44 +586,6 @@ fn test_manual_garbage_collection() {
 }
 
 #[test]
-fn test_automatic_garbage_collection() {
-    let mut heap = GcHeap::new();
-    let id = heap.create_root_partition(2048);
-
-    // Set threshold to trigger auto GC
-    heap.set_gc_threshold(id, 100);
-
-    // Create objects until threshold is exceeded
-    for i in 0..20 {
-        match heap.alloc(
-            id,
-            TestData {
-                value: i as i32,
-                name: format!("obj_{}", i),
-            },
-        ) {
-            Ok(obj) => {
-                // Set first few as roots
-                if i < 2 {
-                    heap.set_root(obj, true);
-                }
-            }
-            Err((err, _)) => {
-                // Expected when partition is full
-                assert_eq!(err, GcError::PartitionFull);
-                break;
-            }
-        }
-    }
-
-    // Trigger auto GC
-    let _freed = heap.collect_garbage_auto();
-
-    // Should have freed some memory
-    // freed is always >= 0, so this is a useless comparison
-}
-
-#[test]
 fn test_circular_reference_handling() {
     let mut heap = GcHeap::new();
     let id = heap.create_root_partition(2048);

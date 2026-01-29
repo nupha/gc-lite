@@ -64,7 +64,7 @@ impl GcHead {
     }
 
     /// Set/clear mark flag
-    pub(super) fn set_marked(&mut self, mark: bool) {
+    pub fn set_marked(&mut self, mark: bool) {
         let mut f = self.flags();
         if mark {
             f.insert(GcHeadFlag::MARKED);
