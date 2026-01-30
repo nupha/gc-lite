@@ -53,15 +53,7 @@ impl<'a> GcTracer<'a> {
         }
     }
 
-    pub fn new(heap: &GcHeap, partition_id: GcPartitionId) -> Self {
-        Self {
-            heap: NonNull::from(heap),
-            partition_id,
-            pendings: VecDeque::new(),
-            _mark: PhantomData,
-        }
-    }
-
+    #[deprecated(note = "use GcHeap::tracer() instead")]
     pub fn with_capacity(heap: &GcHeap, partition_id: GcPartitionId, cap: usize) -> Self {
         Self {
             heap: NonNull::from(heap),
@@ -71,6 +63,7 @@ impl<'a> GcTracer<'a> {
         }
     }
 
+    /// get user opaque pointer on GcHeap
     #[inline(always)]
     pub const fn opaque(&self) -> *mut u8 {
         unsafe { self.heap.as_ref().opaque() }
@@ -205,6 +198,30 @@ impl<'a> GcTracer<'a> {
     /// clear pendings
     pub(crate) fn clear(&mut self) {
         self.pendings.clear();
+    }
+}
+
+impl GcHeap {
+    /// create new tracer for specified partition.
+    /// clear all visit and mark flags to be ready for new tracing.
+    pub fn tracer(&self, partition_id: GcPartitionId) -> GcTracer<'_> {
+        let tr = GcTracer {
+            heap: NonNull::from(self),
+            partition_id,
+            pendings: VecDeque::new(),
+            _mark: PhantomData,
+        };
+
+        self.nodes_iter(partition_id).for_each(|mut n| unsafe {
+            let mut f = n.as_ref().flags();
+            let f0 = f;
+            f.remove(GcHeadFlag::TRACE_DONE | GcHeadFlag::TRACE_HANDLED | GcHeadFlag::MARKED);
+            if f0 != f {
+                n.as_mut().set_flags(f);
+            }
+        });
+
+        tr
     }
 }
 
@@ -385,9 +402,7 @@ mod tests {
         );
 
         // Create tracer and trace with Propagate (using MARK_FUNC)
-        let mut tracer = GcTracer::new(&heap, partition_id);
-        tracer.clear_visit_flags();
-        tracer.clear_marks();
+        let mut tracer = heap.tracer(partition_id);
 
         // Debug: check partition IDs
         println!("Tracer partition ID: {:?}", partition_id);
@@ -466,9 +481,7 @@ mod tests {
         }
 
         // Create tracer and trace with Continue
-        let mut tracer = GcTracer::new(&heap, partition_id);
-        tracer.clear_visit_flags();
-        tracer.clear_marks();
+        let mut tracer = heap.tracer(partition_id);
         tracer.trace(root_ref.head_ptr(), continue_handle);
 
         // Verify all nodes are marked
@@ -500,14 +513,12 @@ mod tests {
         let level0_ref = heap.alloc(partition_id, level0).unwrap();
 
         // Test with Propagate
-        let mut tracer1 = GcTracer::new(&heap, partition_id);
-        tracer1.clear_visit_flags();
-        tracer1.clear_marks();
+        let mut tracer1 = heap.tracer(partition_id);
         tracer1.trace(level0_ref.head_ptr(), GcTracer::MARK_FUNC);
         assert_eq!(count_marked_nodes(&heap, partition_id), 4);
 
         // Test with Continue
-        let mut tracer2 = GcTracer::new(&heap, partition_id);
+        let mut tracer2 = heap.tracer(partition_id);
 
         // Create a handle that marks nodes on first visit, prevents on subsequent visits
         fn continue_and_mark_handle(mut node: NonNull<GcHead>) -> GcTraceOp {
@@ -521,8 +532,6 @@ mod tests {
             }
         }
 
-        tracer2.clear_visit_flags();
-        tracer2.clear_marks();
         tracer2.trace(level0_ref.head_ptr(), continue_and_mark_handle);
         assert_eq!(count_marked_nodes(&heap, partition_id), 4);
     }
@@ -561,14 +570,12 @@ mod tests {
         let root_ref = heap.alloc(partition_id, root).unwrap();
 
         // Test with Propagate
-        let mut tracer1 = GcTracer::new(&heap, partition_id);
-        tracer1.clear_visit_flags();
-        tracer1.clear_marks();
+        let mut tracer1 = heap.tracer(partition_id);
         tracer1.trace(root_ref.head_ptr(), GcTracer::MARK_FUNC);
         assert_eq!(count_marked_nodes(&heap, partition_id), 7);
 
         // Test with Continue
-        let mut tracer2 = GcTracer::new(&heap, partition_id);
+        let mut tracer2 = heap.tracer(partition_id);
 
         fn continue_and_mark_handle(mut node: NonNull<GcHead>) -> GcTraceOp {
             unsafe {
@@ -581,8 +588,6 @@ mod tests {
             }
         }
 
-        tracer2.clear_visit_flags();
-        tracer2.clear_marks();
         tracer2.trace(root_ref.head_ptr(), continue_and_mark_handle);
         assert_eq!(count_marked_nodes(&heap, partition_id), 7);
     }
@@ -613,14 +618,12 @@ mod tests {
         }
 
         // Test with Propagate
-        let mut tracer1 = GcTracer::new(&heap, partition_id);
-        tracer1.clear_visit_flags();
-        tracer1.clear_marks();
+        let mut tracer1 = heap.tracer(partition_id);
         tracer1.trace(nodes[0].head_ptr(), GcTracer::MARK_FUNC);
         let propagate_marked = count_marked_nodes(&heap, partition_id);
 
         // Test with Continue
-        let mut tracer2 = GcTracer::new(&heap, partition_id);
+        let mut tracer2 = heap.tracer(partition_id);
 
         fn continue_and_mark_handle(mut node: NonNull<GcHead>) -> GcTraceOp {
             unsafe {
@@ -633,8 +636,6 @@ mod tests {
             }
         }
 
-        tracer2.clear_visit_flags();
-        tracer2.clear_marks();
         tracer2.trace(nodes[0].head_ptr(), continue_and_mark_handle);
         let continue_marked = count_marked_nodes(&heap, partition_id);
 
@@ -659,16 +660,14 @@ mod tests {
         }
 
         // Test with Propagate - should handle circular reference without infinite loop
-        let mut tracer1 = GcTracer::new(&heap, partition_id);
-        tracer1.clear_visit_flags();
-        tracer1.clear_marks();
+        let mut tracer1 = heap.tracer(partition_id);
         tracer1.trace(node1.head_ptr(), GcTracer::MARK_FUNC);
 
         // Both nodes should be marked
         assert_eq!(count_marked_nodes(&heap, partition_id), 2);
 
         // Test with Continue
-        let mut tracer2 = GcTracer::new(&heap, partition_id);
+        let mut tracer2 = heap.tracer(partition_id);
 
         fn continue_and_mark_handle(mut node: NonNull<GcHead>) -> GcTraceOp {
             unsafe {
@@ -681,8 +680,6 @@ mod tests {
             }
         }
 
-        tracer2.clear_visit_flags();
-        tracer2.clear_marks();
         tracer2.trace(node1.head_ptr(), continue_and_mark_handle);
         assert_eq!(count_marked_nodes(&heap, partition_id), 2);
     }

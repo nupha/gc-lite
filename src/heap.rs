@@ -371,7 +371,7 @@ impl GcHeap {
             };
 
             let mut referenced = false;
-            let mut tracer = GcTracer::new(self, partition_id);
+            let mut tracer = self.tracer(partition_id);
             let mut current = head;
 
             while let Some(node) = current {
@@ -446,10 +446,7 @@ impl GcHeap {
             }
         }
 
-        let mut tr = GcTracer::new(self, partition_id);
-        tr.clear_visit_flags();
-        tr.clear_marks();
-
+        let mut tr = self.tracer(partition_id);
         tr.trace_iter(stack.iter().copied(), |mut n| unsafe {
             if !n.as_ref().is_marked() {
                 n.as_mut().set_marked(true);
