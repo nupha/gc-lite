@@ -4,7 +4,7 @@
 use std::{collections::HashMap, marker::PhantomData, ptr::NonNull};
 
 use crate::{
-    GcError, GcResult, GcTracer,
+    GcError, GcResult, GcTraceOp, GcTracer,
     allocator::GcAllocator,
     node::{GcHead, GcHeadFlag, GcRef},
     partition::{GcPartitionId, GcPartitionMgr},
@@ -24,6 +24,9 @@ pub struct GcHeap {
     pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
     /// Type registry
     pub(super) type_registry: crate::type_registry::TypeRegistry,
+
+    /// User provided opaque raw pointer
+    opaque: *mut u8,
 }
 
 impl Drop for GcHeap {
@@ -33,12 +36,6 @@ impl Drop for GcHeap {
                 self.remove_partition(pid);
             }
         }
-    }
-}
-
-impl Default for GcHeap {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -53,7 +50,17 @@ impl GcHeap {
             partition_roots: HashMap::with_capacity(8),
             weak_slots: Vec::new(),
             type_registry: TypeRegistry::new(),
+            opaque: std::ptr::null_mut(),
         }
+    }
+
+    #[inline(always)]
+    pub const fn opaque(&self) -> *mut u8 {
+        self.opaque
+    }
+
+    pub const fn set_opaque(&mut self, opaque: *mut u8) {
+        self.opaque = opaque;
     }
 
     /// Get garbage collection threshold for partition (bytes)
@@ -397,6 +404,67 @@ impl GcHeap {
             .any(|p| p == node)
     }
 
+    /// 检测一个节点是否从指定的起始节点开始能被追踪到
+    ///
+    /// # 参数
+    /// - `node`: 要检测的目标节点
+    /// - `starts`: 起始节点的迭代器
+    ///
+    /// # 返回值
+    /// - `true`: 如果从任意起始节点开始，通过追踪引用关系能找到目标节点
+    /// - `false`: 如果从所有起始节点都无法追踪到目标节点
+    pub fn is_node_reachable(
+        &mut self,
+        node: NonNull<GcHead>,
+        starts: impl Iterator<Item = NonNull<GcHead>>,
+    ) -> bool {
+        use std::collections::HashSet;
+
+        // 如果目标节点不在堆中，直接返回 false
+        if !self.contains(node) {
+            return false;
+        }
+
+        let partition_id = unsafe { node.as_ref().get_partition_id() };
+
+        // 用于记录已访问的节点，避免循环引用导致的无限递归
+        let mut visited = HashSet::new();
+        // 使用栈进行深度优先搜索
+        let mut stack: Vec<NonNull<GcHead>> = Vec::new();
+
+        for start in starts {
+            if start == node {
+                return true;
+            }
+            if !self.contains(start) {
+                continue;
+            }
+
+            if unsafe { start.as_ref().get_partition_id() } == partition_id {
+                stack.push(start);
+                visited.insert(start);
+            }
+        }
+
+        let mut tr = GcTracer::new(self, partition_id);
+        tr.clear_visit_flags();
+        tr.clear_marks();
+
+        tr.trace_iter(stack.iter().copied(), |mut n| unsafe {
+            if !n.as_ref().is_marked() {
+                n.as_mut().set_marked(true);
+                GcTraceOp::Continue
+            } else {
+                GcTraceOp::Prevent
+            }
+        });
+
+        let b = unsafe { node.as_ref().is_marked() };
+        tr.clear_marks();
+
+        b
+    }
+
     /// Promote all objects from a partition to its parent partition
     ///
     /// This method moves all GC objects from the specified partition to its parent partition.
@@ -614,6 +682,117 @@ mod heap_tests {
             parent_roots.unwrap().len(),
             2,
             "Parent partition should have 2 root objects"
+        );
+    }
+
+    #[test]
+    fn test_is_node_reachable() {
+        use crate::trace::GcTracable;
+
+        // 定义一个简单的结构体，包含对其他 GC 对象的引用
+        #[derive(Debug)]
+        struct Node {
+            next: Option<GcRef<Node>>,
+            value: i32,
+        }
+
+        unsafe impl GcTracable for Node {
+            fn trace(&self, tracer: &mut GcTracer) {
+                if let Some(next) = self.next {
+                    tracer.add(next);
+                }
+            }
+        }
+
+        let mut heap = GcHeap::new();
+        let partition_id = heap.create_root_partition(4096);
+
+        // 创建三个节点：A -> B -> C
+        let node_c: GcRef<Node> = heap
+            .alloc(
+                partition_id,
+                Node {
+                    next: None,
+                    value: 3,
+                },
+            )
+            .unwrap();
+        let node_b: GcRef<Node> = heap
+            .alloc(
+                partition_id,
+                Node {
+                    next: Some(node_c),
+                    value: 2,
+                },
+            )
+            .unwrap();
+        let node_a: GcRef<Node> = heap
+            .alloc(
+                partition_id,
+                Node {
+                    next: Some(node_b),
+                    value: 1,
+                },
+            )
+            .unwrap();
+
+        // 测试 1: 从 A 开始，应该能追踪到 B 和 C
+        let starts = vec![node_a.head_ptr].into_iter();
+        assert!(
+            heap.is_node_reachable(node_b.head_ptr, starts.clone()),
+            "B should be reachable from A"
+        );
+        assert!(
+            heap.is_node_reachable(node_c.head_ptr, starts,),
+            "C should be reachable from A"
+        );
+
+        // 测试 2: 从 B 开始，应该能追踪到 C，但不能追踪到 A
+        let starts = vec![node_b.head_ptr].into_iter();
+        assert!(
+            heap.is_node_reachable(node_c.head_ptr, starts.clone()),
+            "C should be reachable from B"
+        );
+
+        // 测试 3: 从 C 开始，不能追踪到 A 或 B
+        let starts = vec![node_c.head_ptr].into_iter();
+        assert!(
+            !heap.is_node_reachable(node_a.head_ptr, starts.clone()),
+            "A should not be reachable from C"
+        );
+        assert!(
+            !heap.is_node_reachable(node_b.head_ptr, starts),
+            "B should not be reachable from C"
+        );
+
+        // 测试 4: 从 A 开始，节点自身应该是可达的
+        let starts = vec![node_a.head_ptr].into_iter();
+        assert!(
+            heap.is_node_reachable(node_a.head_ptr, starts),
+            "A should be reachable from itself"
+        );
+
+        // 测试 5: 空起始迭代器应该返回 false
+        let starts = vec![].into_iter();
+        assert!(
+            !heap.is_node_reachable(node_a.head_ptr, starts),
+            "No node should be reachable from empty starts"
+        );
+
+        // 测试 6: 创建不相关的节点 D，从 A 开始不能追踪到 D
+        let node_d: GcRef<Node> = heap
+            .alloc(
+                partition_id,
+                Node {
+                    next: None,
+                    value: 4,
+                },
+            )
+            .unwrap();
+        let starts = vec![node_a.head_ptr].into_iter();
+        assert!(
+            !heap.is_node_reachable(node_d.head_ptr, starts),
+            "D should not be reachable from A"
         );
     }
 }

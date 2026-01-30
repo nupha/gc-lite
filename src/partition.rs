@@ -590,6 +590,8 @@ impl GcHeap {
         self.collect_garbage(partition_id);
 
         let mut tr = GcTracer::with_capacity(self, partition_id, 32);
+        tr.clear_visit_flags();
+
         let mut cur = self.partition_heads.get(&partition_id).copied().unwrap();
 
         while let Some(mut node) = cur {
@@ -619,7 +621,7 @@ impl GcHeap {
                         }
                     };
 
-                    crate::GcTraceOp::TraceInto
+                    crate::GcTraceOp::Propagate
                 });
             }
         }

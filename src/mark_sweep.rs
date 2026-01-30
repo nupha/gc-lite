@@ -13,8 +13,6 @@ impl GcHeap {
             node.set_marked(false);
             false
         } else {
-            debug_assert_eq!(node.xref_partition(), GcPartitionId::NONE);
-            debug_assert!(!node.is_root());
             true
         }
     };
@@ -22,22 +20,14 @@ impl GcHeap {
     /// Collect garbage on given partition
     pub fn collect_garbage(&mut self, partition_id: GcPartitionId) -> usize {
         if self.partitions.partition(partition_id).is_some() {
-            self.clear_marks(partition_id);
             let mut tr = GcTracer::with_capacity(self, partition_id, 64);
+            tr.clear_visit_flags();
+            tr.clear_marks();
             tr.trace_roots(GcTracer::MARK_FUNC);
 
             self.sweep_with(partition_id, Self::SWEEP_UNMARKED_FUNC)
         } else {
             0
-        }
-    }
-
-    /// clear mark of each node in partition
-    pub fn clear_marks(&mut self, partition_id: GcPartitionId) {
-        for mut n in self.nodes_iter(partition_id) {
-            unsafe {
-                n.as_mut().set_marked(false);
-            }
         }
     }
 
@@ -61,7 +51,7 @@ impl GcHeap {
             }
         }
 
-        while let Some(p) = tracer.pendings.pop() {
+        while let Some(p) = tracer.pendings.pop_front() {
             unsafe {
                 let head = p.as_ptr();
                 if (*head).get_partition_id() == partition_id && !(*head).is_marked() {
@@ -358,7 +348,7 @@ impl GcHeap {
 #[cfg(test)]
 mod sweep_test {
     use super::*;
-    use crate::{GcRef, GcTracable};
+    use crate::GcRef;
 
     /// Helper function to count nodes in a partition
     fn count_nodes_in_partition(heap: &GcHeap, partition_id: GcPartitionId) -> usize {

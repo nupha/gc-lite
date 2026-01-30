@@ -17,6 +17,9 @@ bitflags::bitflags! {
         /// is root node
         const ROOT = 1 << 1;
 
+        const TRACE_HANDLED = 1 << 2;
+        const TRACE_DONE = 1 << 3;
+
         #[cfg(debug_assertions)]
         const MAGIC_NUM = 1 << 7;
     }
@@ -56,6 +59,11 @@ impl GcHead {
         self.flags().contains(GcHeadFlag::MAGIC_NUM)
     }
 
+    #[inline(always)]
+    pub(crate) fn set_flags(&mut self, flags: GcHeadFlag) {
+        self.attrs = (self.attrs & !0xFF) | (flags.bits() as u32);
+    }
+
     /// Check if marked
     #[inline(always)]
     pub fn is_marked(&self) -> bool {
@@ -70,7 +78,7 @@ impl GcHead {
         } else {
             f.remove(GcHeadFlag::MARKED);
         }
-        self.attrs = (self.attrs & !0xFF) | (f.bits() as u32);
+        self.set_flags(f);
     }
 
     /// Check if root node
@@ -87,7 +95,7 @@ impl GcHead {
         } else {
             f.remove(GcHeadFlag::ROOT);
         }
-        self.attrs = (self.attrs & !0xFF) | (f.bits() as u32);
+        self.set_flags(f);
     }
 
     /// Get partition ID
@@ -116,7 +124,7 @@ impl GcHead {
     }
 
     /// get start pointer to payload data
-    #[cfg(debug_assertions)]
+    #[inline(always)]
     pub unsafe fn payload(&self) -> NonNull<u8> {
         unsafe {
             NonNull::from_ref(self)
