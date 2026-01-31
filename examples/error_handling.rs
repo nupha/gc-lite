@@ -9,7 +9,7 @@
 //! - Partition management errors
 //! - Invalid reference handling
 
-use gc_lite::{GcError, GcHeap, GcRef, GcResult, GcTracable};
+use gc_lite::{GcError, GcHeap, GcRef, GcResult, GcTracable, GcTraceOps};
 
 fn main() -> GcResult<()> {
     println!("=== Error handling example of partitioned garbage collection system ===");
@@ -17,10 +17,6 @@ fn main() -> GcResult<()> {
     // Demonstrate out of memory errors
     println!("\n=== Out of memory error handling ===");
     demonstrate_out_of_memory()?;
-
-    // Demonstrate safe release validation
-    println!("\n=== Safe release validation ===");
-    demonstrate_safe_free_validation()?;
 
     // Demonstrate partition management errors
     println!("\n=== Partition management errors ===");
@@ -77,55 +73,6 @@ fn demonstrate_out_of_memory() -> GcResult<()> {
     println!("  ✓ Automatic cleanup through GC");
     context.set_root(gc1, false);
     context.collect_garbage(partition_id);
-
-    Ok(())
-}
-
-/// Demonstrate safe release validation
-fn demonstrate_safe_free_validation() -> GcResult<()> {
-    println!("1. Create test object...");
-
-    let mut context = GcHeap::new();
-    let partition_id = context.create_root_partition(1024);
-
-    let data = TestData {
-        value: 42,
-        name: "test".to_string(),
-    };
-    let gc_ref: GcRef<TestData> = context.alloc(partition_id, data).unwrap();
-
-    println!("2. Test safe release...");
-    let result = context.free(gc_ref);
-    assert!(result.is_ok(), "Safe release object should succeed");
-    println!("  ✓ Safe release object succeeded");
-
-    println!("3. Test double release...");
-    let result2 = context.free(gc_ref);
-    assert!(result2.is_err(), "Double release should fail");
-    println!("  ✓ Double release detection correct");
-
-    println!("4. Test cross-context release...");
-    let mut another_context = GcHeap::new();
-    let another_partition_id = another_context.create_root_partition(1024);
-    let another_data = TestData {
-        value: 100,
-        name: "another".to_string(),
-    };
-    let another_gc_ref: GcRef<TestData> = another_context
-        .alloc(another_partition_id, another_data)
-        .unwrap();
-
-    let result3 = context.free(another_gc_ref);
-    assert!(
-        result3.is_err(),
-        "Releasing objects from different contexts should fail"
-    );
-    println!("  ✓ Cross-context release detection correct");
-
-    // Clean up objects in another context
-    unsafe {
-        another_context.free_unchecked(another_gc_ref).unwrap();
-    }
 
     Ok(())
 }
@@ -236,65 +183,6 @@ fn demonstrate_gc_threshold_errors() -> GcResult<()> {
     Ok(())
 }
 
-/// Demonstrate reference detection errors
-fn demonstrate_reference_detection_errors() -> GcResult<()> {
-    println!("1. Test reference detection...");
-
-    let mut context = GcHeap::new();
-    let partition_id = context.create_root_partition(1024);
-
-    // Create two mutually referencing nodes
-    let node1 = Node {
-        value: 1,
-        next: None,
-    };
-    let node2 = Node {
-        value: 2,
-        next: None,
-    };
-
-    let mut gc_ref1: GcRef<Node> = context.alloc(partition_id, node1).unwrap();
-    let mut gc_ref2: GcRef<Node> = context.alloc(partition_id, node2).unwrap();
-
-    // Set mutual references
-    {
-        gc_ref1.next = Some(gc_ref2);
-        gc_ref2.next = Some(gc_ref1);
-    }
-
-    println!("2. Test releasing referenced objects...");
-    let result1 = context.free(gc_ref1);
-    assert!(result1.is_err(), "Releasing referenced node1 should fail");
-    println!("  ✓ Cannot release referenced objects");
-
-    let result2 = context.free(gc_ref2);
-    assert!(result2.is_err(), "Releasing referenced node2 should fail");
-    println!("  ✓ Cannot release referenced objects");
-
-    // First remove mutual references
-    unsafe {
-        gc_ref1.next = None;
-        gc_ref2.next = None;
-    }
-
-    println!("3. Test release after removing references...");
-    let result3 = context.free(gc_ref1);
-    assert!(
-        result3.is_ok(),
-        "Should be able to release node1 after removing references"
-    );
-    println!("  ✓ Can safely release after removing references");
-
-    let result4 = context.free(gc_ref2);
-    assert!(
-        result4.is_ok(),
-        "Should be able to release node2 after removing references"
-    );
-    println!("  ✓ Can safely release after removing references");
-
-    Ok(())
-}
-
 // Supporting type definitions
 
 /// Large memory data structure
@@ -304,9 +192,7 @@ struct LargeData {
 }
 
 unsafe impl GcTracable for LargeData {
-    fn trace(&self, _tracer: &mut gc_lite::GcTracer) {
-        // 没有需要追踪的引用
-    }
+    fn trace(&self, _: GcTraceOps) {}
 }
 
 /// Test data structure
@@ -317,9 +203,7 @@ struct TestData {
 }
 
 unsafe impl GcTracable for TestData {
-    fn trace(&self, _tracer: &mut gc_lite::GcTracer) {
-        // 没有需要追踪的引用
-    }
+    fn trace(&self, _: GcTraceOps) {}
 }
 
 /// Node structure for reference detection testing
@@ -330,9 +214,9 @@ struct Node {
 }
 
 unsafe impl GcTracable for Node {
-    fn trace(&self, tracer: &mut gc_lite::GcTracer) {
+    fn trace(&self, mut tr: GcTraceOps) {
         if let Some(next) = self.next {
-            tracer.add(next);
+            tr.submit(next);
         }
     }
 }

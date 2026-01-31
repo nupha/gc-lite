@@ -8,7 +8,8 @@ use std::{
 };
 
 use crate::{
-    GcHeap, GcPartitionId, GcTracable, GcTracer,
+    GcHeap, GcPartitionId, GcTracable,
+    trace::GcTraceOps,
     type_registry::{TypeRegistry, dispose_fn, trace_fn},
 };
 
@@ -21,8 +22,8 @@ bitflags::bitflags! {
         /// is root node
         const ROOT = 1 << 1;
 
-        const TRACE_HANDLED = 1 << 2;
-        const TRACE_DONE = 1 << 3;
+        /// internal use, denotes a node has been traced.
+        const TRACE_DONE = 1 << 2;
 
         #[cfg(debug_assertions)]
         const MAGIC_NUM = 1 << 7;
@@ -52,11 +53,6 @@ impl GcHead {
         ((self.attrs & 0xFF00) >> 8) as u8
     }
 
-    #[inline(always)]
-    pub(crate) fn flags(&self) -> GcHeadFlag {
-        GcHeadFlag::from_bits_truncate(self.attrs as u8)
-    }
-
     #[cfg(debug_assertions)]
     #[inline(always)]
     pub fn test_valid(&self) -> bool {
@@ -64,7 +60,18 @@ impl GcHead {
     }
 
     #[inline(always)]
+    pub(crate) fn flags(&self) -> GcHeadFlag {
+        GcHeadFlag::from_bits_retain(self.attrs as u8)
+    }
+
+    #[inline(always)]
     pub(crate) fn set_flags(&mut self, flags: GcHeadFlag) {
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            flags.contains(GcHeadFlag::MAGIC_NUM),
+            "MAGIC_NUM flag is missing"
+        );
+
         self.attrs = (self.attrs & !0xFF) | (flags.bits() as u32);
     }
 
@@ -121,17 +128,30 @@ impl GcHead {
     pub(super) fn get_trace_fn(
         &self,
         type_registry: &TypeRegistry,
-    ) -> unsafe fn(*mut u8, &mut GcTracer) {
-        type_registry
-            .with_type_id(self.gc_type_id(), |t| t.trace_fn)
-            .unwrap()
+    ) -> fn(NonNull<GcHead>, GcTraceOps) {
+        let f = type_registry.with_type_id(self.gc_type_id(), |t| t.trace_fn);
+
+        #[cfg(debug_assertions)]
+        {
+            f.unwrap()
+        }
+        #[cfg(not(debug_assertions))]
+        unsafe {
+            f.unwrap_unchecked()
+        }
     }
 
     /// get raw pointer to payload data
     #[inline(always)]
     pub unsafe fn payload(&self) -> NonNull<u8> {
         #[cfg(debug_assertions)]
-        debug_assert!(self.test_valid(), "gc head is not valid: {self:p}");
+        debug_assert!(
+            self.test_valid(),
+            "invalid gc node: ptr={self:p}, attrs={:#x}, flags={:?}, xref={:?}",
+            self.attrs,
+            self.flags(),
+            self.xref_partition(),
+        );
 
         unsafe {
             NonNull::from_ref(self)
@@ -185,6 +205,19 @@ impl<T> Eq for GcRef<T> {}
 
 impl<T> Copy for GcRef<T> {}
 
+impl<T> From<GcRef<T>> for NonNull<GcHead> {
+    #[inline(always)]
+    fn from(r: GcRef<T>) -> Self {
+        r.head_ptr
+    }
+}
+impl<T> From<&GcRef<T>> for NonNull<GcHead> {
+    #[inline(always)]
+    fn from(r: &GcRef<T>) -> Self {
+        r.head_ptr
+    }
+}
+
 impl<T> std::fmt::Debug for GcRef<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -197,28 +230,6 @@ impl<T> std::fmt::Debug for GcRef<T> {
 }
 
 impl<T> GcRef<T> {
-    // #[inline(always)]
-    // pub unsafe fn as_ref(&self) -> &T {
-    //     unsafe { self.head_ptr.as_ref().payload().cast::<T>().as_ref() }
-    // }
-
-    // #[inline(always)]
-    // pub unsafe fn as_mut(&mut self) -> &mut T {
-    //     unsafe { self.head_ptr.as_ref().payload().cast::<T>().as_mut() }
-    // }
-
-    #[inline(always)]
-    pub fn _as_ptr(&self) -> NonNull<T> {
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            self.test_valid(),
-            "gc head is not valid: {:p}",
-            self.head_ptr
-        );
-
-        unsafe { self.head_ptr.as_ref().payload().cast::<T>() }
-    }
-
     #[inline(always)]
     pub fn downgrade(&self, heap: &mut crate::GcHeap) -> crate::weak::GcWeak<T> {
         heap.downgrade(self)
@@ -264,7 +275,7 @@ impl<T> GcRef<T> {
         } else {
             None
         };
-        let expected_trace_fn: unsafe fn(*mut u8, &mut GcTracer) = trace_fn::<T>;
+        let expected_trace_fn: unsafe fn(NonNull<GcHead>, GcTraceOps) = trace_fn::<T>;
 
         // If type index is 0, not a valid GC object
         if type_id == 0 {

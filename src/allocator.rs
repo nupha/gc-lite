@@ -26,6 +26,9 @@ impl GcAllocator {
     pub(crate) fn deallocate(ptr: NonNull<u8>, size: usize) {
         debug_assert_ne!(size, 0);
 
+        #[cfg(debug_assertions)]
+        eprintln!("[DEALLOCATE] called: ptr={:p}, size={}", ptr, size);
+
         let ly = Layout::from_size_align(size, std::mem::align_of::<usize>());
 
         #[cfg(debug_assertions)]
@@ -34,9 +37,13 @@ impl GcAllocator {
         let layout = unsafe { ly.unwrap_unchecked() };
 
         unsafe {
-            // for debug: set mem to zeros before dealloc
-            // #[cfg(debug_assertions)]
-            // std::ptr::write_bytes(ptr.as_ptr(), 0, size);
+            // debug: set mem to zeros before dealloc,
+            // so that node MAGIC_NUM flag will be cleared, which marks the node invalid.
+            #[cfg(debug_assertions)]
+            {
+                eprintln!("[DEALLOCATE] zeroing memory: ptr={:p}, size={}", ptr, size);
+                std::ptr::write_bytes(ptr.as_ptr(), 0, size);
+            }
 
             dealloc(ptr.as_ptr(), layout);
         }

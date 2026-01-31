@@ -12,7 +12,7 @@
 
 use std::ops::Deref;
 
-use gc_lite::{GcHeap, GcRef, GcResult, GcTracable};
+use gc_lite::{GcHeap, GcRef, GcResult, GcTracable, GcTraceOps};
 
 fn main() -> GcResult<()> {
     println!("=== Basic usage example of partitioned garbage collection system ===");
@@ -223,10 +223,10 @@ impl TestNode {
 }
 
 unsafe impl GcTracable for TestNode {
-    fn trace(&self, tracer: &mut gc_lite::GcTracer) {
+    fn trace(&self, mut tr: GcTraceOps) {
         // Trace all child nodes
         for child in &self.children {
-            tracer.add(*child);
+            tr.submit(*child);
         }
     }
 }

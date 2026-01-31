@@ -17,7 +17,7 @@ pub unsafe trait GcTracable: 'static {
     ///
     /// This method is called during the marking phase to find all other GC objects referenced within the object.
     /// Implementers should call the `trace` closure to mark all referenced objects.
-    fn trace(&self, tracer: &mut GcTracer);
+    fn trace(&self, tr: GcTraceOps);
 }
 
 /// Tracer, used to trace object references during marking phase
@@ -44,72 +44,54 @@ pub enum GcTraceOp {
 
 impl<'a> GcTracer<'a> {
     #[allow(non_snake_case)]
-    pub fn MARK_FUNC(mut h: NonNull<GcHead>) -> GcTraceOp {
+    pub fn MARK_FUNC(mut h: NonNull<GcHead>, _: &GcHeap) -> GcTraceOp {
         unsafe {
             if !h.as_ref().is_marked() {
                 h.as_mut().set_marked(true);
+                GcTraceOp::Propagate
+            } else {
+                GcTraceOp::Prevent
             }
-            GcTraceOp::Propagate
         }
     }
 
-    #[deprecated(note = "use GcHeap::tracer() instead")]
-    pub fn with_capacity(heap: &GcHeap, partition_id: GcPartitionId, cap: usize) -> Self {
-        Self {
-            heap: NonNull::from(heap),
+    fn new(heap: NonNull<GcHeap>, partition_id: GcPartitionId) -> Self {
+        let tr = GcTracer {
+            heap,
             partition_id,
-            pendings: VecDeque::with_capacity(cap),
+            pendings: VecDeque::new(),
             _mark: PhantomData,
+        };
+
+        // clear node flags
+        unsafe {
+            heap.as_ref().nodes_iter(partition_id).for_each(|mut n| {
+                let mut f = n.as_ref().flags();
+                let f0 = f;
+                f.remove(GcHeadFlag::TRACE_DONE | GcHeadFlag::MARKED);
+                if f0 != f {
+                    n.as_mut().set_flags(f);
+                }
+            });
         }
+
+        tr
+    }
+
+    #[inline(always)]
+    pub const fn heap(&self) -> &GcHeap {
+        unsafe { self.heap.as_ref() }
+    }
+
+    #[inline(always)]
+    pub const fn heap_mut(&mut self) -> &mut GcHeap {
+        unsafe { self.heap.as_mut() }
     }
 
     /// get user opaque pointer on GcHeap
     #[inline(always)]
     pub const fn opaque(&self) -> *mut u8 {
         unsafe { self.heap.as_ref().opaque() }
-    }
-
-    fn do_trace(
-        &mut self,
-        node: NonNull<GcHead>,
-        handle: impl Fn(NonNull<GcHead>) -> GcTraceOp,
-    ) -> GcTraceOp {
-        unsafe {
-            let f0 = node.as_ref().flags();
-
-            if !f0.contains(GcHeadFlag::TRACE_DONE)
-                && node.as_ref().get_partition_id() == self.partition_id
-            {
-                let (op, mut f) = if !f0.contains(GcHeadFlag::TRACE_HANDLED) {
-                    let r = handle(node);
-                    (r, node.as_ref().flags().union(GcHeadFlag::TRACE_HANDLED))
-                } else {
-                    (GcTraceOp::Propagate, f0)
-                };
-
-                match op {
-                    GcTraceOp::Propagate => {
-                        f.insert(GcHeadFlag::TRACE_DONE);
-                        let tt = &self.heap.as_ref().type_registry;
-                        let trace_fn = node.as_ref().get_trace_fn(tt);
-                        trace_fn(node.as_ref().payload().as_ptr(), self);
-                    }
-                    GcTraceOp::Continue => {
-                        self.pendings.push_back(node);
-                    }
-                    GcTraceOp::Prevent => {
-                        f.insert(GcHeadFlag::TRACE_DONE);
-                    }
-                }
-
-                if f0 != f {
-                    (*node.as_ptr()).set_flags(f);
-                }
-                return op;
-            }
-        }
-
-        GcTraceOp::Prevent
     }
 
     /// clear mark of each node in partition
@@ -133,7 +115,7 @@ impl<'a> GcTracer<'a> {
                 .for_each(|mut n| {
                     let mut f = n.as_ref().flags();
                     let f0 = f;
-                    f.remove(GcHeadFlag::TRACE_DONE | GcHeadFlag::TRACE_HANDLED);
+                    f.remove(GcHeadFlag::TRACE_DONE);
                     if f0 != f {
                         n.as_mut().set_flags(f);
                     }
@@ -141,87 +123,107 @@ impl<'a> GcTracer<'a> {
         }
     }
 
-    pub fn trace(&mut self, node: NonNull<GcHead>, handle: impl Fn(NonNull<GcHead>) -> GcTraceOp) {
-        self.do_trace(node, &handle);
+    /// make trace ops
+    #[inline(always)]
+    pub(crate) const fn ops(&mut self) -> GcTraceOps<'_> {
+        GcTraceOps(NonNull::from_ref(self))
+    }
+
+    fn do_trace(
+        &mut self,
+        node: NonNull<GcHead>,
+        callback: impl Fn(NonNull<GcHead>, &GcHeap) -> GcTraceOp,
+    ) {
+        unsafe {
+            if !node.as_ref().flags().contains(GcHeadFlag::TRACE_DONE)
+                && node.as_ref().get_partition_id() == self.partition_id
+            {
+                match callback(node, self.heap()) {
+                    GcTraceOp::Continue | GcTraceOp::Propagate => {
+                        (*node.as_ptr())
+                            .set_flags(node.as_ref().flags().union(GcHeadFlag::TRACE_DONE));
+
+                        let tt = &self.heap.as_ref().type_registry;
+                        let trace_fn = node.as_ref().get_trace_fn(tt);
+                        trace_fn(node, self.ops());
+                    }
+                    // GcTraceOp::Continue => {
+                    //     self.pendings.push_back(node);
+                    // }
+                    GcTraceOp::Prevent => {
+                        (*node.as_ptr())
+                            .set_flags(node.as_ref().flags().union(GcHeadFlag::TRACE_DONE));
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn trace(
+        &mut self,
+        node: NonNull<GcHead>,
+        callback: impl Fn(NonNull<GcHead>, &GcHeap) -> GcTraceOp,
+    ) {
+        self.do_trace(node, &callback);
 
         if !self.pendings.is_empty() {
-            self.commit_with(handle);
+            self.commit_with(callback);
         }
     }
 
     pub fn trace_iter(
         &mut self,
         iter: impl Iterator<Item = NonNull<GcHead>>,
-        handle: impl Fn(NonNull<GcHead>) -> GcTraceOp,
+        callback: impl Fn(NonNull<GcHead>, &GcHeap) -> GcTraceOp,
     ) {
         for ptr in iter {
-            self.do_trace(ptr, &handle);
+            self.do_trace(ptr, &callback);
         }
 
         if !self.pendings.is_empty() {
-            self.commit_with(handle);
+            self.commit_with(callback);
         }
     }
 
     /// commit to trace pending nodes
-    pub fn commit_with(&mut self, handle: impl Fn(NonNull<GcHead>) -> GcTraceOp) {
+    pub fn commit_with(&mut self, callback: impl Fn(NonNull<GcHead>, &GcHeap) -> GcTraceOp) {
         while let Some(ptr) = self.pendings.pop_front() {
-            self.do_trace(ptr, &handle);
+            self.do_trace(ptr, &callback);
         }
     }
 
-    pub fn trace_roots(&mut self, handle: impl Fn(NonNull<GcHead>) -> GcTraceOp) {
+    pub fn trace_roots(&mut self, handle: impl Fn(NonNull<GcHead>, &GcHeap) -> GcTraceOp) {
         if let Some(roots) = unsafe { self.heap.as_ref().partition_roots.get(&self.partition_id) } {
             self.trace_iter(roots.iter().copied(), &handle);
         }
     }
 
-    /// Add a node to be traced later
-    pub fn add<T: GcTracable>(&mut self, gc_ref: GcRef<T>) {
-        if unsafe { gc_ref.head_ptr().as_ref().get_partition_id() } == self.partition_id {
-            self.pendings.push_back(gc_ref.head_ptr);
-        }
-    }
-
-    #[deprecated(note = "use ::add() instead")]
-    #[inline(always)]
-    pub fn mark<T: GcTracable>(&mut self, gc_ref: GcRef<T>) {
-        self.add(gc_ref);
-    }
-
-    /// commit to trace pending nodes
-    #[deprecated]
-    pub fn commit(&mut self) {
-        self.commit_with(Self::MARK_FUNC);
-    }
-
-    /// clear pendings
-    pub(crate) fn clear(&mut self) {
+    /// clear all pending nodes to be traced.
+    pub fn clear(&mut self) {
         self.pendings.clear();
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct GcTraceOps<'a>(NonNull<GcTracer<'a>>);
+
+impl<'a> GcTraceOps<'a> {
+    /// Submit a refrenced node to tracer, whilch will be traced later.
+    #[inline]
+    pub fn submit<T: GcTracable>(&mut self, gc_ref: GcRef<T>) {
+        unsafe {
+            self.0.as_mut().pendings.push_back(gc_ref.head_ptr);
+        }
     }
 }
 
 impl GcHeap {
     /// create new tracer for specified partition.
     /// clear all visit and mark flags to be ready for new tracing.
-    pub fn tracer(&self, partition_id: GcPartitionId) -> GcTracer<'_> {
-        let tr = GcTracer {
-            heap: NonNull::from(self),
-            partition_id,
-            pendings: VecDeque::new(),
-            _mark: PhantomData,
-        };
-
-        self.nodes_iter(partition_id).for_each(|mut n| unsafe {
-            let mut f = n.as_ref().flags();
-            let f0 = f;
-            f.remove(GcHeadFlag::TRACE_DONE | GcHeadFlag::TRACE_HANDLED | GcHeadFlag::MARKED);
-            if f0 != f {
-                n.as_mut().set_flags(f);
-            }
-        });
-
-        tr
+    #[inline(always)]
+    pub fn tracer(&mut self, partition_id: GcPartitionId) -> GcTracer<'_> {
+        GcTracer::new(NonNull::from(self), partition_id)
     }
 }
 
@@ -231,7 +233,7 @@ macro_rules! impl_collect_for_basic {
         $(
             unsafe impl GcTracable for $ty {
                 #[inline(always)]
-                fn trace(&self, _: &mut GcTracer) {
+                fn trace(&self, _: GcTraceOps) {
                     // This type doesn't contain any GC references, so trace method is empty
                 }
             }
@@ -263,24 +265,24 @@ impl_collect_for_basic!(
 
 unsafe impl GcTracable for String {
     #[inline(always)]
-    fn trace(&self, _tracer: &mut GcTracer) {
+    fn trace(&self, _: GcTraceOps) {
         // String don't have gc ref
     }
 }
 
 unsafe impl<T: GcTracable> GcTracable for Option<T> {
-    #[inline(always)]
-    fn trace(&self, tracer: &mut GcTracer) {
+    #[inline]
+    fn trace(&self, tr: GcTraceOps) {
         if let Some(v) = self {
-            v.trace(tracer);
+            v.trace(tr);
         }
     }
 }
 
 unsafe impl<T: GcTracable> GcTracable for Box<T> {
     #[inline(always)]
-    fn trace(&self, tracer: &mut GcTracer) {
-        self.as_ref().trace(tracer);
+    fn trace(&self, tr: GcTraceOps) {
+        self.as_ref().trace(tr);
     }
 }
 
@@ -312,48 +314,34 @@ mod tests {
     }
 
     unsafe impl GcTracable for TestNode {
-        fn trace(&self, tracer: &mut GcTracer) {
-            println!("TestNode::trace called, {} children", self.children.len());
+        fn trace(&self, mut tr: GcTraceOps) {
+            println!(
+                "TestNode::trace({self:p}), {} children",
+                self.children.len()
+            );
+
             for (i, child) in self.children.iter().enumerate() {
-                println!("  Adding child {}: {:?}", i, child.head_ptr());
-                // Debug partition IDs
-                unsafe {
-                    let child_partition = child.head_ptr().as_ref().get_partition_id();
-                    let tracer_partition = tracer.partition_id;
-                    println!(
-                        "    Child partition: {:?}, Tracer partition: {:?}",
-                        child_partition, tracer_partition
-                    );
-                }
-                tracer.add(*child);
+                println!("  Tracing child {}: {:?}", i, child.head_ptr());
+                tr.submit(*child);
             }
         }
     }
 
     /// Helper function to count marked nodes in a partition
     fn count_marked_nodes(heap: &GcHeap, partition_id: GcPartitionId) -> usize {
-        println!("count_marked_nodes called for partition {:?}", partition_id);
         let mut count = 0;
         if let Some(head) = heap.partition_heads.get(&partition_id).copied().flatten() {
-            println!("  Head node: {:?}", head);
             let mut current = Some(head);
-            let mut node_count = 0;
             while let Some(node) = current {
-                node_count += 1;
                 unsafe {
                     let marked = node.as_ref().is_marked();
-                    println!("  Node {}: {:?}, marked: {}", node_count, node, marked);
                     if marked {
                         count += 1;
                     }
                     current = node.as_ref().next;
                 }
             }
-            println!("  Total nodes visited: {}", node_count);
-        } else {
-            println!("  No head node found for partition");
         }
-        println!("  Marked count: {}", count);
         count
     }
 
@@ -397,49 +385,12 @@ mod tests {
         println!("Child1: {:?}", child1.head_ptr());
         println!("Child2: {:?}", child2.head_ptr());
 
-        // Debug: check marks before tracing
-        println!(
-            "Marks before tracing: {}",
-            count_marked_nodes(&heap, partition_id)
-        );
-
         // Create tracer and trace with Propagate (using MARK_FUNC)
         let mut tracer = heap.tracer(partition_id);
 
-        // Debug: check partition IDs
-        println!("Tracer partition ID: {:?}", partition_id);
-        unsafe {
-            println!(
-                "Root partition ID: {:?}",
-                root_ref.head_ptr().as_ref().get_partition_id()
-            );
-            println!(
-                "Root TRACE_DONE flag: {}",
-                root_ref
-                    .head_ptr()
-                    .as_ref()
-                    .flags()
-                    .contains(GcHeadFlag::TRACE_DONE)
-            );
-            println!("Root marked: {}", root_ref.head_ptr().as_ref().is_marked());
-        }
-
-        // Test MARK_FUNC directly
-        println!("Testing MARK_FUNC directly:");
-        let op = GcTracer::MARK_FUNC(root_ref.head_ptr());
-        println!("MARK_FUNC returned: {:?}", op);
-        unsafe {
-            println!(
-                "Root marked after MARK_FUNC: {}",
-                root_ref.head_ptr().as_ref().is_marked()
-            );
-        }
-
-        println!("Before trace: pendings len = {}", tracer.pendings.len());
         tracer.trace(root_ref.head_ptr(), GcTracer::MARK_FUNC);
-        println!("After trace: pendings len = {}", tracer.pendings.len());
 
-        // Debug: check marks after tracing
+        // check marks after tracing
         println!(
             "Marks after tracing: {}",
             count_marked_nodes(&heap, partition_id)
@@ -471,7 +422,7 @@ mod tests {
         let root_ref = heap.alloc(partition_id, root).unwrap();
 
         // Create a custom handle that marks on first visit, prevents on subsequent visits
-        fn continue_handle(mut node: NonNull<GcHead>) -> GcTraceOp {
+        fn continue_handle(mut node: NonNull<GcHead>, _: &GcHeap) -> GcTraceOp {
             unsafe {
                 if !node.as_ref().is_marked() {
                     node.as_mut().set_marked(true);
@@ -487,7 +438,7 @@ mod tests {
         tracer.trace(root_ref.head_ptr(), continue_handle);
 
         // Verify all nodes are marked
-        assert_eq!(count_marked_nodes(&heap, partition_id), 3);
+        assert_eq!(count_marked_nodes(tracer.heap(), partition_id), 3);
 
         // Verify pendings is empty after processing
         assert!(tracer.pendings.is_empty());
@@ -523,7 +474,7 @@ mod tests {
         let mut tracer2 = heap.tracer(partition_id);
 
         // Create a handle that marks nodes on first visit, prevents on subsequent visits
-        fn continue_and_mark_handle(mut node: NonNull<GcHead>) -> GcTraceOp {
+        fn continue_and_mark_handle(mut node: NonNull<GcHead>, _: &GcHeap) -> GcTraceOp {
             unsafe {
                 if !node.as_ref().is_marked() {
                     node.as_mut().set_marked(true);
@@ -579,7 +530,7 @@ mod tests {
         // Test with Continue
         let mut tracer2 = heap.tracer(partition_id);
 
-        fn continue_and_mark_handle(mut node: NonNull<GcHead>) -> GcTraceOp {
+        fn continue_and_mark_handle(mut node: NonNull<GcHead>, _: &GcHeap) -> GcTraceOp {
             unsafe {
                 if !node.as_ref().is_marked() {
                     node.as_mut().set_marked(true);
@@ -644,7 +595,7 @@ mod tests {
         // Test with Continue
         let mut tracer2 = heap.tracer(partition_id);
 
-        fn continue_and_mark_handle(mut node: NonNull<GcHead>) -> GcTraceOp {
+        fn continue_and_mark_handle(mut node: NonNull<GcHead>, _: &GcHeap) -> GcTraceOp {
             unsafe {
                 if !node.as_ref().is_marked() {
                     node.as_mut().set_marked(true);
@@ -688,7 +639,7 @@ mod tests {
         // Test with Continue
         let mut tracer2 = heap.tracer(partition_id);
 
-        fn continue_and_mark_handle(mut node: NonNull<GcHead>) -> GcTraceOp {
+        fn continue_and_mark_handle(mut node: NonNull<GcHead>, _: &GcHeap) -> GcTraceOp {
             unsafe {
                 if !node.as_ref().is_marked() {
                     node.as_mut().set_marked(true);

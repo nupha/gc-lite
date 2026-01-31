@@ -3,7 +3,7 @@
 
 use std::{cell::Cell, collections::HashMap};
 
-use crate::{GcHeap, GcTracer};
+use crate::GcHeap;
 
 thread_local! {
     /// Thread-local partition ID counter (starts from 1, 0 is invalid/null)
@@ -589,10 +589,11 @@ impl GcHeap {
         // clean up unreachable nodes
         self.collect_garbage(partition_id);
 
-        let mut tr = GcTracer::with_capacity(self, partition_id, 32);
-        tr.clear_visit_flags();
-
         let mut cur = self.partition_heads.get(&partition_id).copied().unwrap();
+
+        let mut tr = self.tracer(partition_id);
+        // tr.clear_visit_flags();
+        // tr.clear_marks();
 
         while let Some(mut node) = cur {
             cur = unsafe { node.as_ref().next };
@@ -607,15 +608,15 @@ impl GcHeap {
                     node.as_mut().set_marked(false);
                     node.as_mut().partition = 0; // clear partition & xref
                 }
-                self.attach(dest, node);
+                tr.heap_mut().attach(dest, node);
 
                 // recursivly set xref
-                tr.trace(node, |mut n| unsafe {
+                tr.trace(node, |mut n, heap| unsafe {
                     let xref = n.as_ref().xref_partition();
                     if xref == GcPartitionId::NONE {
                         n.as_mut().set_xref_partition(dest)
                     } else {
-                        let up = self.common_parent2(dest, xref);
+                        let up = heap.common_parent2(dest, xref);
                         if up != dest {
                             n.as_mut().set_xref_partition(up);
                         }

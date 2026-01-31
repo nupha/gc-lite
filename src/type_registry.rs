@@ -3,12 +3,12 @@
 
 use std::{collections::HashMap, ptr::NonNull};
 
-use crate::{GcHead, GcHeap, GcTracable, GcTracer};
+use crate::{GcHead, GcHeap, GcTracable, trace::GcTraceOps};
 
 #[derive(Debug)]
 pub struct GcTypeInfo {
     pub size: u32,
-    pub(super) trace_fn: unsafe fn(*mut u8, &mut GcTracer),
+    pub(super) trace_fn: fn(NonNull<GcHead>, GcTraceOps),
     pub(super) dispose_fn: Option<unsafe fn(*mut u8)>,
 
     #[cfg(debug_assertions)]
@@ -101,11 +101,12 @@ impl TypeRegistry {
     }
 }
 
-unsafe fn noop_trace_fn(_: *mut u8, _: &mut GcTracer) {}
+fn noop_trace_fn(_: NonNull<GcHead>, _: GcTraceOps) {}
 
-pub(super) unsafe fn trace_fn<T: GcTracable>(data_ptr: *mut u8, tracer: &mut GcTracer) {
-    let typed_ref: &T = unsafe { &*data_ptr.cast::<T>() };
-    typed_ref.trace(tracer);
+pub(super) fn trace_fn<T: GcTracable>(node: NonNull<GcHead>, tr: GcTraceOps) {
+    unsafe {
+        node.as_ref().payload().cast::<T>().as_ref().trace(tr);
+    }
 }
 
 /// Generic dispose function, used to call drop_in_place of specific type

@@ -20,48 +20,12 @@ impl GcHeap {
     /// Collect garbage on given partition
     pub fn collect_garbage(&mut self, partition_id: GcPartitionId) -> usize {
         if self.partitions.partition(partition_id).is_some() {
-            let mut tr = GcTracer::with_capacity(self, partition_id, 64);
-            tr.clear_visit_flags();
-            tr.clear_marks();
+            let mut tr = self.tracer(partition_id);
             tr.trace_roots(GcTracer::MARK_FUNC);
 
             self.sweep_with(partition_id, Self::SWEEP_UNMARKED_FUNC)
         } else {
             0
-        }
-    }
-
-    /// Mark from partition roots
-    #[deprecated(note = "use GcTracer::trace_roots() instead")]
-    pub fn mark_roots(&mut self, partition_id: GcPartitionId, tracer: &mut GcTracer) {
-        if let Some(roots) = self.partition_roots.get(&partition_id) {
-            for ptr in roots {
-                unsafe {
-                    let head = ptr.as_ref();
-                    debug_assert_eq!(head.get_partition_id(), partition_id);
-
-                    if !head.is_marked() {
-                        (*ptr.as_ptr()).set_marked(true);
-
-                        let trace_fn = head.get_trace_fn(&self.type_registry);
-                        let payload = ptr.cast::<u8>().add(std::mem::size_of::<GcHead>());
-                        trace_fn(payload.as_ptr(), tracer);
-                    }
-                }
-            }
-        }
-
-        while let Some(p) = tracer.pendings.pop_front() {
-            unsafe {
-                let head = p.as_ptr();
-                if (*head).get_partition_id() == partition_id && !(*head).is_marked() {
-                    (*head).set_marked(true);
-
-                    let payload = (head as *mut u8).add(std::mem::size_of::<GcHead>());
-                    let trace_fn = (*head).get_trace_fn(&self.type_registry);
-                    trace_fn(payload, tracer);
-                }
-            }
         }
     }
 
@@ -194,6 +158,9 @@ impl GcHeap {
 
     /// Dispose a node
     pub(super) unsafe fn dispose(&mut self, node: NonNull<GcHead>) -> usize {
+        #[cfg(debug_assertions)]
+        eprintln!("[DISPOSE] called: node={:p}", node);
+
         let type_idx = unsafe { (*node.as_ptr()).gc_type_id() };
         debug_assert_ne!(type_idx, 0);
 
@@ -204,14 +171,6 @@ impl GcHeap {
                 self.weak_slots.get_unchecked_mut(w as usize).1.take();
                 (*node.as_ptr()).set_weakref_index(None);
             }
-        }
-
-        #[cfg(debug_assertions)]
-        unsafe {
-            // clear MAGIC_NUM flag: mark this node invalid.
-            let mut f = (*node.as_ptr()).flags();
-            f.remove(crate::node::GcHeadFlag::MAGIC_NUM);
-            (*node.as_ptr()).set_flags(f);
         }
 
         let (size, dispose_fn) = self

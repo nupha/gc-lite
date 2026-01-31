@@ -134,8 +134,7 @@ impl GcHeap {
                                 {
                                     0xFF00_0000
                                         | ((type_idx as u32) << 8)
-                                        | (GcHeadFlag::empty().union(GcHeadFlag::MAGIC_NUM).bits()
-                                            as u32)
+                                        | (GcHeadFlag::MAGIC_NUM.bits() as u32)
                                 }
                                 #[cfg(not(debug_assertions))]
                                 {
@@ -265,75 +264,71 @@ impl GcHeap {
         self.set_root_internal(gc_ref.head_ptr, is_root);
     }
 
-    //
-    // Manual Release
-    //
+    // /// Safely manually release an object
+    // ///
+    // /// This method performs GC mark verification before release to ensure the object is not referenced by other objects.
+    // /// If the object is referenced, it returns an error to prevent dangling pointer issues.
+    // ///
+    // /// # 参数
+    // /// - `gc_ref`: 要释放的垃圾回收引用
+    // ///
+    // /// # Return Value
+    // /// - `Ok(())`: Release successful
+    // /// - `Err(GcError::InvalidReference)`: Object is not allocated from this context or is referenced by other objects
+    // /// - `Err(GcError::PartitionNotFound)`: The partition where the object is located does not exist
+    // ///
+    // /// # 注意
+    // /// - 如果对象是根对象，会先将其从根对象列表中移除
+    // /// - 释放后，该引用将变为无效，不应再使用
+    // pub fn free<T>(&mut self, gc_ref: GcRef<T>) -> GcResult<usize> {
+    //     // Perform GC mark verification to check if object is referenced
+    //     if self.is_node_referenced(gc_ref)? {
+    //         Err(GcError::InvalidReference)
+    //     } else {
+    //         // Object is not referenced, safe to release
+    //         unsafe { self.free_unchecked(gc_ref) }
+    //     }
+    // }
 
-    /// Safely manually release an object
-    ///
-    /// This method performs GC mark verification before release to ensure the object is not referenced by other objects.
-    /// If the object is referenced, it returns an error to prevent dangling pointer issues.
-    ///
-    /// # 参数
-    /// - `gc_ref`: 要释放的垃圾回收引用
-    ///
-    /// # Return Value
-    /// - `Ok(())`: Release successful
-    /// - `Err(GcError::InvalidReference)`: Object is not allocated from this context or is referenced by other objects
-    /// - `Err(GcError::PartitionNotFound)`: The partition where the object is located does not exist
-    ///
-    /// # 注意
-    /// - 如果对象是根对象，会先将其从根对象列表中移除
-    /// - 释放后，该引用将变为无效，不应再使用
-    pub fn free<T>(&mut self, gc_ref: GcRef<T>) -> GcResult<usize> {
-        // Perform GC mark verification to check if object is referenced
-        if self.is_node_referenced(gc_ref)? {
-            Err(GcError::InvalidReference)
-        } else {
-            // Object is not referenced, safe to release
-            unsafe { self.free_unchecked(gc_ref) }
-        }
-    }
+    // /// Unsafe quick release of an object
+    // ///
+    // /// This method does not check if the object is referenced by other objects, it releases directly.
+    // /// If the object is being referenced, it will cause dangling pointer and memory safety issues.
+    // ///
+    // /// # Safety
+    // /// The caller must ensure that no other objects reference this object, otherwise it will cause undefined behavior.
+    // ///
+    // /// # 参数
+    // /// - `gc_ref`: 要释放的垃圾回收引用
+    // ///
+    // /// # Return Value
+    // /// - `Ok(())`: Release successful
+    // /// - `Err(GcError::InvalidReference)`: Object is not allocated from this context
+    // /// - `Err(GcError::PartitionNotFound)`: The partition where the object is located does not exist
+    // ///
+    // /// # 注意
+    // /// - 如果对象是根对象，会先将其从根对象列表中移除
+    // /// - 释放后，该引用将变为无效，不应再使用
+    // pub unsafe fn free_unchecked<T>(&mut self, gc_ref: GcRef<T>) -> GcResult<usize> {
+    //     let header = gc_ref.head_ptr();
+    //     let partition_id = unsafe { header.as_ref().get_partition_id() };
+    //     debug_assert_ne!(partition_id, GcPartitionId::NONE);
 
-    /// Unsafe quick release of an object
-    ///
-    /// This method does not check if the object is referenced by other objects, it releases directly.
-    /// If the object is being referenced, it will cause dangling pointer and memory safety issues.
-    ///
-    /// # Safety
-    /// The caller must ensure that no other objects reference this object, otherwise it will cause undefined behavior.
-    ///
-    /// # 参数
-    /// - `gc_ref`: 要释放的垃圾回收引用
-    ///
-    /// # Return Value
-    /// - `Ok(())`: Release successful
-    /// - `Err(GcError::InvalidReference)`: Object is not allocated from this context
-    /// - `Err(GcError::PartitionNotFound)`: The partition where the object is located does not exist
-    ///
-    /// # 注意
-    /// - 如果对象是根对象，会先将其从根对象列表中移除
-    /// - 释放后，该引用将变为无效，不应再使用
-    pub unsafe fn free_unchecked<T>(&mut self, gc_ref: GcRef<T>) -> GcResult<usize> {
-        let header = gc_ref.head_ptr();
-        let partition_id = unsafe { header.as_ref().get_partition_id() };
-        debug_assert_ne!(partition_id, GcPartitionId::NONE);
+    //     if !self.contains(header) {
+    //         // not allocated in this heap
+    //         return Err(GcError::InvalidReference);
+    //     }
 
-        if !self.contains(header) {
-            // not allocated in this heap
-            return Err(GcError::InvalidReference);
-        }
+    //     // If object is a root object, unset root
+    //     if let Some(roots) = self.partition_roots.get_mut(&partition_id) {
+    //         if let Some(i) = roots.iter().position(|&r| r == header) {
+    //             roots.swap_remove(i);
+    //         }
+    //     }
 
-        // If object is a root object, unset root
-        if let Some(roots) = self.partition_roots.get_mut(&partition_id) {
-            if let Some(i) = roots.iter().position(|&r| r == header) {
-                roots.swap_remove(i);
-            }
-        }
-
-        self.detach(header);
-        unsafe { Ok(self.dispose(header)) }
-    }
+    //     self.detach(header);
+    //     unsafe { Ok(self.dispose(header)) }
+    // }
 
     /// Check if object is referenced by other objects
     fn is_node_referenced<T>(&mut self, gc_ref: GcRef<T>) -> GcResult<bool> {
@@ -355,10 +350,9 @@ impl GcHeap {
             let check_obj_reference =
                 |master: NonNull<GcHead>, slave: NonNull<GcHead>, tracer: &mut GcTracer| -> bool {
                     // Call master's trace function to trace all objects it references
-                    let payload = (master.as_ptr() as *mut u8).add(std::mem::size_of::<GcHead>());
-                    let trace_fn = master.as_ref().get_trace_fn(&self.type_registry);
                     tracer.clear();
-                    trace_fn(payload, tracer);
+                    let trace_fn = master.as_ref().get_trace_fn(&tracer.heap().type_registry);
+                    trace_fn(master, tracer.ops());
 
                     // Check if target object is included in trace results
                     tracer.pendings.iter().any(|h| *h == slave)
@@ -447,7 +441,7 @@ impl GcHeap {
         }
 
         let mut tr = self.tracer(partition_id);
-        tr.trace_iter(stack.iter().copied(), |mut n| unsafe {
+        tr.trace_iter(stack.iter().copied(), |mut n, _| unsafe {
             if !n.as_ref().is_marked() {
                 n.as_mut().set_marked(true);
                 GcTraceOp::Continue
@@ -526,6 +520,8 @@ impl GcHeap {
 
 #[cfg(test)]
 mod heap_tests {
+    use crate::trace::GcTraceOps;
+
     use super::*;
 
     #[test]
@@ -694,9 +690,9 @@ mod heap_tests {
         }
 
         unsafe impl GcTracable for Node {
-            fn trace(&self, tracer: &mut GcTracer) {
+            fn trace(&self, mut tr: GcTraceOps) {
                 if let Some(next) = self.next {
-                    tracer.add(next);
+                    tr.submit(next);
                 }
             }
         }

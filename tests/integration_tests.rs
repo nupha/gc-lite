@@ -11,7 +11,7 @@
 //! - Weak references
 //! - Error handling
 
-use gc_lite::{GcError, GcHeap, GcPartitionId, GcRef, GcTracable, GcTracer};
+use gc_lite::{GcError, GcHeap, GcPartitionId, GcRef, GcTracable, GcTraceOps};
 
 /// Test data structure for integration tests
 #[derive(Debug, PartialEq, Clone)]
@@ -21,7 +21,7 @@ struct TestData {
 }
 
 unsafe impl GcTracable for TestData {
-    fn trace(&self, _tracer: &mut GcTracer) {
+    fn trace(&self, _: GcTraceOps) {
         // No GC references in this type
     }
 }
@@ -47,9 +47,9 @@ impl GcNode {
 }
 
 unsafe impl GcTracable for GcNode {
-    fn trace(&self, tracer: &mut GcTracer) {
+    fn trace(&self, mut tr: GcTraceOps) {
         for child in &self.children {
-            tracer.add(*child);
+            tr.submit(*child);
         }
     }
 }
@@ -698,28 +698,6 @@ fn test_multiple_weak_references() {
     assert!(weak1.upgrade(&heap).is_some());
     assert!(weak2.upgrade(&heap).is_some());
     assert!(weak3.upgrade(&heap).is_some());
-}
-
-// ============ Manual Release Tests ============
-
-#[test]
-fn test_safe_manual_release() {
-    let mut heap = GcHeap::new();
-    let id = heap.create_root_partition(2048);
-
-    let obj = heap
-        .alloc(
-            id,
-            TestData {
-                value: 42,
-                name: "test".to_string(),
-            },
-        )
-        .unwrap();
-
-    // Safe release should succeed
-    let result = heap.free(obj);
-    assert!(result.is_ok());
 }
 
 // ============ Context Detection Tests ============
