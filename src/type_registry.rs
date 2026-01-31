@@ -3,12 +3,12 @@
 
 use std::{collections::HashMap, ptr::NonNull};
 
-use crate::{GcHead, GcHeap, GcTracable, trace::GcTraceOps};
+use crate::{GcHead, GcHeap, GcTracable, trace::GcTraceOp};
 
 #[derive(Debug)]
 pub struct GcTypeInfo {
     pub size: u32,
-    pub(super) trace_fn: fn(NonNull<GcHead>, GcTraceOps),
+    pub(super) trace_fn: fn(NonNull<GcHead>, GcTraceOp),
     pub(super) dispose_fn: Option<unsafe fn(*mut u8)>,
 
     #[cfg(debug_assertions)]
@@ -101,9 +101,9 @@ impl TypeRegistry {
     }
 }
 
-fn noop_trace_fn(_: NonNull<GcHead>, _: GcTraceOps) {}
+fn noop_trace_fn(_: NonNull<GcHead>, _: GcTraceOp) {}
 
-pub(super) fn trace_fn<T: GcTracable>(node: NonNull<GcHead>, tr: GcTraceOps) {
+pub(super) fn trace_fn<T: GcTracable>(node: NonNull<GcHead>, tr: GcTraceOp) {
     unsafe {
         node.as_ref().payload().cast::<T>().as_ref().trace(tr);
     }

@@ -9,7 +9,7 @@
 //! - Memory usage efficiency analysis
 //! - Automatic GC threshold performance
 
-use gc_lite::{GcHeap, GcRef, GcTracable, GcTraceOps};
+use gc_lite::{GcHeap, GcRef, GcTracable, GcTraceOp};
 use std::time::{Duration, Instant};
 
 fn main() {
@@ -268,7 +268,7 @@ struct SimpleNode {
 }
 
 unsafe impl GcTracable for SimpleNode {
-    fn trace(&self, _: GcTraceOps) {}
+    fn trace(&self, _: GcTraceOp) {}
 }
 
 /// Graph node for complex object graph testing
@@ -278,7 +278,7 @@ struct GraphNode {
 }
 
 unsafe impl GcTracable for GraphNode {
-    fn trace(&self, mut tr: GcTraceOps) {
+    fn trace(&self, mut tr: GcTraceOp) {
         for neighbor in &self.neighbors {
             tr.submit(*neighbor);
         }
@@ -292,5 +292,5 @@ struct SmallData {
 }
 
 unsafe impl GcTracable for SmallData {
-    fn trace(&self, _: GcTraceOps) {}
+    fn trace(&self, _: GcTraceOp) {}
 }

@@ -16,7 +16,7 @@ pub use {
     heap::GcHeap,
     node::{Gc, GcHead, GcRef},
     partition::{GcPartition, GcPartitionId},
-    trace::{GcTracable, GcTraceOp, GcTraceOps, GcTracer},
+    trace::{GcTracable, GcTraceOp, GcTracer},
     weak::GcWeak,
 };
 

@@ -9,7 +9,7 @@
 //! - Partition management errors
 //! - Invalid reference handling
 
-use gc_lite::{GcError, GcHeap, GcRef, GcResult, GcTracable, GcTraceOps};
+use gc_lite::{GcError, GcHeap, GcRef, GcResult, GcTracable, GcTraceOp};
 
 fn main() -> GcResult<()> {
     println!("=== Error handling example of partitioned garbage collection system ===");
@@ -192,7 +192,7 @@ struct LargeData {
 }
 
 unsafe impl GcTracable for LargeData {
-    fn trace(&self, _: GcTraceOps) {}
+    fn trace(&self, _: GcTraceOp) {}
 }
 
 /// Test data structure
@@ -203,7 +203,7 @@ struct TestData {
 }
 
 unsafe impl GcTracable for TestData {
-    fn trace(&self, _: GcTraceOps) {}
+    fn trace(&self, _: GcTraceOp) {}
 }
 
 /// Node structure for reference detection testing
@@ -214,7 +214,7 @@ struct Node {
 }
 
 unsafe impl GcTracable for Node {
-    fn trace(&self, mut tr: GcTraceOps) {
+    fn trace(&self, mut tr: GcTraceOp) {
         if let Some(next) = self.next {
             tr.submit(next);
         }

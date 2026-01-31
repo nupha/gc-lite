@@ -622,7 +622,7 @@ impl GcHeap {
                         }
                     };
 
-                    crate::GcTraceOp::Propagate
+                    true
                 });
             }
         }

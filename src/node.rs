@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     GcHeap, GcPartitionId, GcTracable,
-    trace::GcTraceOps,
+    trace::GcTraceOp,
     type_registry::{TypeRegistry, dispose_fn, trace_fn},
 };
 
@@ -128,7 +128,7 @@ impl GcHead {
     pub(super) fn get_trace_fn(
         &self,
         type_registry: &TypeRegistry,
-    ) -> fn(NonNull<GcHead>, GcTraceOps) {
+    ) -> fn(NonNull<GcHead>, GcTraceOp) {
         let f = type_registry.with_type_id(self.gc_type_id(), |t| t.trace_fn);
 
         #[cfg(debug_assertions)]
@@ -275,7 +275,7 @@ impl<T> GcRef<T> {
         } else {
             None
         };
-        let expected_trace_fn: unsafe fn(NonNull<GcHead>, GcTraceOps) = trace_fn::<T>;
+        let expected_trace_fn: unsafe fn(NonNull<GcHead>, GcTraceOp) = trace_fn::<T>;
 
         // If type index is 0, not a valid GC object
         if type_id == 0 {

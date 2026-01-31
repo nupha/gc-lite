@@ -4,7 +4,7 @@
 use std::{collections::HashMap, marker::PhantomData, ptr::NonNull};
 
 use crate::{
-    GcError, GcResult, GcTraceOp, GcTracer,
+    GcError, GcResult, GcTracer,
     allocator::GcAllocator,
     node::{GcHead, GcHeadFlag, GcRef},
     partition::{GcPartitionId, GcPartitionMgr},
@@ -444,9 +444,9 @@ impl GcHeap {
         tr.trace_iter(stack.iter().copied(), |mut n, _| unsafe {
             if !n.as_ref().is_marked() {
                 n.as_mut().set_marked(true);
-                GcTraceOp::Continue
+                true
             } else {
-                GcTraceOp::Prevent
+                false
             }
         });
 
@@ -520,7 +520,7 @@ impl GcHeap {
 
 #[cfg(test)]
 mod heap_tests {
-    use crate::trace::GcTraceOps;
+    use crate::trace::GcTraceOp;
 
     use super::*;
 
@@ -690,7 +690,7 @@ mod heap_tests {
         }
 
         unsafe impl GcTracable for Node {
-            fn trace(&self, mut tr: GcTraceOps) {
+            fn trace(&self, mut tr: GcTraceOp) {
                 if let Some(next) = self.next {
                     tr.submit(next);
                 }
