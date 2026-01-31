@@ -16,7 +16,7 @@ use crate::{
 bitflags::bitflags! {
     #[repr(transparent)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(crate) struct GcHeadFlag :u8 {
+    pub struct GcHeadFlag :u8 {
         /// is marked
         const MARKED = 1 << 0;
         /// is root node
@@ -54,13 +54,12 @@ impl GcHead {
     }
 
     #[cfg(debug_assertions)]
-    #[inline(always)]
     pub fn test_valid(&self) -> bool {
         self.flags().contains(GcHeadFlag::MAGIC_NUM)
     }
 
     #[inline(always)]
-    pub(crate) fn flags(&self) -> GcHeadFlag {
+    pub fn flags(&self) -> GcHeadFlag {
         GcHeadFlag::from_bits_retain(self.attrs as u8)
     }
 
@@ -230,6 +229,18 @@ impl<T> std::fmt::Debug for GcRef<T> {
 }
 
 impl<T> GcRef<T> {
+    /// Make an invalid GcRef.
+    ///
+    /// # Safety
+    ///
+    /// Don't access this pointer.
+    pub fn dangling() -> Self {
+        Self {
+            head_ptr: NonNull::dangling(),
+            _marker: PhantomData,
+        }
+    }
+
     #[inline(always)]
     pub fn downgrade(&self, heap: &mut crate::GcHeap) -> crate::weak::GcWeak<T> {
         heap.downgrade(self)
