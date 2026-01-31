@@ -226,7 +226,7 @@ unsafe impl GcTracable for TestNode {
     fn trace(&self, mut tr: GcTraceOp) {
         // Trace all child nodes
         for child in &self.children {
-            tr.submit(*child);
+            tr.add(*child);
         }
     }
 }

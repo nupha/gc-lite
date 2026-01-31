@@ -181,14 +181,14 @@ impl<T> Clone for GcRef<T> {
 impl<T> Deref for GcRef<T> {
     type Target = T;
 
-    #[inline]
+    #[inline(always)]
     fn deref(&self) -> &Self::Target {
         unsafe { self.head_ptr.as_ref().payload().cast::<T>().as_ref() }
     }
 }
 
 impl<T> DerefMut for GcRef<T> {
-    #[inline]
+    #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { self.head_ptr.as_ref().payload().cast::<T>().as_mut() }
     }
@@ -321,9 +321,16 @@ impl<T> GcRef<T> {
         }
     }
 
+    /// get node raw pointer
     #[inline(always)]
-    pub fn head_ptr(&self) -> NonNull<GcHead> {
+    pub fn node_ptr(&self) -> NonNull<GcHead> {
         self.head_ptr
+    }
+
+    /// get node info
+    #[inline(always)]
+    pub fn node_info(&self) -> &GcHead {
+        unsafe { self.head_ptr.as_ref() }
     }
 
     #[cfg(debug_assertions)]

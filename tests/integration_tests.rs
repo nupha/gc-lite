@@ -49,7 +49,7 @@ impl GcNode {
 unsafe impl GcTracable for GcNode {
     fn trace(&self, mut tr: GcTraceOp) {
         for child in &self.children {
-            tr.submit(*child);
+            tr.add(*child);
         }
     }
 }
@@ -731,10 +731,10 @@ fn test_contains_method() {
         .unwrap();
 
     // Verify object ownership
-    assert!(heap1.contains(obj1.head_ptr()));
-    assert!(!heap1.contains(obj2.head_ptr()));
-    assert!(heap2.contains(obj2.head_ptr()));
-    assert!(!heap2.contains(obj1.head_ptr()));
+    assert!(heap1.contains(obj1.node_ptr()));
+    assert!(!heap1.contains(obj2.node_ptr()));
+    assert!(heap2.contains(obj2.node_ptr()));
+    assert!(!heap2.contains(obj1.node_ptr()));
 }
 
 // ============ Reference Recovery Tests ============

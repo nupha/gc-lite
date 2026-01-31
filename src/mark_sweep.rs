@@ -158,11 +158,8 @@ impl GcHeap {
 
     /// Dispose a node
     pub(super) unsafe fn dispose(&mut self, node: NonNull<GcHead>) -> usize {
-        #[cfg(debug_assertions)]
-        eprintln!("[DISPOSE] called: node={:p}", node);
-
-        let type_idx = unsafe { (*node.as_ptr()).gc_type_id() };
-        debug_assert_ne!(type_idx, 0);
+        let gc_type_id = unsafe { (*node.as_ptr()).gc_type_id() };
+        debug_assert_ne!(gc_type_id, 0);
 
         if let Some(w) = unsafe { (*node.as_ptr()).weakref_index() } {
             // clear weak slot node pointer - mark the weak slot is free.
@@ -175,7 +172,7 @@ impl GcHeap {
 
         let (size, dispose_fn) = self
             .type_registry
-            .with_type_id(type_idx, |t| (t.size as usize, t.dispose_fn))
+            .with_type_id(gc_type_id, |t| (t.size as usize, t.dispose_fn))
             .unwrap();
 
         let gross_size = std::mem::size_of::<GcHead>() + size;

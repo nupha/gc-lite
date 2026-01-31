@@ -216,7 +216,7 @@ struct Node {
 unsafe impl GcTracable for Node {
     fn trace(&self, mut tr: GcTraceOp) {
         if let Some(next) = self.next {
-            tr.submit(next);
+            tr.add(next);
         }
     }
 }

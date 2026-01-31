@@ -352,7 +352,7 @@ impl GcHeap {
                     // Call master's trace function to trace all objects it references
                     tracer.clear();
                     let trace_fn = master.as_ref().get_trace_fn(&tracer.heap().type_registry);
-                    trace_fn(master, tracer.ops());
+                    trace_fn(master, tracer.op());
 
                     // Check if target object is included in trace results
                     tracer.pendings.iter().any(|h| *h == slave)
@@ -692,7 +692,7 @@ mod heap_tests {
         unsafe impl GcTracable for Node {
             fn trace(&self, mut tr: GcTraceOp) {
                 if let Some(next) = self.next {
-                    tr.submit(next);
+                    tr.add(next);
                 }
             }
         }

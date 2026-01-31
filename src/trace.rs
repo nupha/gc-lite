@@ -44,7 +44,9 @@ impl<'a> GcTracer<'a> {
         }
     }
 
-    fn new(heap: NonNull<GcHeap>, partition_id: GcPartitionId) -> Self {
+    /// create new tracer for specified partition.
+    /// clear all visit and mark flags to be ready for new tracing.
+    pub fn new(heap: NonNull<GcHeap>, partition_id: GcPartitionId) -> Self {
         let tr = GcTracer {
             heap,
             partition_id,
@@ -112,9 +114,9 @@ impl<'a> GcTracer<'a> {
         }
     }
 
-    /// make trace ops
+    /// make trace op
     #[inline(always)]
-    pub(crate) const fn ops(&mut self) -> GcTraceOp<'_> {
+    pub const fn op(&mut self) -> GcTraceOp<'_> {
         GcTraceOp(NonNull::from_ref(self))
     }
 
@@ -134,7 +136,7 @@ impl<'a> GcTracer<'a> {
                     // propagate trace into `node`
                     let tt = &self.heap.as_ref().type_registry;
                     let trace_fn = node.as_ref().get_trace_fn(tt);
-                    trace_fn(node, self.ops());
+                    trace_fn(node, self.op());
                 }
             }
         }
@@ -191,18 +193,35 @@ impl<'a> GcTracer<'a> {
 pub struct GcTraceOp<'a>(NonNull<GcTracer<'a>>);
 
 impl<'a> GcTraceOp<'a> {
-    /// Submit a refrenced node to tracer, whilch will be traced later.
-    #[inline]
-    pub fn submit<T: GcTracable>(&mut self, gc_ref: GcRef<T>) {
+    #[inline(always)]
+    pub const fn heap(&self) -> &GcHeap {
+        unsafe { &*self.0.as_ref().heap.as_ptr() }
+    }
+
+    /// Submit a gc refrence to tracer, whilch will be traced later.
+    #[inline(always)]
+    pub fn add<T: GcTracable>(&mut self, gc_ref: GcRef<T>) {
+        self.add_node(gc_ref.head_ptr);
+    }
+
+    /// Submit a node to tracer, whilch will be traced later.
+    #[inline(always)]
+    pub fn add_node(&mut self, node: NonNull<GcHead>) {
         unsafe {
-            self.0.as_mut().pendings.push_back(gc_ref.head_ptr);
+            self.0.as_mut().pendings.push_back(node);
+        }
+    }
+
+    /// Submit nodes to tracer, whilch will be traced later.
+    pub fn add_nodes(&mut self, nodes: impl Iterator<Item = NonNull<GcHead>>) {
+        for n in nodes {
+            self.add_node(n);
         }
     }
 }
 
 impl GcHeap {
-    /// create new tracer for specified partition.
-    /// clear all visit and mark flags to be ready for new tracing.
+    /// A shortcut to GcTracer::new() with `self` being mut borrowed.
     #[inline(always)]
     pub fn tracer(&mut self, partition_id: GcPartitionId) -> GcTracer<'_> {
         GcTracer::new(NonNull::from(self), partition_id)
@@ -253,7 +272,7 @@ unsafe impl GcTracable for String {
 }
 
 unsafe impl<T: GcTracable> GcTracable for Option<T> {
-    #[inline]
+    #[inline(always)]
     fn trace(&self, tr: GcTraceOp) {
         if let Some(v) = self {
             v.trace(tr);
@@ -303,8 +322,8 @@ mod tests {
             );
 
             for (i, child) in self.children.iter().enumerate() {
-                println!("  Tracing child {}: {:?}", i, child.head_ptr());
-                tr.submit(*child);
+                println!("  Tracing child {}: {:?}", i, child.node_ptr());
+                tr.add(*child);
             }
         }
     }
@@ -363,14 +382,14 @@ mod tests {
         let root_ref = heap.alloc(partition_id, root).unwrap();
 
         // Debug: print node pointers
-        println!("Root: {:?}", root_ref.head_ptr());
-        println!("Child1: {:?}", child1.head_ptr());
-        println!("Child2: {:?}", child2.head_ptr());
+        println!("Root: {:?}", root_ref.node_ptr());
+        println!("Child1: {:?}", child1.node_ptr());
+        println!("Child2: {:?}", child2.node_ptr());
 
         // Create tracer and trace with Propagate (using MARK_FUNC)
         let mut tracer = heap.tracer(partition_id);
 
-        tracer.trace(root_ref.head_ptr(), GcTracer::MARK_FUNC);
+        tracer.trace(root_ref.node_ptr(), GcTracer::MARK_FUNC);
 
         // check marks after tracing
         println!(
@@ -417,7 +436,7 @@ mod tests {
 
         // Create tracer and trace with Continue
         let mut tracer = heap.tracer(partition_id);
-        tracer.trace(root_ref.head_ptr(), continue_handle);
+        tracer.trace(root_ref.node_ptr(), continue_handle);
 
         // Verify all nodes are marked
         assert_eq!(count_marked_nodes(tracer.heap(), partition_id), 3);
@@ -449,7 +468,7 @@ mod tests {
 
         // Test with Propagate
         let mut tracer1 = heap.tracer(partition_id);
-        tracer1.trace(level0_ref.head_ptr(), GcTracer::MARK_FUNC);
+        tracer1.trace(level0_ref.node_ptr(), GcTracer::MARK_FUNC);
         assert_eq!(count_marked_nodes(&heap, partition_id), 4);
 
         // Test with Continue
@@ -467,7 +486,7 @@ mod tests {
             }
         }
 
-        tracer2.trace(level0_ref.head_ptr(), continue_and_mark_handle);
+        tracer2.trace(level0_ref.node_ptr(), continue_and_mark_handle);
         assert_eq!(count_marked_nodes(&heap, partition_id), 4);
     }
 
@@ -506,7 +525,7 @@ mod tests {
 
         // Test with Propagate
         let mut tracer1 = heap.tracer(partition_id);
-        tracer1.trace(root_ref.head_ptr(), GcTracer::MARK_FUNC);
+        tracer1.trace(root_ref.node_ptr(), GcTracer::MARK_FUNC);
         assert_eq!(count_marked_nodes(&heap, partition_id), 7);
 
         // Test with Continue
@@ -523,7 +542,7 @@ mod tests {
             }
         }
 
-        tracer2.trace(root_ref.head_ptr(), continue_and_mark_handle);
+        tracer2.trace(root_ref.node_ptr(), continue_and_mark_handle);
         assert_eq!(count_marked_nodes(&heap, partition_id), 7);
     }
 
@@ -571,7 +590,7 @@ mod tests {
 
         // Test with Propagate
         let mut tracer1 = heap.tracer(partition_id);
-        tracer1.trace(nodes[0].head_ptr(), GcTracer::MARK_FUNC);
+        tracer1.trace(nodes[0].node_ptr(), GcTracer::MARK_FUNC);
         let propagate_marked = count_marked_nodes(&heap, partition_id);
 
         // Test with Continue
@@ -588,7 +607,7 @@ mod tests {
             }
         }
 
-        tracer2.trace(nodes[0].head_ptr(), continue_and_mark_handle);
+        tracer2.trace(nodes[0].node_ptr(), continue_and_mark_handle);
         let continue_marked = count_marked_nodes(&heap, partition_id);
 
         // Both algorithms should mark the same number of nodes
@@ -613,7 +632,7 @@ mod tests {
 
         // Test with Propagate - should handle circular reference without infinite loop
         let mut tracer1 = heap.tracer(partition_id);
-        tracer1.trace(node1.head_ptr(), GcTracer::MARK_FUNC);
+        tracer1.trace(node1.node_ptr(), GcTracer::MARK_FUNC);
 
         // Both nodes should be marked
         assert_eq!(count_marked_nodes(&heap, partition_id), 2);
@@ -632,7 +651,7 @@ mod tests {
             }
         }
 
-        tracer2.trace(node1.head_ptr(), continue_and_mark_handle);
+        tracer2.trace(node1.node_ptr(), continue_and_mark_handle);
         assert_eq!(count_marked_nodes(&heap, partition_id), 2);
     }
 }

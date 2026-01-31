@@ -284,19 +284,19 @@ fn demonstrate_cross_context_detection() -> GcResult<()> {
 
     println!("2. Test object source detection...");
     assert!(
-        context1.contains(obj1.head_ptr()),
+        context1.contains(obj1.node_ptr()),
         "obj1 should be from context1"
     );
     assert!(
-        !context1.contains(obj2.head_ptr()),
+        !context1.contains(obj2.node_ptr()),
         "obj2 should not be from context1"
     );
     assert!(
-        context2.contains(obj2.head_ptr()),
+        context2.contains(obj2.node_ptr()),
         "obj2 should be from context2"
     );
     assert!(
-        !context2.contains(obj1.head_ptr()),
+        !context2.contains(obj1.node_ptr()),
         "obj1 should not be from context2"
     );
 
@@ -342,7 +342,7 @@ impl CyclicNode {
 unsafe impl GcTracable for CyclicNode {
     fn trace(&self, mut tr: GcTraceOp) {
         if let Some(partner) = self.partner {
-            tr.submit(partner);
+            tr.add(partner);
         }
     }
 }
@@ -376,7 +376,7 @@ impl TreeNode {
 unsafe impl GcTracable for TreeNode {
     fn trace(&self, mut tr: GcTraceOp) {
         for child in &self.children {
-            tr.submit(*child);
+            tr.add(*child);
         }
     }
 }
@@ -402,9 +402,9 @@ struct DataContainer {
 
 unsafe impl GcTracable for DataContainer {
     fn trace(&self, mut tr: GcTraceOp) {
-        tr.submit(self.root);
+        tr.add(self.root);
         if let Some(data) = self.optional_data {
-            tr.submit(data);
+            tr.add(data);
         }
     }
 }
