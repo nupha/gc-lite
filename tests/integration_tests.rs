@@ -316,9 +316,8 @@ fn test_object_allocation() {
     assert!(after_memory > initial_memory);
 
     // Verify object content
-    let data = unsafe { obj.as_ref() };
-    assert_eq!(data.value, 42);
-    assert_eq!(data.name, "test");
+    assert_eq!(obj.value, 42);
+    assert_eq!(obj.name, "test");
 }
 
 #[test]
@@ -397,9 +396,8 @@ fn test_multiple_object_allocation() {
 
     // Verify all objects
     for (i, obj) in objs.iter().enumerate() {
-        let data = unsafe { obj.as_ref() };
-        assert_eq!(data.value, i as i32);
-        assert_eq!(data.name, format!("obj_{}", i));
+        assert_eq!(obj.value, i as i32);
+        assert_eq!(obj.name, format!("obj_{}", i));
     }
 
     // Verify memory tracking
@@ -505,8 +503,7 @@ fn test_root_objects_preserve_during_gc() {
     assert_eq!(freed, 0);
 
     // Object should still be valid
-    let data = unsafe { obj.as_ref() };
-    assert_eq!(data.value, 42);
+    assert_eq!(obj.value, 42);
 }
 
 #[test]
@@ -543,8 +540,7 @@ fn test_non_root_objects_collected() {
     assert!(freed > 0);
 
     // Root object should still be valid
-    let data = unsafe { root_obj.as_ref() };
-    assert_eq!(data.value, 1);
+    assert_eq!(root_obj.value, 1);
 }
 
 // ============ Garbage Collection Tests ============
@@ -591,22 +587,20 @@ fn test_circular_reference_handling() {
     let id = heap.create_root_partition(2048);
 
     // Create two nodes that reference each other
-    let node1 = heap.alloc(id, GcNode::new(1)).unwrap();
-    let node2 = heap.alloc(id, GcNode::new(2)).unwrap();
+    let mut node1 = heap.alloc(id, GcNode::new(1)).unwrap();
+    let mut node2 = heap.alloc(id, GcNode::new(2)).unwrap();
 
     // Create circular reference
-    unsafe {
-        node1.as_mut().add_child(node2);
-        node2.as_mut().add_child(node1);
-    }
+    node1.add_child(node2);
+    node2.add_child(node1);
 
     // Set both as roots - they should be preserved
     heap.set_root(node1, true);
     heap.set_root(node2, true);
 
     // Verify node values are correct
-    let node1_val = unsafe { node1.as_ref().value };
-    let node2_val = unsafe { node2.as_ref().value };
+    let node1_val = node1.value;
+    let node2_val = node2.value;
     assert_eq!(node1_val, 1);
     assert_eq!(node2_val, 2);
 
@@ -648,8 +642,7 @@ fn test_weak_reference_creation_and_upgrade() {
     assert!(upgraded.is_some());
 
     let upgraded_ref = upgraded.unwrap();
-    let data = unsafe { upgraded_ref.as_ref() };
-    assert_eq!(data.value, 42);
+    assert_eq!(upgraded_ref.value, 42);
 }
 
 #[test]
@@ -816,6 +809,6 @@ fn test_gc_wrapper_deref() {
     assert_eq!(gc.name, "test");
 
     // Test as_mut
-    gc.as_mut().value = 100;
+    gc.value = 100;
     assert_eq!(gc.value, 100);
 }

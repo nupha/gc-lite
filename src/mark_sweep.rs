@@ -208,10 +208,10 @@ impl GcHeap {
 
         #[cfg(debug_assertions)]
         unsafe {
-            // clear MAGIC_NUM flag, mark this node is invalid.
-            let mut flags = (*node.as_ptr()).flags();
-            flags.remove(crate::node::GcHeadFlag::MAGIC_NUM);
-            (*node.as_ptr()).attrs = ((*node.as_ptr()).attrs & !0xFF) | (flags.bits() as u32);
+            // clear MAGIC_NUM flag: mark this node invalid.
+            let mut f = (*node.as_ptr()).flags();
+            f.remove(crate::node::GcHeadFlag::MAGIC_NUM);
+            (*node.as_ptr()).set_flags(f);
         }
 
         let (size, dispose_fn) = self
@@ -223,8 +223,7 @@ impl GcHeap {
 
         if let Some(f) = dispose_fn {
             unsafe {
-                let payload = (node.as_ptr() as *mut u8).add(std::mem::size_of::<GcHead>());
-                f(payload);
+                f(node.as_ref().payload().as_ptr());
             }
         }
 

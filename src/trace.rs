@@ -286,6 +286,8 @@ unsafe impl<T: GcTracable> GcTracable for Box<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::DerefMut;
+
     use super::*;
     use crate::{GcHeap, GcRef};
 
@@ -605,16 +607,33 @@ mod tests {
         }
 
         // Build tree: 0 -> 1,2; 1 -> 3,4; 2 -> 5,6; 3 -> 7,8; 4 -> 9
-        unsafe {
-            nodes[0].as_mut().add_child(nodes[1]);
-            nodes[0].as_mut().add_child(nodes[2]);
-            nodes[1].as_mut().add_child(nodes[3]);
-            nodes[1].as_mut().add_child(nodes[4]);
-            nodes[2].as_mut().add_child(nodes[5]);
-            nodes[2].as_mut().add_child(nodes[6]);
-            nodes[3].as_mut().add_child(nodes[7]);
-            nodes[3].as_mut().add_child(nodes[8]);
-            nodes[4].as_mut().add_child(nodes[9]);
+        {
+            let n = nodes[1];
+            nodes[0].add_child(n);
+
+            let n = nodes[2];
+            nodes[0].deref_mut().add_child(n);
+
+            let n = nodes[3];
+            nodes[1].deref_mut().add_child(n);
+
+            let n = nodes[4];
+            nodes[1].deref_mut().add_child(n);
+
+            let n = nodes[5];
+            nodes[2].deref_mut().add_child(n);
+
+            let n = nodes[6];
+            nodes[2].deref_mut().add_child(n);
+
+            let n = nodes[7];
+            nodes[3].deref_mut().add_child(n);
+
+            let n = nodes[8];
+            nodes[3].deref_mut().add_child(n);
+
+            let n = nodes[9];
+            nodes[4].deref_mut().add_child(n);
         }
 
         // Test with Propagate
@@ -651,12 +670,12 @@ mod tests {
         let partition_id = heap.create_root_partition(4096);
 
         // Create two nodes that reference each other
-        let node1 = heap.alloc(partition_id, TestNode::new(1)).unwrap();
-        let node2 = heap.alloc(partition_id, TestNode::new(2)).unwrap();
+        let mut node1 = heap.alloc(partition_id, TestNode::new(1)).unwrap();
+        let mut node2 = heap.alloc(partition_id, TestNode::new(2)).unwrap();
 
-        unsafe {
-            node1.as_mut().add_child(node2);
-            node2.as_mut().add_child(node1);
+        {
+            node1.add_child(node2);
+            node2.add_child(node1);
         }
 
         // Test with Propagate - should handle circular reference without infinite loop

@@ -253,13 +253,13 @@ fn demonstrate_reference_detection_errors() -> GcResult<()> {
         next: None,
     };
 
-    let gc_ref1: GcRef<Node> = context.alloc(partition_id, node1).unwrap();
-    let gc_ref2: GcRef<Node> = context.alloc(partition_id, node2).unwrap();
+    let mut gc_ref1: GcRef<Node> = context.alloc(partition_id, node1).unwrap();
+    let mut gc_ref2: GcRef<Node> = context.alloc(partition_id, node2).unwrap();
 
     // Set mutual references
-    unsafe {
-        (*gc_ref1.as_mut_ptr()).next = Some(gc_ref2);
-        (*gc_ref2.as_mut_ptr()).next = Some(gc_ref1);
+    {
+        gc_ref1.next = Some(gc_ref2);
+        gc_ref2.next = Some(gc_ref1);
     }
 
     println!("2. Test releasing referenced objects...");
@@ -273,8 +273,8 @@ fn demonstrate_reference_detection_errors() -> GcResult<()> {
 
     // First remove mutual references
     unsafe {
-        (*gc_ref1.as_mut_ptr()).next = None;
-        (*gc_ref2.as_mut_ptr()).next = None;
+        gc_ref1.next = None;
+        gc_ref2.next = None;
     }
 
     println!("3. Test release after removing references...");

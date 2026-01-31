@@ -9,6 +9,8 @@
 //! - Reference recovery and validation
 //! - Cross-context object detection
 
+use std::ops::Deref;
+
 use gc_lite::{GcHeap, GcRef, GcResult, GcTracable};
 
 fn main() -> GcResult<()> {
@@ -60,7 +62,7 @@ fn demonstrate_weak_references(
     println!("\n2. Upgrade weak reference...");
     match weak_ref.upgrade(heap) {
         Some(upgraded) => {
-            let data = unsafe { upgraded.as_ref() };
+            let data = upgraded.deref();
             println!("  Weak reference upgrade successful: '{}'", data);
             assert_eq!(data, "Strong Reference Data");
         }
@@ -90,21 +92,21 @@ fn demonstrate_cyclic_references(
     println!("1. Create circular reference nodes...");
 
     // Create two mutually referencing nodes
-    let node1 = heap
+    let mut node1 = heap
         .alloc(partition, CyclicNode::new("Node A"))
         .map_err(|(err, _)| err)?;
-    let node2 = heap
+    let mut node2 = heap
         .alloc(partition, CyclicNode::new("Node B"))
         .map_err(|(err, _)| err)?;
 
     // Establish circular references
-    unsafe {
-        node1.as_mut().set_partner(node2);
-        node2.as_mut().set_partner(node1);
+    {
+        node1.set_partner(node2);
+        node2.set_partner(node1);
     }
 
-    println!("  Created node1: {}", unsafe { node1.as_ref() });
-    println!("  Created node2: {}", unsafe { node2.as_ref() });
+    println!("  Created node1: {}", node1.deref());
+    println!("  Created node2: {}", node2.deref());
 
     // Set as root objects
     heap.set_root(node1, true);
@@ -117,12 +119,8 @@ fn demonstrate_cyclic_references(
 
     // Verify circular references still exist
     println!("\n3. Verify circular references...");
-    println!("  Node1's partner: {}", unsafe {
-        node1.as_ref().get_partner_name()
-    });
-    println!("  Node2's partner: {}", unsafe {
-        node2.as_ref().get_partner_name()
-    });
+    println!("  Node1's partner: {}", node1.get_partner_name());
+    println!("  Node2's partner: {}", node2.get_partner_name());
 
     // Clear root object status, let circular references be collected
     println!("\n4. Clear root object status and trigger GC again...");
@@ -146,24 +144,24 @@ fn demonstrate_complex_structures(
     println!("1. Create complex data structures...");
 
     // Create multiple nodes
-    let root_node = heap
+    let mut root_node = heap
         .alloc(partition, TreeNode::new("Root"))
         .map_err(|(err, _)| err)?;
-    let child1 = heap
+    let mut child1 = heap
         .alloc(partition, TreeNode::new("Child 1"))
         .map_err(|(err, _)| err)?;
-    let child2 = heap
+    let mut child2 = heap
         .alloc(partition, TreeNode::new("Child 2"))
         .map_err(|(err, _)| err)?;
-    let grandchild = heap
+    let mut grandchild = heap
         .alloc(partition, TreeNode::new("Grandchild"))
         .map_err(|(err, _)| err)?;
 
     // Build tree structure
-    unsafe {
-        root_node.as_mut().add_child(child1);
-        root_node.as_mut().add_child(child2);
-        child1.as_mut().add_child(grandchild);
+    {
+        root_node.add_child(child1);
+        root_node.add_child(child2);
+        child1.add_child(grandchild);
     }
 
     // Create data container
@@ -192,16 +190,12 @@ fn demonstrate_complex_structures(
 
     // Verify data structure integrity
     println!("\n3. Verify data structure integrity...");
-    unsafe {
-        let container_ref = container.as_ref();
-        println!(
-            "  Container root node: {}",
-            container_ref.root.as_ref().name
-        );
-        println!("  Metadata length: {}", container_ref.metadata.len());
+    {
+        println!("  Container root node: {}", container.root.name);
+        println!("  Metadata length: {}", container.metadata.len());
         println!(
             "  Optional data exists: {}",
-            container_ref.optional_data.is_some()
+            container.optional_data.is_some()
         );
     }
 
@@ -225,7 +219,7 @@ fn demonstrate_reference_recovery(
         )
         .map_err(|(err, _)| err)?;
 
-    let data_ref = unsafe { original_ref.as_ref() };
+    let data_ref = original_ref.deref();
     println!("  Original reference: {:?}", original_ref);
     println!("  Data: {:?}", data_ref);
 
@@ -236,7 +230,7 @@ fn demonstrate_reference_recovery(
     match recovered_ref {
         Some(recovered) => {
             println!("  Recovery successful: {:?}", recovered);
-            let recovered_data = unsafe { recovered.as_ref() };
+            let recovered_data = recovered.deref();
             println!("  Recovered data: {:?}", recovered_data);
             println!("  Data equal: {}", data_ref == recovered_data);
             println!("  Reference equal: {}", original_ref == recovered);
@@ -340,7 +334,7 @@ impl CyclicNode {
 
     fn get_partner_name(&self) -> String {
         self.partner
-            .map(|p| unsafe { p.as_ref().name.clone() })
+            .map(|p| p.name.clone())
             .unwrap_or_else(|| "None".to_string())
     }
 }

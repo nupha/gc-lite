@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{marker::PhantomData, ptr::NonNull};
+use std::{
+    marker::PhantomData,
+    ops::{Deref, DerefMut},
+    ptr::NonNull,
+};
 
 use crate::{
     GcHeap, GcPartitionId, GcTracable, GcTracer,
@@ -123,9 +127,12 @@ impl GcHead {
             .unwrap()
     }
 
-    /// get start pointer to payload data
+    /// get raw pointer to payload data
     #[inline(always)]
     pub unsafe fn payload(&self) -> NonNull<u8> {
+        #[cfg(debug_assertions)]
+        debug_assert!(self.test_valid(), "gc head is not valid: {self:p}");
+
         unsafe {
             NonNull::from_ref(self)
                 .cast::<u8>()
@@ -142,7 +149,7 @@ pub struct GcRef<T> {
 }
 
 impl<T> Clone for GcRef<T> {
-    #[inline(always)]
+    #[inline]
     fn clone(&self) -> Self {
         Self {
             head_ptr: self.head_ptr,
@@ -151,16 +158,19 @@ impl<T> Clone for GcRef<T> {
     }
 }
 
-impl<T> std::fmt::Debug for GcRef<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        #[cfg(debug_assertions)]
-        {
-            write!(f, "GcRef({:p}:{:p})", self.head_ptr, self.as_ptr())
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            write!(f, "GcRef({:p})", self.as_ptr())
-        }
+impl<T> Deref for GcRef<T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.head_ptr.as_ref().payload().cast::<T>().as_ref() }
+    }
+}
+
+impl<T> DerefMut for GcRef<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { self.head_ptr.as_ref().payload().cast::<T>().as_mut() }
     }
 }
 
@@ -175,42 +185,40 @@ impl<T> Eq for GcRef<T> {}
 
 impl<T> Copy for GcRef<T> {}
 
+impl<T> std::fmt::Debug for GcRef<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "GcRef({:p}:{:p})",
+            self.head_ptr,
+            std::ops::Deref::deref(self)
+        )
+    }
+}
+
 impl<T> GcRef<T> {
-    /// get raw pointer to T
-    #[inline(always)]
-    pub fn as_mut_ptr(&self) -> *mut T {
-        unsafe {
-            #[cfg(debug_assertions)]
-            debug_assert!(
-                self.test_valid(),
-                "gc head is not valid: {:p}",
-                self.head_ptr
-            );
+    // #[inline(always)]
+    // pub unsafe fn as_ref(&self) -> &T {
+    //     unsafe { self.head_ptr.as_ref().payload().cast::<T>().as_ref() }
+    // }
 
-            let data_ptr = (self.head_ptr.as_ptr() as *mut u8).add(std::mem::size_of::<GcHead>());
-            data_ptr.cast::<T>()
-        }
+    // #[inline(always)]
+    // pub unsafe fn as_mut(&mut self) -> &mut T {
+    //     unsafe { self.head_ptr.as_ref().payload().cast::<T>().as_mut() }
+    // }
+
+    #[inline(always)]
+    pub fn _as_ptr(&self) -> NonNull<T> {
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            self.test_valid(),
+            "gc head is not valid: {:p}",
+            self.head_ptr
+        );
+
+        unsafe { self.head_ptr.as_ref().payload().cast::<T>() }
     }
 
-    /// 获取指向T的原始指针
-    #[inline(always)]
-    pub fn as_ptr(&self) -> *const T {
-        self.as_mut_ptr() as *const T
-    }
-
-    /// Get reference
-    #[inline(always)]
-    pub unsafe fn as_ref(&self) -> &T {
-        unsafe { &*self.as_ptr() }
-    }
-
-    /// Get mutable reference
-    #[inline(always)]
-    pub unsafe fn as_mut(&self) -> &mut T {
-        unsafe { &mut *self.as_mut_ptr() }
-    }
-
-    /// Downgrade to weakref
     #[inline(always)]
     pub fn downgrade(&self, heap: &mut crate::GcHeap) -> crate::weak::GcWeak<T> {
         heap.downgrade(self)
@@ -333,6 +341,36 @@ pub struct Gc<'heap, T> {
     _marker: std::marker::PhantomData<&'heap ()>,
 }
 
+impl<'heap, T> Deref for Gc<'heap, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner.deref()
+    }
+}
+
+impl<'heap, T> DerefMut for Gc<'heap, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.inner.deref_mut()
+    }
+}
+
+impl<'heap, T: GcTracable> Clone for Gc<'heap, T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<'heap, T: GcTracable> std::fmt::Debug for Gc<'heap, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Gc({:p}:{:p})", self.inner.head_ptr, self.deref())
+    }
+}
+
 impl<'heap, T: GcTracable> Gc<'heap, T> {
     /// Create new GC object (specify partition)
     pub fn new_in_partition(
@@ -347,18 +385,6 @@ impl<'heap, T: GcTracable> Gc<'heap, T> {
             }),
             Err((err, _)) => Err(err),
         }
-    }
-
-    /// Get internal reference
-    #[inline(always)]
-    pub fn as_ref(&self) -> &T {
-        unsafe { self.inner.as_ref() }
-    }
-
-    /// Get mutable internal reference
-    #[inline(always)]
-    pub fn as_mut(&mut self) -> &mut T {
-        unsafe { self.inner.as_mut() }
     }
 
     /// Get internal GC reference
@@ -376,37 +402,5 @@ impl<'heap, T: GcTracable> Gc<'heap, T> {
     #[inline(always)]
     pub fn is_root(&self) -> bool {
         self.inner.is_root()
-    }
-}
-
-impl<'heap, T: GcTracable> Clone for Gc<'heap, T> {
-    #[inline(always)]
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner,
-            _marker: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<'heap, T: GcTracable> std::fmt::Debug for Gc<'heap, T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Gc({:?})", self.inner)
-    }
-}
-
-impl<'heap, T: GcTracable> std::ops::Deref for Gc<'heap, T> {
-    type Target = T;
-
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        self.as_ref()
-    }
-}
-
-impl<'heap, T: GcTracable> std::ops::DerefMut for Gc<'heap, T> {
-    #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.as_mut()
     }
 }

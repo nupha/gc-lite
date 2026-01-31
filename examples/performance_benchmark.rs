@@ -112,16 +112,18 @@ fn benchmark_complex_graphs() {
 
         // Establish complex dependencies
         for i in 0..size {
-            unsafe {
+            {
                 // Each node points to subsequent nodes
                 for j in 1..=5 {
                     if i + j < size {
-                        (*nodes[i].as_mut_ptr()).neighbors.push(nodes[i + j]);
+                        let n = nodes[i + j];
+                        nodes[i].neighbors.push(n);
                     }
                 }
                 // Every 10 nodes form a cycle
                 if i % 10 == 0 && i + 9 < size {
-                    (*nodes[i + 9].as_mut_ptr()).neighbors.push(nodes[i]);
+                    let n = nodes[i];
+                    nodes[i + 9].neighbors.push(n);
                 }
             }
         }

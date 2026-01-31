@@ -10,6 +10,8 @@
 //! - Weak reference usage
 //! - Partition management
 
+use std::ops::Deref;
+
 use gc_lite::{GcHeap, GcRef, GcResult, GcTracable};
 
 fn main() -> GcResult<()> {
@@ -39,9 +41,9 @@ fn main() -> GcResult<()> {
         .alloc(partition1, String::from("VectorData"))
         .map_err(|(err, _)| err)?;
 
-    println!("  Created string: '{}'", unsafe { obj1.as_ref() });
-    println!("  Created number: {}", unsafe { obj2.as_ref() });
-    println!("  Created string: '{}'", unsafe { obj3.as_ref() });
+    println!("  Created string: '{}'", obj1.deref());
+    println!("  Created number: {}", obj2.deref());
+    println!("  Created string: '{}'", obj3.deref());
 
     // Allocate objects in partition2
     println!("\nAllocate objects in partition2:");
@@ -50,8 +52,8 @@ fn main() -> GcResult<()> {
         .map_err(|(err, _)| err)?;
     let obj5 = heap.alloc(partition2, 99).map_err(|(err, _)| err)?;
 
-    println!("  Created string: '{}'", unsafe { obj4.as_ref() });
-    println!("  Created number: {}", unsafe { obj5.as_ref() });
+    println!("  Created string: '{}'", obj4.deref());
+    println!("  Created number: {}", obj5.deref());
 
     // Display partition status
     println!("\nPartition status:");
@@ -95,8 +97,8 @@ fn main() -> GcResult<()> {
 
     // Verify root objects are still valid
     println!("\nVerify partition1 root objects are still valid:");
-    println!("  Object1: '{}'", unsafe { obj1.as_ref() });
-    println!("  Object2: {}", unsafe { obj2.as_ref() });
+    println!("  Object1: '{}'", obj1.deref());
+    println!("  Object2: {}", obj2.deref());
 
     // Manually trigger garbage collection for partition2
     println!("\nManually trigger garbage collection for partition2...");
@@ -105,7 +107,7 @@ fn main() -> GcResult<()> {
 
     // Verify partition2 root objects are still valid
     println!("\nVerify partition2 root objects are still valid:");
-    println!("  Object4: '{}'", unsafe { obj4.as_ref() });
+    println!("  Object4: '{}'", obj4.deref());
 
     // Clear some root objects
     println!("\nClear root object status:");
@@ -119,7 +121,7 @@ fn main() -> GcResult<()> {
 
     // Verify remaining root objects are still valid
     println!("\nVerify remaining root objects are still valid:");
-    println!("  Object1: '{}'", unsafe { obj1.as_ref() });
+    println!("  Object1: '{}'", obj1.deref());
 
     // Demonstrate automatic garbage collection
     println!("\nDemonstrate automatic garbage collection...");
@@ -144,8 +146,10 @@ fn main() -> GcResult<()> {
     // Upgrade weak reference
     match weak_ref.upgrade(&heap) {
         Some(strong_ref) => {
-            let value = unsafe { strong_ref.as_ref() };
-            println!("  Weak reference upgrade successful: '{}'", value);
+            println!(
+                "  Weak reference upgrade successful: '{}'",
+                strong_ref.deref()
+            );
         }
         None => {
             println!("  Weak reference upgrade failed");
@@ -154,10 +158,10 @@ fn main() -> GcResult<()> {
 
     // Demonstrate complex types with GC references
     println!("\nDemonstrate complex types with GC references:");
-    let node1 = heap
+    let mut node1 = heap
         .alloc(partition1, TestNode::new("Node 1"))
         .map_err(|(err, _)| err)?;
-    let node2 = heap
+    let mut node2 = heap
         .alloc(partition1, TestNode::new("Node 2"))
         .map_err(|(err, _)| err)?;
 
@@ -166,13 +170,13 @@ fn main() -> GcResult<()> {
     heap.set_root(node2, true);
 
     // Establish references between nodes
-    unsafe {
-        node1.as_mut().add_child(node2);
-        node2.as_mut().add_child(node1);
+    {
+        node1.add_child(node2);
+        node2.add_child(node1);
     }
 
-    println!("  Created node1: {}", unsafe { node1.as_ref() });
-    println!("  Created node2: {}", unsafe { node2.as_ref() });
+    println!("  Created node1: {}", node1.deref());
+    println!("  Created node2: {}", node2.deref());
 
     // Trigger garbage collection, verify circular references are handled correctly
     println!("\nGarbage collection for handling circular references...");
