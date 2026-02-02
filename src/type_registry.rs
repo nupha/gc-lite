@@ -120,8 +120,7 @@ impl GcHeap {
         self.type_registry.gc_type_of::<T>()
     }
 
-    #[cfg(debug_assertions)]
-    pub fn get_node_type(&self, node: NonNull<GcHead>) -> &GcTypeInfo {
+    pub fn get_node_gc_type(&self, node: NonNull<GcHead>) -> &GcTypeInfo {
         unsafe { &self.type_registry.entries[node.as_ref().gc_type_id() as usize] }
     }
 }

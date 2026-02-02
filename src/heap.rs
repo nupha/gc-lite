@@ -156,8 +156,7 @@ impl GcHeap {
                         self.attach(partition_id, header);
 
                         // Update memory usage with rollup to parent partitions
-                        let _ = self
-                            .partitions
+                        self.partitions
                             .update_mem_use(partition_id, gross_size as i32);
 
                         Ok(GcRef {
@@ -173,7 +172,8 @@ impl GcHeap {
         }
     }
 
-    /// Attach a node to partition
+    /// Attach a node to given partition.
+    /// Note: this method only attach node to chain, but *NOT* increase partition's mem_use.
     #[inline]
     pub(crate) fn attach(&mut self, partition_id: GcPartitionId, node: NonNull<GcHead>) {
         debug_assert_ne!(partition_id, GcPartitionId::NONE);
@@ -231,8 +231,8 @@ impl GcHeap {
         }
     }
 
-    /// Set/unset partition root object status
-    pub(crate) fn set_root_internal(&mut self, node: NonNull<GcHead>, is_root: bool) {
+    /// Set/unset a node to be root
+    pub fn set_root_node(&mut self, node: NonNull<GcHead>, is_root: bool) {
         unsafe {
             let pid = (*node.as_ptr()).get_partition_id();
 
@@ -258,10 +258,10 @@ impl GcHeap {
         }
     }
 
-    /// Set/unset partition root object status
+    /// Set/unset a gc_ref to be root
     #[inline(always)]
     pub fn set_root<T>(&mut self, gc_ref: GcRef<T>, is_root: bool) {
-        self.set_root_internal(gc_ref.head_ptr, is_root);
+        self.set_root_node(gc_ref.head_ptr, is_root);
     }
 
     // /// Safely manually release an object
@@ -352,7 +352,7 @@ impl GcHeap {
                     // Call master's trace function to trace all objects it references
                     tracer.clear();
                     let trace_fn = master.as_ref().get_trace_fn(&tracer.heap().type_registry);
-                    trace_fn(master, tracer.op());
+                    trace_fn(master, tracer.ctx());
 
                     // Check if target object is included in trace results
                     tracer.pendings.iter().any(|h| *h == slave)

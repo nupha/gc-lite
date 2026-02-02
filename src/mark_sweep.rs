@@ -20,9 +20,7 @@ impl GcHeap {
     /// Collect garbage on given partition
     pub fn collect_garbage(&mut self, partition_id: GcPartitionId) -> usize {
         if self.partitions.partition(partition_id).is_some() {
-            let mut tr = self.tracer(partition_id);
-            tr.trace_roots(GcTracer::MARK_FUNC);
-
+            self.tracer(partition_id).trace_roots(GcTracer::MARK_FUNC);
             self.sweep_with(partition_id, Self::SWEEP_UNMARKED_FUNC)
         } else {
             0

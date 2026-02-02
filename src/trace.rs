@@ -45,14 +45,19 @@ impl<'a> GcTracer<'a> {
     }
 
     /// create new tracer for specified partition.
-    /// clear all visit and mark flags to be ready for new tracing.
-    pub fn new(heap: NonNull<GcHeap>, partition_id: GcPartitionId) -> Self {
-        let tr = GcTracer {
+    pub(crate) fn new_internal(heap: NonNull<GcHeap>, partition_id: GcPartitionId) -> Self {
+        GcTracer {
             heap,
             partition_id,
             pendings: VecDeque::new(),
             _mark: PhantomData,
-        };
+        }
+    }
+
+    /// create new tracer for specified partition.
+    /// clear all visit and mark flags to be ready for new tracing.
+    pub fn new(heap: NonNull<GcHeap>, partition_id: GcPartitionId) -> Self {
+        let tr = GcTracer::new_internal(heap, partition_id);
 
         // clear node flags
         unsafe {
@@ -114,31 +119,66 @@ impl<'a> GcTracer<'a> {
         }
     }
 
-    /// make trace op
+    /// make trace ctx
     #[inline(always)]
+    pub const fn ctx(&mut self) -> GcTraceOp<'_> {
+        GcTraceOp {
+            tr: NonNull::from_ref(self),
+        }
+    }
+
+    #[inline(always)]
+    #[deprecated(note = "use ::ctx(None) instead")]
     pub const fn op(&mut self) -> GcTraceOp<'_> {
-        GcTraceOp(NonNull::from_ref(self))
+        self.ctx()
     }
 
     fn do_trace(
         &mut self,
         node: NonNull<GcHead>,
         callback: impl Fn(NonNull<GcHead>, &GcHeap) -> bool,
+        ignore_trace_flag: bool,
     ) {
         unsafe {
-            if !node.as_ref().flags().contains(GcHeadFlag::TRACE_DONE)
+            if (ignore_trace_flag || !node.as_ref().flags().contains(GcHeadFlag::TRACE_DONE))
                 && node.as_ref().get_partition_id() == self.partition_id
             {
                 let propagate = callback(node, self.heap());
-                (*node.as_ptr()).set_flags(node.as_ref().flags().union(GcHeadFlag::TRACE_DONE));
+
+                if !ignore_trace_flag {
+                    (*node.as_ptr()).set_flags(node.as_ref().flags().union(GcHeadFlag::TRACE_DONE));
+                }
 
                 if propagate {
-                    // propagate trace into `node`
+                    // trace into `node`
                     let tt = &self.heap.as_ref().type_registry;
                     let trace_fn = node.as_ref().get_trace_fn(tt);
-                    trace_fn(node, self.op());
+                    trace_fn(node, self.ctx());
                 }
             }
+        }
+    }
+
+    fn do_commit(
+        &mut self,
+        callback: impl Fn(NonNull<GcHead>, &GcHeap) -> bool,
+        ignore_trace_flag: bool,
+    ) {
+        while let Some(ptr) = self.pendings.pop_front() {
+            self.do_trace(ptr, &callback, ignore_trace_flag);
+        }
+    }
+
+    pub(crate) fn trace_internal(
+        &mut self,
+        node: NonNull<GcHead>,
+        callback: impl Fn(NonNull<GcHead>, &GcHeap) -> bool,
+        ignore_trace_flag: bool,
+    ) {
+        self.do_trace(node, &callback, ignore_trace_flag);
+
+        if !self.pendings.is_empty() {
+            self.do_commit(callback, ignore_trace_flag);
         }
     }
 
@@ -147,11 +187,7 @@ impl<'a> GcTracer<'a> {
         node: NonNull<GcHead>,
         callback: impl Fn(NonNull<GcHead>, &GcHeap) -> bool,
     ) {
-        self.do_trace(node, &callback);
-
-        if !self.pendings.is_empty() {
-            self.commit_with(callback);
-        }
+        self.trace_internal(node, callback, false);
     }
 
     pub fn trace_iter(
@@ -160,19 +196,17 @@ impl<'a> GcTracer<'a> {
         callback: impl Fn(NonNull<GcHead>, &GcHeap) -> bool,
     ) {
         for ptr in iter {
-            self.do_trace(ptr, &callback);
+            self.do_trace(ptr, &callback, false);
         }
 
         if !self.pendings.is_empty() {
-            self.commit_with(callback);
+            self.commit(callback);
         }
     }
 
     /// commit to trace pending nodes
-    pub fn commit_with(&mut self, callback: impl Fn(NonNull<GcHead>, &GcHeap) -> bool) {
-        while let Some(ptr) = self.pendings.pop_front() {
-            self.do_trace(ptr, &callback);
-        }
+    pub fn commit(&mut self, callback: impl Fn(NonNull<GcHead>, &GcHeap) -> bool) {
+        self.do_commit(callback, false);
     }
 
     pub fn trace_roots(&mut self, handle: impl Fn(NonNull<GcHead>, &GcHeap) -> bool) {
@@ -188,14 +222,16 @@ impl<'a> GcTracer<'a> {
 }
 
 /// tracer operation
-#[repr(transparent)]
 #[derive(Clone, Copy)]
-pub struct GcTraceOp<'a>(NonNull<GcTracer<'a>>);
+pub struct GcTraceOp<'a> {
+    tr: NonNull<GcTracer<'a>>,
+}
 
 impl<'a> GcTraceOp<'a> {
+    /// reference to heap
     #[inline(always)]
     pub const fn heap(&self) -> &GcHeap {
-        unsafe { &*self.0.as_ref().heap.as_ptr() }
+        unsafe { &*self.tr.as_ref().heap.as_ptr() }
     }
 
     /// Submit a gc refrence to tracer, whilch will be traced later.
@@ -208,7 +244,7 @@ impl<'a> GcTraceOp<'a> {
     #[inline(always)]
     pub fn add_node(&mut self, node: NonNull<GcHead>) {
         unsafe {
-            self.0.as_mut().pendings.push_back(node);
+            self.tr.as_mut().pendings.push_back(node);
         }
     }
 

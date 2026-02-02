@@ -3,7 +3,7 @@
 
 use std::{cell::Cell, collections::HashMap};
 
-use crate::GcHeap;
+use crate::{GcHead, GcHeap, node::GcHeadFlag, node_iterator::NodeIterator};
 
 thread_local! {
     /// Thread-local partition ID counter (starts from 1, 0 is invalid/null)
@@ -584,50 +584,43 @@ impl GcHeap {
                     .children
                     .retain(|&child_id| child_id != parent_id);
             }
-        }
+        };
 
         // clean up unreachable nodes
         self.collect_garbage(partition_id);
 
-        let mut cur = self.partition_heads.get(&partition_id).copied().unwrap();
+        if let Some(chain) = self
+            .partition_heads
+            .remove(&partition_id)
+            .map(NodeIterator::new)
+        {
+            for mut node in chain {
+                let xref_scope = unsafe { node.as_ref().xref_partition() };
 
-        let mut tr = self.tracer(partition_id);
-        // tr.clear_visit_flags();
-        // tr.clear_marks();
+                if xref_scope != GcPartitionId::NONE {
+                    debug_assert_ne!(xref_scope, partition_id);
 
-        while let Some(mut node) = cur {
-            cur = unsafe { node.as_ref().next };
+                    unsafe {
+                        let mut f = node.as_ref().flags();
+                        f.remove(GcHeadFlag::ROOT | GcHeadFlag::MARKED | GcHeadFlag::TRACE_DONE);
+                        node.as_mut().set_flags(f);
 
-            let dest = unsafe { node.as_ref().xref_partition() };
-            if dest != GcPartitionId::NONE {
-                // migrate to xref partition
-                debug_assert_ne!(dest, partition_id);
+                        node.as_mut().partition = 0; // clear partition & xref
+                    }
 
-                unsafe {
-                    node.as_mut().set_root(false);
-                    node.as_mut().set_marked(false);
-                    node.as_mut().partition = 0; // clear partition & xref
+                    // attach to xref node chain
+                    self.attach(xref_scope, node);
+                    // Update memory usage with rollup to xref partitions
+                    self.partitions.update_mem_use(
+                        xref_scope,
+                        (self.get_node_gc_type(node).size as usize + std::mem::size_of::<GcHead>())
+                            as i32,
+                    );
                 }
-                tr.heap_mut().attach(dest, node);
-
-                // recursivly set xref
-                tr.trace(node, |mut n, heap| unsafe {
-                    let xref = n.as_ref().xref_partition();
-                    if xref == GcPartitionId::NONE {
-                        n.as_mut().set_xref_partition(dest)
-                    } else {
-                        let up = heap.common_parent2(dest, xref);
-                        if up != dest {
-                            n.as_mut().set_xref_partition(up);
-                        }
-                    };
-
-                    true
-                });
             }
         }
 
-        self.partitions.partitions.remove(&partition_id);
+        self.partitions.partitions.remove(&partition_id).unwrap();
         self.partition_roots.remove(&partition_id);
     }
 
