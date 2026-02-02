@@ -325,212 +325,24 @@ impl GcPartitionMgr {
 
         false
     }
+}
 
-    /// Get the depth of a partition (distance to root)
-    ///
-    /// # Parameters
-    /// - `id`: Partition ID
-    ///
-    /// # Returns
-    /// `Some(depth)` if the partition exists, `None` otherwise
-    fn depth(&self, id: GcPartitionId) -> Option<usize> {
-        let mut d = 0;
-        let mut current = id;
-        while current != GcPartitionId::NONE {
-            match self.partitions.get(&current) {
-                Some(partition) => {
-                    current = partition.parent;
-                    d += 1;
-                }
-                None => return None,
-            }
+pub struct GcPartitionParentIter<'a> {
+    heap: &'a GcHeap,
+    current: GcPartitionId,
+}
+
+impl<'a> Iterator for GcPartitionParentIter<'a> {
+    type Item = GcPartitionId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.current.is_null() {
+            let p = self.current;
+            self.current = self.heap.partition(p).unwrap().parent;
+            Some(p)
+        } else {
+            None
         }
-        Some(d)
-    }
-
-    /// Find the nearest common parent partition of two partitions
-    ///
-    /// # Parameters
-    /// - `p1`: First partition ID
-    /// - `p2`: Second partition ID
-    ///
-    /// # Returns
-    /// The nearest common parent partition ID, or `GcPartitionId::NONE` if no common ancestor
-    pub fn common_parent2(&self, p1: GcPartitionId, p2: GcPartitionId) -> GcPartitionId {
-        // Edge cases
-        if p1 == GcPartitionId::NONE || p2 == GcPartitionId::NONE {
-            return GcPartitionId::NONE;
-        } else if p1 == p2 {
-            return p1;
-        }
-
-        // Get depths
-        let d1 = match self.depth(p1) {
-            Some(d) => d,
-            None => return GcPartitionId::NONE,
-        };
-        let d2 = match self.depth(p2) {
-            Some(d) => d,
-            None => return GcPartitionId::NONE,
-        };
-
-        // Align nodes to the same depth - the minimum
-        let dmin = d1.min(d2);
-        let mut a = p1;
-        let mut b = p2;
-
-        // Move deeper node up to dmin depth
-        let mut da = d1;
-        while da > dmin {
-            match self.partitions.get(&a) {
-                Some(partition) => {
-                    a = partition.parent;
-                    da -= 1;
-                }
-                None => return GcPartitionId::NONE,
-            }
-        }
-        let mut db = d2;
-        while db > dmin {
-            match self.partitions.get(&b) {
-                Some(partition) => {
-                    b = partition.parent;
-                    db -= 1;
-                }
-                None => return GcPartitionId::NONE,
-            }
-        }
-
-        // Now both nodes are at the same depth, move up together until they meet
-        while a != b {
-            match (self.partitions.get(&a), self.partitions.get(&b)) {
-                (Some(pa), Some(pb)) => {
-                    a = pa.parent;
-                    b = pb.parent;
-                }
-                _ => return GcPartitionId::NONE,
-            }
-        }
-
-        a
-    }
-
-    /// Find the nearest common parent partition of three partitions
-    ///
-    /// # Parameters
-    /// - `p1`: First partition ID
-    /// - `p2`: Second partition ID
-    /// - `p3`: Third partition ID
-    ///
-    /// # Returns
-    /// The nearest common parent partition ID, or `GcPartitionId::NONE` if no common ancestor
-    pub fn common_parent3(
-        &self,
-        p1: GcPartitionId,
-        p2: GcPartitionId,
-        p3: GcPartitionId,
-    ) -> GcPartitionId {
-        // Edge cases
-        if p1 == GcPartitionId::NONE || p2 == GcPartitionId::NONE || p3 == GcPartitionId::NONE {
-            return GcPartitionId::NONE;
-        }
-
-        // If any two are equal, reduce to two-node case
-        if p1 == p2 {
-            return self.common_parent2(p1, p3);
-        } else if p1 == p3 {
-            return self.common_parent2(p1, p2);
-        } else if p2 == p3 {
-            return self.common_parent2(p1, p2);
-        }
-
-        // Helper function to get depth of a node
-        fn depth(
-            partitions: &HashMap<GcPartitionId, GcPartition>,
-            mut id: GcPartitionId,
-        ) -> Option<usize> {
-            let mut d = 0;
-            while id != GcPartitionId::NONE {
-                match partitions.get(&id) {
-                    Some(partition) => {
-                        id = partition.parent;
-                        d += 1;
-                    }
-                    None => return None,
-                }
-            }
-            Some(d)
-        }
-
-        // Get depths
-        let d1 = match depth(&self.partitions, p1) {
-            Some(d) => d,
-            None => return GcPartitionId::NONE,
-        };
-        let d2 = match depth(&self.partitions, p2) {
-            Some(d) => d,
-            None => return GcPartitionId::NONE,
-        };
-        let d3 = match depth(&self.partitions, p3) {
-            Some(d) => d,
-            None => return GcPartitionId::NONE,
-        };
-
-        // Align nodes to the same depth - the minimum
-        let dmin = d1.min(d2).min(d3);
-        let mut a = p1;
-        let mut b = p2;
-        let mut c = p3;
-
-        // Move nodes up to dmin depth
-        let mut da = d1;
-        while da > dmin {
-            match self.partitions.get(&a) {
-                Some(partition) => {
-                    a = partition.parent;
-                    da -= 1;
-                }
-                None => return GcPartitionId::NONE,
-            }
-        }
-        let mut db = d2;
-        while db > dmin {
-            match self.partitions.get(&b) {
-                Some(partition) => {
-                    b = partition.parent;
-                    db -= 1;
-                }
-                None => return GcPartitionId::NONE,
-            }
-        }
-        let mut dc = d3;
-        while dc > dmin {
-            match self.partitions.get(&c) {
-                Some(partition) => {
-                    c = partition.parent;
-                    dc -= 1;
-                }
-                None => return GcPartitionId::NONE,
-            }
-        }
-
-        // Now all nodes are at the same depth, move up together until they meet
-        while a != b || a != c {
-            match (
-                self.partitions.get(&a),
-                self.partitions.get(&b),
-                self.partitions.get(&c),
-            ) {
-                (Some(pa), Some(pb), Some(pc)) => {
-                    a = pa.parent;
-                    b = pb.parent;
-                    c = pc.parent;
-                }
-                _ => return GcPartitionId::NONE,
-            }
-        }
-
-        a
     }
 }
 
@@ -643,6 +455,15 @@ impl GcHeap {
         self.partitions.partition_mut(partition_id)
     }
 
+    pub fn partition_parent_iter(&self, partition_id: GcPartitionId) -> GcPartitionParentIter<'_> {
+        GcPartitionParentIter {
+            heap: self,
+            current: self
+                .partition(partition_id)
+                .map_or(GcPartitionId::NONE, |p| p.parent),
+        }
+    }
+
     /// Get all partition IDs
     #[inline(always)]
     pub fn partition_ids(&self) -> Vec<GcPartitionId> {
@@ -662,6 +483,32 @@ impl GcHeap {
         self.partitions.is_ancestor_of(lower, upper)
     }
 
+    /// Get the depth of a partition (distance to root)
+    ///
+    /// # Parameters
+    /// - `id`: Partition ID
+    ///
+    /// # Returns
+    /// `Some(depth)` if the partition exists, `None` otherwise
+    fn depth(&self, id: GcPartitionId) -> Option<usize> {
+        let mut d = 0;
+        let mut current = id;
+        while !current.is_null() {
+            let up = self.partition(current).unwrap();
+            current = up.parent;
+            d += 1;
+
+            // match self.partitions.get(&current) {
+            //     Some(partition) => {
+            //         current = partition.parent;
+            //         d += 1;
+            //     }
+            //     None => return None,
+            // }
+        }
+        Some(d)
+    }
+
     /// Find the nearest common parent partition of two partitions
     ///
     /// # Parameters
@@ -670,9 +517,63 @@ impl GcHeap {
     ///
     /// # Returns
     /// The nearest common parent partition ID, or `GcPartitionId::NONE` if no common ancestor
-    #[inline(always)]
     pub fn common_parent2(&self, p1: GcPartitionId, p2: GcPartitionId) -> GcPartitionId {
-        self.partitions.common_parent2(p1, p2)
+        // Edge cases
+        if p1 == GcPartitionId::NONE || p2 == GcPartitionId::NONE {
+            return GcPartitionId::NONE;
+        } else if p1 == p2 {
+            return p1;
+        }
+
+        // Get depths
+        let d1 = match self.depth(p1) {
+            Some(d) => d,
+            None => return GcPartitionId::NONE,
+        };
+        let d2 = match self.depth(p2) {
+            Some(d) => d,
+            None => return GcPartitionId::NONE,
+        };
+
+        // Align nodes to the same depth - the minimum
+        let dmin = d1.min(d2);
+        let mut a = p1;
+        let mut b = p2;
+
+        // Move deeper node up to dmin depth
+        let mut da = d1;
+        while da > dmin {
+            match self.partition(a) {
+                Some(partition) => {
+                    a = partition.parent;
+                    da -= 1;
+                }
+                None => return GcPartitionId::NONE,
+            }
+        }
+        let mut db = d2;
+        while db > dmin {
+            match self.partition(b) {
+                Some(partition) => {
+                    b = partition.parent;
+                    db -= 1;
+                }
+                None => return GcPartitionId::NONE,
+            }
+        }
+
+        // Now both nodes are at the same depth, move up together until they meet
+        while a != b {
+            match (self.partition(a), self.partition(b)) {
+                (Some(pa), Some(pb)) => {
+                    a = pa.parent;
+                    b = pb.parent;
+                }
+                _ => return GcPartitionId::NONE,
+            }
+        }
+
+        a
     }
 
     /// Find the nearest common parent partition of three partitions
@@ -684,14 +585,91 @@ impl GcHeap {
     ///
     /// # Returns
     /// The nearest common parent partition ID, or `GcPartitionId::NONE` if no common ancestor
-    #[inline(always)]
     pub fn common_parent3(
         &self,
         p1: GcPartitionId,
         p2: GcPartitionId,
         p3: GcPartitionId,
     ) -> GcPartitionId {
-        self.partitions.common_parent3(p1, p2, p3)
+        // Edge cases
+        if p1 == GcPartitionId::NONE || p2 == GcPartitionId::NONE || p3 == GcPartitionId::NONE {
+            return GcPartitionId::NONE;
+        }
+
+        // If any two are equal, reduce to two-node case
+        if p1 == p2 {
+            return self.common_parent2(p1, p3);
+        } else if p1 == p3 {
+            return self.common_parent2(p1, p2);
+        } else if p2 == p3 {
+            return self.common_parent2(p1, p2);
+        }
+
+        // Get depths
+        let d1 = match self.depth(p1) {
+            Some(d) => d,
+            None => return GcPartitionId::NONE,
+        };
+        let d2 = match self.depth(p2) {
+            Some(d) => d,
+            None => return GcPartitionId::NONE,
+        };
+        let d3 = match self.depth(p3) {
+            Some(d) => d,
+            None => return GcPartitionId::NONE,
+        };
+
+        // Align nodes to the same depth - the minimum
+        let dmin = d1.min(d2).min(d3);
+        let mut a = p1;
+        let mut b = p2;
+        let mut c = p3;
+
+        // Move nodes up to dmin depth
+        let mut da = d1;
+        while da > dmin {
+            match self.partition(a) {
+                Some(partition) => {
+                    a = partition.parent;
+                    da -= 1;
+                }
+                None => return GcPartitionId::NONE,
+            }
+        }
+        let mut db = d2;
+        while db > dmin {
+            match self.partition(b) {
+                Some(partition) => {
+                    b = partition.parent;
+                    db -= 1;
+                }
+                None => return GcPartitionId::NONE,
+            }
+        }
+        let mut dc = d3;
+        while dc > dmin {
+            match self.partition(c) {
+                Some(partition) => {
+                    c = partition.parent;
+                    dc -= 1;
+                }
+                None => return GcPartitionId::NONE,
+            }
+        }
+
+        // Now all nodes are at the same depth, move up together until they meet
+        while a != b || a != c {
+            match (self.partition(a), self.partition(b), self.partition(c)) {
+                (Some(pa), Some(pb), Some(pc)) => {
+                    a = pa.parent;
+                    b = pb.parent;
+                    c = pc.parent;
+                }
+                _ => return GcPartitionId::NONE,
+            }
+        }
+
+        a
     }
 }
 
@@ -959,7 +937,7 @@ mod tests {
 
     #[test]
     fn test_common_parent() {
-        let mut manager = GcPartitionMgr::new();
+        let mut heap = GcHeap::new();
 
         // Create hierarchy:
         // root_id
@@ -967,98 +945,86 @@ mod tests {
         //   │   └── grandchild1_id
         //   └── child2_id
         //       └── grandchild2_id
-        let root_id = manager.create_partition(Some(2048), GcPartitionId::NONE);
-        let child1_id = manager.create_partition(Some(1024), root_id);
-        let child2_id = manager.create_partition(Some(1024), root_id);
-        let grandchild1_id = manager.create_partition(Some(512), child1_id);
-        let grandchild2_id = manager.create_partition(Some(512), child2_id);
+        let root_id = heap.create_root_partition(2048);
+        let child1_id = heap.create_sub_partition(root_id);
+        let child2_id = heap.create_sub_partition(root_id);
+        let grandchild1_id = heap.create_sub_partition(child1_id);
+        let grandchild2_id = heap.create_sub_partition(child2_id);
 
         // Same partition
-        assert_eq!(manager.common_parent2(root_id, root_id), root_id);
-        assert_eq!(manager.common_parent2(child1_id, child1_id), child1_id);
+        assert_eq!(heap.common_parent2(root_id, root_id), root_id);
+        assert_eq!(heap.common_parent2(child1_id, child1_id), child1_id);
         assert_eq!(
-            manager.common_parent2(grandchild1_id, grandchild1_id),
+            heap.common_parent2(grandchild1_id, grandchild1_id),
             grandchild1_id
         );
 
         // Direct parent-child
-        assert_eq!(manager.common_parent2(child1_id, root_id), root_id);
-        assert_eq!(manager.common_parent2(root_id, child1_id), root_id);
-        assert_eq!(manager.common_parent2(grandchild1_id, child1_id), child1_id);
-        assert_eq!(manager.common_parent2(child1_id, grandchild1_id), child1_id);
+        assert_eq!(heap.common_parent2(child1_id, root_id), root_id);
+        assert_eq!(heap.common_parent2(root_id, child1_id), root_id);
+        assert_eq!(heap.common_parent2(grandchild1_id, child1_id), child1_id);
+        assert_eq!(heap.common_parent2(child1_id, grandchild1_id), child1_id);
 
         // Sibling partitions - common parent is the root
-        assert_eq!(manager.common_parent2(child1_id, child2_id), root_id);
-        assert_eq!(manager.common_parent2(child2_id, child1_id), root_id);
+        assert_eq!(heap.common_parent2(child1_id, child2_id), root_id);
+        assert_eq!(heap.common_parent2(child2_id, child1_id), root_id);
 
         // Grandchild from different subtrees - common parent is root
-        assert_eq!(
-            manager.common_parent2(grandchild1_id, grandchild2_id),
-            root_id
-        );
-        assert_eq!(
-            manager.common_parent2(grandchild2_id, grandchild1_id),
-            root_id
-        );
+        assert_eq!(heap.common_parent2(grandchild1_id, grandchild2_id), root_id);
+        assert_eq!(heap.common_parent2(grandchild2_id, grandchild1_id), root_id);
 
         // Grandchild and child from different subtrees
-        assert_eq!(manager.common_parent2(grandchild1_id, child2_id), root_id);
-        assert_eq!(manager.common_parent2(child1_id, grandchild2_id), root_id);
+        assert_eq!(heap.common_parent2(grandchild1_id, child2_id), root_id);
+        assert_eq!(heap.common_parent2(child1_id, grandchild2_id), root_id);
     }
 
     #[test]
     fn test_common_parent_none_cases() {
-        let mut manager = GcPartitionMgr::new();
+        let mut heap = GcHeap::new();
 
-        let root_id = manager.create_partition(Some(2048), GcPartitionId::NONE);
-        let child_id = manager.create_partition(Some(1024), root_id);
+        let root_id = heap.create_root_partition(2048);
+        let child_id = heap.create_sub_partition(root_id);
 
         // NONE cases
         assert_eq!(
-            manager.common_parent2(GcPartitionId::NONE, child_id),
+            heap.common_parent2(GcPartitionId::NONE, child_id),
             GcPartitionId::NONE
         );
         assert_eq!(
-            manager.common_parent2(child_id, GcPartitionId::NONE),
+            heap.common_parent2(child_id, GcPartitionId::NONE),
             GcPartitionId::NONE
         );
         assert_eq!(
-            manager.common_parent2(GcPartitionId::NONE, GcPartitionId::NONE),
+            heap.common_parent2(GcPartitionId::NONE, GcPartitionId::NONE),
             GcPartitionId::NONE
         );
 
-        // Clean up
-        manager.remove_partition(root_id);
+        // Clean up - GcHeap doesn't have remove_partition, but we can let it drop
     }
 
     #[test]
     fn test_common_parent_different_trees() {
-        let mut manager = GcPartitionMgr::new();
+        let mut heap = GcHeap::new();
 
         // Create two separate root partitions (different trees)
-        let root1_id = manager.create_partition(Some(2048), GcPartitionId::NONE);
-        let root2_id = manager.create_partition(Some(2048), GcPartitionId::NONE);
-        let child1_id = manager.create_partition(Some(1024), root1_id);
-        let child2_id = manager.create_partition(Some(1024), root2_id);
+        let root1_id = heap.create_root_partition(2048);
+        let root2_id = heap.create_root_partition(2048);
+        let child1_id = heap.create_sub_partition(root1_id);
+        let child2_id = heap.create_sub_partition(root2_id);
 
         // Different trees should have no common parent
         assert_eq!(
-            manager.common_parent2(child1_id, child2_id),
+            heap.common_parent2(child1_id, child2_id),
             GcPartitionId::NONE
         );
-        assert_eq!(
-            manager.common_parent2(root1_id, root2_id),
-            GcPartitionId::NONE
-        );
+        assert_eq!(heap.common_parent2(root1_id, root2_id), GcPartitionId::NONE);
 
-        // Clean up
-        manager.remove_partition(root1_id);
-        manager.remove_partition(root2_id);
+        // Clean up - GcHeap doesn't have remove_partition, but we can let it drop
     }
 
     #[test]
     fn test_common_parent3() {
-        let mut manager = GcPartitionMgr::new();
+        let mut heap = GcHeap::new();
 
         // Create hierarchy:
         // root_id
@@ -1067,73 +1033,61 @@ mod tests {
         //   ├── child2_id
         //   │   └── grandchild2_id
         //   └── child3_id
-        let root_id = manager.create_partition(Some(2048), GcPartitionId::NONE);
-        let child1_id = manager.create_partition(Some(1024), root_id);
-        let child2_id = manager.create_partition(Some(1024), root_id);
-        let child3_id = manager.create_partition(Some(1024), root_id);
-        let grandchild1_id = manager.create_partition(Some(512), child1_id);
-        let grandchild2_id = manager.create_partition(Some(512), child2_id);
+        let root_id = heap.create_root_partition(2048);
+        let child1_id = heap.create_sub_partition(root_id);
+        let child2_id = heap.create_sub_partition(root_id);
+        let child3_id = heap.create_sub_partition(root_id);
+        let grandchild1_id = heap.create_sub_partition(child1_id);
+        let grandchild2_id = heap.create_sub_partition(child2_id);
 
         // Same partition (all three are the same)
-        assert_eq!(manager.common_parent3(root_id, root_id, root_id), root_id);
+        assert_eq!(heap.common_parent3(root_id, root_id, root_id), root_id);
         assert_eq!(
-            manager.common_parent3(child1_id, child1_id, child1_id),
+            heap.common_parent3(child1_id, child1_id, child1_id),
             child1_id
         );
 
         // Two same, one different
-        assert_eq!(
-            manager.common_parent3(child1_id, child1_id, root_id),
-            root_id
-        );
-        assert_eq!(
-            manager.common_parent3(root_id, child1_id, child1_id),
-            root_id
-        );
-        assert_eq!(
-            manager.common_parent3(child1_id, root_id, child1_id),
-            root_id
-        );
+        assert_eq!(heap.common_parent3(child1_id, child1_id, root_id), root_id);
+        assert_eq!(heap.common_parent3(root_id, child1_id, child1_id), root_id);
+        assert_eq!(heap.common_parent3(child1_id, root_id, child1_id), root_id);
 
         // Three siblings - common parent is root
         assert_eq!(
-            manager.common_parent3(child1_id, child2_id, child3_id),
+            heap.common_parent3(child1_id, child2_id, child3_id),
             root_id
         );
 
         // Two siblings and their parent
-        assert_eq!(
-            manager.common_parent3(child1_id, child2_id, root_id),
-            root_id
-        );
+        assert_eq!(heap.common_parent3(child1_id, child2_id, root_id), root_id);
 
         // Grandchildren from different subtrees
         assert_eq!(
-            manager.common_parent3(grandchild1_id, grandchild2_id, child3_id),
+            heap.common_parent3(grandchild1_id, grandchild2_id, child3_id),
             root_id
         );
 
         // One grandchild, its parent, and another child
         assert_eq!(
-            manager.common_parent3(grandchild1_id, child1_id, child2_id),
+            heap.common_parent3(grandchild1_id, child1_id, child2_id),
             root_id
         );
 
         // NONE cases
         assert_eq!(
-            manager.common_parent3(GcPartitionId::NONE, child1_id, child2_id),
+            heap.common_parent3(GcPartitionId::NONE, child1_id, child2_id),
             GcPartitionId::NONE
         );
         assert_eq!(
-            manager.common_parent3(child1_id, GcPartitionId::NONE, child2_id),
+            heap.common_parent3(child1_id, GcPartitionId::NONE, child2_id),
             GcPartitionId::NONE
         );
         assert_eq!(
-            manager.common_parent3(child1_id, child2_id, GcPartitionId::NONE),
+            heap.common_parent3(child1_id, child2_id, GcPartitionId::NONE),
             GcPartitionId::NONE
         );
         assert_eq!(
-            manager.common_parent3(
+            heap.common_parent3(
                 GcPartitionId::NONE,
                 GcPartitionId::NONE,
                 GcPartitionId::NONE
@@ -1142,17 +1096,17 @@ mod tests {
         );
 
         // Different trees (no common ancestor)
-        let root2_id = manager.create_partition(Some(2048), GcPartitionId::NONE);
-        let child4_id = manager.create_partition(Some(1024), root2_id);
+        let root2_id = heap.create_root_partition(2048);
+        let child4_id = heap.create_sub_partition(root2_id);
         assert_eq!(
-            manager.common_parent3(child1_id, child2_id, child4_id),
+            heap.common_parent3(child1_id, child2_id, child4_id),
             GcPartitionId::NONE
         );
     }
 
     #[test]
     fn test_common_parent3_complex_hierarchy() {
-        let mut manager = GcPartitionMgr::new();
+        let mut heap = GcHeap::new();
 
         // Create a more complex hierarchy:
         // root
@@ -1163,30 +1117,30 @@ mod tests {
         //   ├── B
         //   │   └── B1
         //   └── C
-        let root = manager.create_partition(Some(4096), GcPartitionId::NONE);
-        let a = manager.create_partition(Some(2048), root);
-        let b = manager.create_partition(Some(2048), root);
-        let c = manager.create_partition(Some(2048), root);
-        let a1 = manager.create_partition(Some(1024), a);
-        let a2 = manager.create_partition(Some(1024), a);
-        let a1a = manager.create_partition(Some(512), a1);
-        let b1 = manager.create_partition(Some(1024), b);
+        let root = heap.create_root_partition(4096);
+        let a = heap.create_sub_partition(root);
+        let b = heap.create_sub_partition(root);
+        let c = heap.create_sub_partition(root);
+        let a1 = heap.create_sub_partition(a);
+        let a2 = heap.create_sub_partition(a);
+        let a1a = heap.create_sub_partition(a1);
+        let b1 = heap.create_sub_partition(b);
 
         // Test cases
         // 1. Three nodes in same subtree
-        assert_eq!(manager.common_parent3(a1a, a1, a), a);
-        assert_eq!(manager.common_parent3(a1a, a1, a2), a);
+        assert_eq!(heap.common_parent3(a1a, a1, a), a);
+        assert_eq!(heap.common_parent3(a1a, a1, a2), a);
 
         // 2. Nodes from different subtrees
-        assert_eq!(manager.common_parent3(a1a, b1, c), root);
-        assert_eq!(manager.common_parent3(a1, b, c), root);
+        assert_eq!(heap.common_parent3(a1a, b1, c), root);
+        assert_eq!(heap.common_parent3(a1, b, c), root);
 
         // 3. Mix of depths
-        assert_eq!(manager.common_parent3(a1a, a2, root), root);
-        assert_eq!(manager.common_parent3(a1a, b, root), root);
+        assert_eq!(heap.common_parent3(a1a, a2, root), root);
+        assert_eq!(heap.common_parent3(a1a, b, root), root);
 
         // 4. One is ancestor of others
-        assert_eq!(manager.common_parent3(a1a, a1, a1), a1); // two same
-        assert_eq!(manager.common_parent3(a, a1, a1a), a);
+        assert_eq!(heap.common_parent3(a1a, a1, a1), a1); // two same
+        assert_eq!(heap.common_parent3(a, a1, a1a), a);
     }
 }

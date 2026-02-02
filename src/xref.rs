@@ -24,13 +24,13 @@ impl GcHeap {
     /// Updates the node's cross-reference partition to a more general ancestor.
     /// Returns true if node's xref was updated, false if not.
     pub fn set_xref(&mut self, from_partition: GcPartitionId, node: NonNull<GcHead>) -> bool {
-        debug_assert_ne!(from_partition, GcPartitionId::NONE);
+        debug_assert!(self.partition(from_partition).is_some());
 
         let (node_pid, xref0) = unsafe {
             let n = node.as_ref();
             (n.get_partition_id(), n.xref_partition())
         };
-        debug_assert_ne!(node_pid, GcPartitionId::NONE);
+        debug_assert!(self.partition(node_pid).is_some());
 
         if from_partition == node_pid || from_partition == xref0 {
             return false;
@@ -44,7 +44,7 @@ impl GcHeap {
             return false;
         }
 
-        if xref0 != GcPartitionId::NONE {
+        if !xref0.is_null() {
             // Find common parent of (from_partition, xref0)
             let up2 = self.common_parent2(from_partition, xref0);
             debug_assert_ne!(up2, GcPartitionId::NONE);
@@ -54,8 +54,6 @@ impl GcHeap {
             }
             up = up2;
         }
-
-        // node.as_mut().set_xref_partition(up);
 
         // set xref (up) to node and resursively it's descendants
         let mut tr = GcTracer::new_internal(NonNull::from_ref(self), node_pid);
