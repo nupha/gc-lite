@@ -586,8 +586,10 @@ impl GcHeap {
             }
         };
 
+        println!("[O.o] remove partition sweeping: {partition_id:?} ...");
         // clean up unreachable nodes
-        self.collect_garbage(partition_id);
+        self.collect(partition_id);
+        println!("[O.o]     sweep {partition_id:?} done");
 
         if let Some(chain) = self
             .partition_heads

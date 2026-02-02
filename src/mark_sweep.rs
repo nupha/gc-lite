@@ -8,6 +8,8 @@ use crate::{
 };
 
 impl GcHeap {
+    const NULL_NOTIFY_FN: Option<fn(&GcHead)> = None;
+
     pub const SWEEP_UNMARKED_FUNC: fn(&mut GcHead) -> bool = |node| {
         if node.is_marked() {
             node.set_marked(false);
@@ -17,20 +19,12 @@ impl GcHeap {
         }
     };
 
-    /// Collect garbage on given partition
-    pub fn collect_garbage(&mut self, partition_id: GcPartitionId) -> usize {
-        if self.partitions.partition(partition_id).is_some() {
-            self.tracer(partition_id).trace_roots(GcTracer::MARK_FUNC);
-            self.sweep_with(partition_id, Self::SWEEP_UNMARKED_FUNC)
-        } else {
-            0
-        }
-    }
-
-    pub fn sweep_with(
+    /// call optional notify with node *BEFORE* it is disposed.
+    fn sweep_internal(
         &mut self,
         partition_id: GcPartitionId,
         predicate: impl Fn(&mut GcHead) -> bool,
+        notify: Option<impl Fn(&GcHead)>,
     ) -> usize {
         if let Some(chain) = self.partition_heads.get(&partition_id).copied() {
             let mut new_chain = chain;
@@ -58,6 +52,9 @@ impl GcHeap {
                             }
                         }
 
+                        if let Some(cb) = &notify {
+                            cb(p.as_ref());
+                        }
                         freed_bytes += self.dispose(p);
                     } else {
                         prev = Some(p);
@@ -80,78 +77,126 @@ impl GcHeap {
         }
     }
 
-    /// Sweep unmarked node in partition
-    #[deprecated(note = "use ::sweep_with() instead")]
+    /// call notify with node *BEFORE* it is disposed.
     #[inline(always)]
-    pub fn sweep(&mut self, partition_id: GcPartitionId) -> usize {
-        self.sweep_with(partition_id, Self::SWEEP_UNMARKED_FUNC)
-    }
-
-    #[deprecated(note = "use ::sweep_with() instead")]
-    pub fn sweep_ex(
+    pub fn sweep_notify(
         &mut self,
         partition_id: GcPartitionId,
-        force: bool,
-        incl_types: Option<&[u8]>,
-        excl_types: Option<&[u8]>,
-        keep_mark: bool,
+        predicate: impl Fn(&mut GcHead) -> bool,
+        notify: impl Fn(&GcHead),
     ) -> usize {
-        let chain = match self.partition_heads.get_mut(&partition_id) {
-            Some(p) => *p,
-            None => {
-                return 0;
-            }
-        };
+        self.sweep_internal(partition_id, predicate, Some(notify))
+    }
 
-        let mut current = chain;
-        let mut prev: Option<NonNull<GcHead>> = None;
-        let mut freed_bytes = 0;
+    #[inline(always)]
+    pub fn sweep(
+        &mut self,
+        partition_id: GcPartitionId,
+        predicate: impl Fn(&mut GcHead) -> bool,
+    ) -> usize {
+        self.sweep_internal(partition_id, predicate, Self::NULL_NOTIFY_FN)
+    }
 
-        while let Some(p) = current {
-            unsafe {
-                current = p.as_ref().next;
-                let type_idx = p.as_ref().gc_type_id();
+    // #[deprecated(note = "use ::sweep_with() instead")]
+    // pub fn sweep_ex(
+    //     &mut self,
+    //     partition_id: GcPartitionId,
+    //     force: bool,
+    //     incl_types: Option<&[u8]>,
+    //     excl_types: Option<&[u8]>,
+    //     keep_mark: bool,
+    // ) -> usize {
+    //     let chain = match self.partition_heads.get_mut(&partition_id) {
+    //         Some(p) => *p,
+    //         None => {
+    //             return 0;
+    //         }
+    //     };
 
-                let should_collect: bool = if !force && (*p.as_ptr()).is_marked() {
-                    false
-                } else {
-                    incl_types.is_none_or(|t| t.contains(&type_idx))
-                        && excl_types.is_none_or(|t| !t.contains(&type_idx))
-                };
+    //     let mut current = chain;
+    //     let mut prev: Option<NonNull<GcHead>> = None;
+    //     let mut freed_bytes = 0;
 
-                if should_collect {
-                    // Remove unmarked objects from list
-                    if let Some(last) = prev {
-                        (*last.as_ptr()).next = current;
-                    } else {
-                        *self.partition_heads.get_mut(&partition_id).unwrap() = current;
-                    }
+    //     while let Some(p) = current {
+    //         unsafe {
+    //             current = p.as_ref().next;
+    //             let type_idx = p.as_ref().gc_type_id();
 
-                    if p.as_ref().is_root() {
-                        // Remove from root list
-                        if let Some(lst) = self.partition_roots.get_mut(&partition_id) {
-                            if let Some(i) = lst.iter().position(|x| *x == p) {
-                                lst.swap_remove(i);
-                            }
-                        }
-                    }
+    //             let should_collect: bool = if !force && (*p.as_ptr()).is_marked() {
+    //                 false
+    //             } else {
+    //                 incl_types.is_none_or(|t| t.contains(&type_idx))
+    //                     && excl_types.is_none_or(|t| !t.contains(&type_idx))
+    //             };
 
-                    freed_bytes += self.dispose(p);
-                } else {
-                    // Reset mark bits for next GC
-                    if !keep_mark {
-                        (*p.as_ptr()).set_marked(false);
-                    }
-                    prev = Some(p);
-                }
-            }
+    //             if should_collect {
+    //                 // Remove unmarked objects from list
+    //                 if let Some(last) = prev {
+    //                     (*last.as_ptr()).next = current;
+    //                 } else {
+    //                     *self.partition_heads.get_mut(&partition_id).unwrap() = current;
+    //                 }
+
+    //                 if p.as_ref().is_root() {
+    //                     // Remove from root list
+    //                     if let Some(lst) = self.partition_roots.get_mut(&partition_id) {
+    //                         if let Some(i) = lst.iter().position(|x| *x == p) {
+    //                             lst.swap_remove(i);
+    //                         }
+    //                     }
+    //                 }
+
+    //                 freed_bytes += self.dispose(p);
+    //             } else {
+    //                 // Reset mark bits for next GC
+    //                 if !keep_mark {
+    //                     (*p.as_ptr()).set_marked(false);
+    //                 }
+    //                 prev = Some(p);
+    //             }
+    //         }
+    //     }
+
+    //     // Update partition memory usage with rollup to parent partitions
+    //     self.partitions
+    //         .update_mem_use(partition_id, -(freed_bytes as i32));
+
+    //     freed_bytes
+    // }
+
+    /// Collect garbage on given partition, optionally call notify with node *BEFORE* it is disposed.
+    fn collect_internal(
+        &mut self,
+        partition_id: GcPartitionId,
+        notify: Option<impl Fn(&GcHead)>,
+    ) -> usize {
+        if self.partitions.partition(partition_id).is_some() {
+            self.tracer(partition_id).trace_roots(GcTracer::MARK_FUNC);
+            self.sweep_internal(partition_id, Self::SWEEP_UNMARKED_FUNC, notify)
+        } else {
+            0
         }
+    }
 
-        // Update partition memory usage with rollup to parent partitions
-        self.partitions
-            .update_mem_use(partition_id, -(freed_bytes as i32));
+    /// Collect garbage on given partition, call notify with node *BEFORE* it is disposed.
+    #[inline(always)]
+    pub fn collect_notify(
+        &mut self,
+        partition_id: GcPartitionId,
+        notify: impl Fn(&GcHead),
+    ) -> usize {
+        self.collect_internal(partition_id, Some(notify))
+    }
 
-        freed_bytes
+    /// Collect garbage on given partition
+    #[inline(always)]
+    pub fn collect(&mut self, partition_id: GcPartitionId) -> usize {
+        self.collect_internal(partition_id, Self::NULL_NOTIFY_FN)
+    }
+
+    #[deprecated(note = "use ::collect() instead")]
+    pub fn collect_garbage(&mut self, partition_id: GcPartitionId) -> usize {
+        self.collect(partition_id)
     }
 
     /// Dispose a node
@@ -351,7 +396,7 @@ mod sweep_test {
         assert_eq!(count_nodes_in_partition(&heap, partition_id), 5);
 
         // Create a predicate that removes objects with even values
-        let removed = heap.sweep_with(partition_id, |node| {
+        let removed = heap.sweep(partition_id, |node| {
             unsafe {
                 let payload_ptr =
                     (node as *mut GcHead as *mut u8).add(std::mem::size_of::<GcHead>());
@@ -389,7 +434,7 @@ mod sweep_test {
             .collect();
 
         // Mark first 3 objects (0, 1, 2) for removal
-        let removed = heap.sweep_with(partition_id, |node| {
+        let removed = heap.sweep(partition_id, |node| {
             unsafe {
                 let payload_ptr =
                     (node as *mut GcHead as *mut u8).add(std::mem::size_of::<GcHead>());
@@ -445,7 +490,7 @@ mod sweep_test {
             .collect();
 
         // Remove all nodes
-        let removed = heap.sweep_with(partition_id, |_| true);
+        let removed = heap.sweep(partition_id, |_| true);
 
         assert!(removed > 0, "Should have freed some bytes");
 
@@ -472,7 +517,7 @@ mod sweep_test {
             .collect();
 
         // Remove only middle node (value 2)
-        let removed = heap.sweep_with(partition_id, |node| unsafe {
+        let removed = heap.sweep(partition_id, |node| unsafe {
             let payload_ptr = (node as *mut GcHead as *mut u8).add(std::mem::size_of::<GcHead>());
             let value = *(payload_ptr as *const i32);
             value == 2
@@ -525,7 +570,7 @@ mod sweep_test {
         );
 
         // Remove the root object
-        let removed = heap.sweep_with(partition_id, |node| {
+        let removed = heap.sweep(partition_id, |node| {
             unsafe {
                 let payload_ptr =
                     (node as *mut GcHead as *mut u8).add(std::mem::size_of::<GcHead>());
@@ -556,7 +601,7 @@ mod sweep_test {
         let partition_id = heap.create_root_partition(4096);
 
         // No objects allocated, sweep should return 0
-        let removed = heap.sweep_with(partition_id, |_| true);
+        let removed = heap.sweep(partition_id, |_| true);
         assert_eq!(removed, 0, "Should return 0 for empty partition");
     }
 
@@ -567,7 +612,7 @@ mod sweep_test {
         let non_existent_partition = GcPartitionId(9999);
 
         // Non-existent partition should return 0
-        let removed = heap.sweep_with(non_existent_partition, |_| true);
+        let removed = heap.sweep(non_existent_partition, |_| true);
         assert_eq!(removed, 0, "Should return 0 for non-existent partition");
     }
 }

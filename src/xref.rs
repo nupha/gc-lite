@@ -23,7 +23,7 @@ impl GcHead {
 impl GcHeap {
     /// Updates the node's cross-reference partition to a more general ancestor.
     /// Returns true if node's xref was updated, false if not.
-    pub fn set_xref(&mut self, from_partition: GcPartitionId, mut node: NonNull<GcHead>) -> bool {
+    pub fn set_xref(&mut self, from_partition: GcPartitionId, node: NonNull<GcHead>) -> bool {
         debug_assert_ne!(from_partition, GcPartitionId::NONE);
 
         let (node_pid, xref0) = unsafe {

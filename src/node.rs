@@ -146,7 +146,7 @@ impl GcHead {
         #[cfg(debug_assertions)]
         debug_assert!(
             self.test_valid(),
-            "invalid gc node: head={self:p}, attrs={:#x}, flags={:?}, xref={:?}",
+            "invalid gc node {self:p}, attrs={:#x}, flags={:?}, xref={:?}",
             self.attrs,
             self.flags(),
             self.xref_partition(),
