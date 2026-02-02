@@ -19,6 +19,13 @@ impl GcPartitionId {
     pub const NONE: Self = Self(0);
 }
 
+impl GcPartitionId {
+    #[inline(always)]
+    pub const fn is_null(&self) -> bool {
+        self.0 == 0
+    }
+}
+
 /// Partition information
 #[derive(Debug, Clone)]
 pub struct GcPartition {
@@ -586,10 +593,8 @@ impl GcHeap {
             }
         };
 
-        println!("[O.o] remove partition sweeping: {partition_id:?} ...");
         // clean up unreachable nodes
         self.collect(partition_id);
-        println!("[O.o]     sweep {partition_id:?} done");
 
         if let Some(chain) = self
             .partition_heads

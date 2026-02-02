@@ -167,16 +167,6 @@ pub struct GcRef<T> {
     pub(super) _marker: PhantomData<T>,
 }
 
-impl<T> Clone for GcRef<T> {
-    #[inline]
-    fn clone(&self) -> Self {
-        Self {
-            head_ptr: self.head_ptr,
-            _marker: PhantomData,
-        }
-    }
-}
-
 impl<T> Deref for GcRef<T> {
     type Target = T;
 
@@ -193,6 +183,18 @@ impl<T> DerefMut for GcRef<T> {
     }
 }
 
+impl<T> Clone for GcRef<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            head_ptr: self.head_ptr,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> Copy for GcRef<T> {}
+
 impl<T> PartialEq for GcRef<T> {
     #[inline(always)]
     fn eq(&self, other: &Self) -> bool {
@@ -201,8 +203,6 @@ impl<T> PartialEq for GcRef<T> {
 }
 
 impl<T> Eq for GcRef<T> {}
-
-impl<T> Copy for GcRef<T> {}
 
 impl<T> From<GcRef<T>> for NonNull<GcHead> {
     #[inline(always)]
@@ -239,6 +239,11 @@ impl<T> GcRef<T> {
             head_ptr: NonNull::dangling(),
             _marker: PhantomData,
         }
+    }
+
+    #[inline]
+    pub fn as_ptr(&self) -> NonNull<T> {
+        unsafe { self.head_ptr.as_ref().payload().cast::<T>() }
     }
 
     #[inline(always)]
@@ -388,7 +393,7 @@ impl<'heap, T: GcTracable> Clone for Gc<'heap, T> {
     #[inline]
     fn clone(&self) -> Self {
         Self {
-            inner: self.inner,
+            inner: self.inner.clone(),
             _marker: std::marker::PhantomData,
         }
     }
