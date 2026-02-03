@@ -46,6 +46,19 @@ pub struct GcHead {
     pub(super) next: Option<NonNull<GcHead>>,
 }
 
+impl std::fmt::Debug for GcHead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GcHead")
+            .field("ptr", &(self as *const Self))
+            .field("scope", &self.get_partition_id())
+            .field("type", &self.gc_type_id())
+            .field("flags", &self.flags())
+            .field("xref", &self.xref_partition())
+            .field("weak", &self.weakref_index())
+            .finish()
+    }
+}
+
 impl GcHead {
     /// Get node gc type id
     #[inline(always)]
@@ -111,16 +124,14 @@ impl GcHead {
     /// Get partition ID
     #[inline(always)]
     pub fn get_partition_id(&self) -> GcPartitionId {
-        GcPartitionId(self.partition as u16)
+        GcPartitionId((self.partition & 0x0000_FFFF) as u16)
     }
 
     /// Set partition ID
     #[inline(always)]
     pub(crate) fn set_partition_id(&mut self, id: GcPartitionId) {
-        debug_assert!(
-            self.get_partition_id() == GcPartitionId::NONE || self.get_partition_id() == id
-        );
-        self.partition = self.partition & 0xFFFF_0000 | id.0 as u32;
+        debug_assert!(self.get_partition_id().is_null() || self.get_partition_id() == id);
+        self.partition = (self.partition & 0xFFFF_0000) | id.0 as u32;
     }
 
     #[inline(always)]
@@ -219,12 +230,28 @@ impl<T> From<&GcRef<T>> for NonNull<GcHead> {
 
 impl<T> std::fmt::Debug for GcRef<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "GcRef({:p}:{:p})",
-            self.head_ptr,
-            std::ops::Deref::deref(self)
-        )
+        #[cfg(debug_assertions)]
+        unsafe {
+            let node = self.head_ptr.as_ref();
+            write!(
+                f,
+                "GcRef<{:p} scope={} xref={}",
+                self.head_ptr,
+                node.get_partition_id().0,
+                node.xref_partition().0,
+            )?;
+            if let Some(w) = node.weakref_index() {
+                write!(f, " weak={w}")?;
+            }
+            write!(f, " data={:p}>", node.payload())
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            write!(f, "GcRef<{:p}:{:p}>", self.head_ptr, unsafe {
+                self.head_ptr.as_ref().payload()
+            })
+        }
     }
 }
 
@@ -347,6 +374,12 @@ impl<T> GcRef<T> {
     #[inline(always)]
     pub fn node_info(&self) -> &GcHead {
         unsafe { self.head_ptr.as_ref() }
+    }
+
+    /// get node info mut
+    #[inline(always)]
+    pub fn node_info_mut(&mut self) -> &mut GcHead {
+        unsafe { self.head_ptr.as_mut() }
     }
 
     #[cfg(debug_assertions)]

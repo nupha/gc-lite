@@ -10,14 +10,7 @@ use crate::{
 impl GcHeap {
     const NULL_NOTIFY_FN: Option<fn(&GcHead)> = None;
 
-    pub const SWEEP_UNMARKED_FUNC: fn(&mut GcHead) -> bool = |node| {
-        if node.is_marked() {
-            node.set_marked(false);
-            false
-        } else {
-            true
-        }
-    };
+    pub const SWEEP_UNMARKED_FUNC: fn(&mut GcHead) -> bool = |node| !node.is_marked();
 
     /// call optional notify with node *BEFORE* it is disposed.
     fn sweep_internal(
@@ -97,73 +90,6 @@ impl GcHeap {
         self.sweep_internal(partition_id, predicate, Self::NULL_NOTIFY_FN)
     }
 
-    // #[deprecated(note = "use ::sweep_with() instead")]
-    // pub fn sweep_ex(
-    //     &mut self,
-    //     partition_id: GcPartitionId,
-    //     force: bool,
-    //     incl_types: Option<&[u8]>,
-    //     excl_types: Option<&[u8]>,
-    //     keep_mark: bool,
-    // ) -> usize {
-    //     let chain = match self.partition_heads.get_mut(&partition_id) {
-    //         Some(p) => *p,
-    //         None => {
-    //             return 0;
-    //         }
-    //     };
-
-    //     let mut current = chain;
-    //     let mut prev: Option<NonNull<GcHead>> = None;
-    //     let mut freed_bytes = 0;
-
-    //     while let Some(p) = current {
-    //         unsafe {
-    //             current = p.as_ref().next;
-    //             let type_idx = p.as_ref().gc_type_id();
-
-    //             let should_collect: bool = if !force && (*p.as_ptr()).is_marked() {
-    //                 false
-    //             } else {
-    //                 incl_types.is_none_or(|t| t.contains(&type_idx))
-    //                     && excl_types.is_none_or(|t| !t.contains(&type_idx))
-    //             };
-
-    //             if should_collect {
-    //                 // Remove unmarked objects from list
-    //                 if let Some(last) = prev {
-    //                     (*last.as_ptr()).next = current;
-    //                 } else {
-    //                     *self.partition_heads.get_mut(&partition_id).unwrap() = current;
-    //                 }
-
-    //                 if p.as_ref().is_root() {
-    //                     // Remove from root list
-    //                     if let Some(lst) = self.partition_roots.get_mut(&partition_id) {
-    //                         if let Some(i) = lst.iter().position(|x| *x == p) {
-    //                             lst.swap_remove(i);
-    //                         }
-    //                     }
-    //                 }
-
-    //                 freed_bytes += self.dispose(p);
-    //             } else {
-    //                 // Reset mark bits for next GC
-    //                 if !keep_mark {
-    //                     (*p.as_ptr()).set_marked(false);
-    //                 }
-    //                 prev = Some(p);
-    //             }
-    //         }
-    //     }
-
-    //     // Update partition memory usage with rollup to parent partitions
-    //     self.partitions
-    //         .update_mem_use(partition_id, -(freed_bytes as i32));
-
-    //     freed_bytes
-    // }
-
     /// Collect garbage on given partition, optionally call notify with node *BEFORE* it is disposed.
     fn collect_internal(
         &mut self,
@@ -213,23 +139,16 @@ impl GcHeap {
             }
         }
 
-        let (size, dispose_fn) = self
-            .type_registry
-            .with_type_id(gc_type_id, |t| (t.size as usize, t.dispose_fn))
-            .unwrap();
+        let ty = self.get_node_gc_type(node);
+        let gross_size = std::mem::size_of::<GcHead>() + ty.size as usize;
 
-        let gross_size = std::mem::size_of::<GcHead>() + size;
-
-        if let Some(f) = dispose_fn {
+        if let Some(f) = ty.dispose_fn {
             unsafe {
                 f(node.as_ref().payload().as_ptr());
             }
         }
 
-        GcAllocator::deallocate(
-            unsafe { NonNull::new_unchecked(node.as_ptr().cast::<u8>()) },
-            gross_size,
-        );
+        GcAllocator::deallocate(node.cast::<u8>(), gross_size);
 
         gross_size
     }

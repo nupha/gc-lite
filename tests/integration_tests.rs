@@ -700,6 +700,40 @@ fn test_multiple_weak_references() {
     assert!(weak3.upgrade(&heap).is_some());
 }
 
+#[test]
+fn test_weak_reference_after_partition_removal() {
+    let mut heap = GcHeap::new();
+
+    // 创建有层级的partitions
+    let root_id = heap.create_root_partition(2048);
+    let child_id = heap.create_sub_partition(root_id);
+
+    // 在下属partition创建对象
+    let obj = heap
+        .alloc(
+            child_id,
+            TestData {
+                value: 42,
+                name: "test".to_string(),
+            },
+        )
+        .unwrap();
+
+    // 记录这些对象的GcWeak
+    let weak_ref = heap.downgrade(&obj);
+
+    // 验证弱引用可以升级
+    assert!(weak_ref.upgrade(&heap).is_some());
+
+    // 删除partition
+    heap.remove_partition(child_id);
+
+    // 这时此partition中的对象也会释放
+    // 访问这些对象的GcWeak引用，并upgrade()，应该返回None
+    let upgraded = weak_ref.upgrade(&heap);
+    assert!(upgraded.is_none());
+}
+
 // ============ Context Detection Tests ============
 
 #[test]

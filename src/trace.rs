@@ -84,12 +84,6 @@ impl<'a> GcTracer<'a> {
         unsafe { self.heap.as_mut() }
     }
 
-    /// get user opaque pointer on GcHeap
-    #[inline(always)]
-    pub const fn opaque(&self) -> *mut u8 {
-        unsafe { self.heap.as_ref().opaque() }
-    }
-
     /// clear mark of each node in partition
     pub fn clear_marks(&mut self) {
         unsafe {
@@ -127,12 +121,6 @@ impl<'a> GcTracer<'a> {
         }
     }
 
-    #[inline(always)]
-    #[deprecated(note = "use ::ctx(None) instead")]
-    pub const fn op(&mut self) -> GcTraceOp<'_> {
-        self.ctx()
-    }
-
     fn do_trace(
         &mut self,
         node: NonNull<GcHead>,
@@ -151,9 +139,7 @@ impl<'a> GcTracer<'a> {
 
                 if propagate {
                     // trace into `node`
-                    let tt = &self.heap.as_ref().type_registry;
-                    let trace_fn = node.as_ref().get_trace_fn(tt);
-                    trace_fn(node, self.ctx());
+                    (self.heap().get_node_gc_type(node).trace_fn)(node, self.ctx());
                 }
             }
         }

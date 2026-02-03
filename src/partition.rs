@@ -414,10 +414,10 @@ impl GcHeap {
             .map(NodeIterator::new)
         {
             for mut node in chain {
-                let xref_scope = unsafe { node.as_ref().xref_partition() };
+                let xref = unsafe { node.as_ref().xref_partition() };
 
-                if xref_scope != GcPartitionId::NONE {
-                    debug_assert_ne!(xref_scope, partition_id);
+                if !xref.is_null() {
+                    debug_assert_ne!(xref, partition_id);
 
                     unsafe {
                         let mut f = node.as_ref().flags();
@@ -427,11 +427,12 @@ impl GcHeap {
                         node.as_mut().partition = 0; // clear partition & xref
                     }
 
-                    // attach to xref node chain
-                    self.attach(xref_scope, node);
+                    // attach to xref chain
+                    self.attach(xref, node);
+
                     // Update memory usage with rollup to xref partitions
                     self.partitions.update_mem_use(
-                        xref_scope,
+                        xref,
                         (self.get_node_gc_type(node).size as usize + std::mem::size_of::<GcHead>())
                             as i32,
                     );

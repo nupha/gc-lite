@@ -12,11 +12,17 @@ impl GcHead {
 
     /// Set cross reference partition
     pub(crate) fn set_xref_partition(&mut self, pid: GcPartitionId) {
-        if pid != GcPartitionId::NONE && pid != self.get_partition_id() {
+        if !pid.is_null() && pid != self.get_partition_id() {
             self.partition = (self.partition & 0x0000_FFFF) | ((pid.0 as u32) << 16);
         } else {
             self.partition = self.partition & 0x0000_FFFF;
         }
+    }
+
+    /// Unset cross reference partition
+    #[inline(always)]
+    pub fn unset_xref_partition(&mut self) {
+        self.set_xref_partition(GcPartitionId::NONE);
     }
 }
 
@@ -30,7 +36,9 @@ impl GcHeap {
             let n = node.as_ref();
             (n.get_partition_id(), n.xref_partition())
         };
-        debug_assert!(self.partition(node_pid).is_some());
+        debug_assert!(self.partition(node_pid).is_some(), "{:?}", unsafe {
+            node.as_ref()
+        });
 
         if from_partition == node_pid || from_partition == xref0 {
             return false;
@@ -38,7 +46,7 @@ impl GcHeap {
 
         // Find common parent of (from_partition, node_partition) as up
         let mut up = self.common_parent2(from_partition, node_pid);
-        debug_assert_ne!(up, GcPartitionId::NONE);
+        debug_assert!(!up.is_null());
 
         if up == node_pid || up == xref0 {
             return false;
@@ -47,7 +55,7 @@ impl GcHeap {
         if !xref0.is_null() {
             // Find common parent of (from_partition, xref0)
             let up2 = self.common_parent2(from_partition, xref0);
-            debug_assert_ne!(up2, GcPartitionId::NONE);
+            debug_assert!(!up2.is_null());
 
             if up2 == xref0 {
                 return false;
@@ -60,14 +68,16 @@ impl GcHeap {
         tr.trace_internal(
             node,
             |mut n, _| unsafe {
-                let x = n.as_ref().xref_partition();
-                if x == xref0 {
+                let x0 = n.as_ref().xref_partition();
+
+                if x0.is_null() {
                     n.as_mut().set_xref_partition(up);
                     true
+                } else if x0 == up {
+                    false
                 } else {
-                    debug_assert_ne!(x, GcPartitionId::NONE);
-                    let up3 = self.common_parent2(up, x);
-                    if up3 != x {
+                    let up3 = self.common_parent2(up, x0);
+                    if up3 != x0 {
                         n.as_mut().set_xref_partition(up3);
                         true
                     } else {
@@ -80,64 +90,6 @@ impl GcHeap {
 
         self.set_root_node(node, true);
         return true;
-
-        // if xref0 == GcPartitionId::NONE {
-        //     unsafe {
-        //         node.as_mut().set_xref_partition(up);
-
-        //         // resursively set xref of descendants
-        //         let mut tr = GcTracer::new_internal(NonNull::from_ref(self), node_pid);
-        //         tr.trace_internal(
-        //             node,
-        //             |mut n, _| {
-        //                 if n.as_ref().xref_partition() == xref0 {
-        //                     debug_assert!(!n.as_ref().is_root());
-        //                     n.as_mut().set_xref_partition(up);
-        //                     true
-        //                 } else {
-        //                     false
-        //                 }
-        //             },
-        //             true,
-        //         );
-        //     }
-
-        //     self.set_root_node(node, true);
-        //     return true;
-        // }
-
-        // // Find common parent of (from_partition, xref0)
-        // let up2 = self.common_parent2(from_partition, xref0);
-        // debug_assert_ne!(up2, GcPartitionId::NONE);
-
-        // // Update if the new common parent is more general than xref0
-        // // (i.e., up2 is an ancestor of xref0 and not equal to xref0)
-        // if up2 != xref0 {
-        //     unsafe {
-        //         node.as_mut().set_xref_partition(up2);
-
-        //         // resursively set xref of descendants
-        //         let mut tr = GcTracer::new_internal(NonNull::from_ref(self), node_pid);
-        //         tr.trace_internal(
-        //             node,
-        //             |mut n, _| {
-        //                 if n.as_ref().xref_partition() == xref0 {
-        //                     debug_assert!(!n.as_ref().is_root());
-        //                     n.as_mut().set_xref_partition(up);
-        //                     true
-        //                 } else {
-        //                     false
-        //                 }
-        //             },
-        //             true,
-        //         );
-        //     }
-
-        //     self.set_root_node(node, true);
-        //     return true;
-        // }
-
-        // false
     }
 }
 
