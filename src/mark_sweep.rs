@@ -19,7 +19,7 @@ impl GcHeap {
         predicate: impl Fn(&mut GcHead) -> bool,
         notify: Option<impl Fn(&GcHead)>,
     ) -> usize {
-        if let Some(chain) = self.partition_heads.get(&partition_id).copied() {
+        if let Some(chain) = self.partition_nodes.get(&partition_id).copied() {
             let mut new_chain = chain;
             let mut current = chain;
             let mut prev: Option<NonNull<GcHead>> = None;
@@ -57,7 +57,7 @@ impl GcHeap {
 
             if chain != new_chain {
                 // update chain head
-                *self.partition_heads.get_mut(&partition_id).unwrap() = new_chain;
+                *self.partition_nodes.get_mut(&partition_id).unwrap() = new_chain;
             }
 
             // Update partition memory usage with rollup to parent partitions
@@ -142,7 +142,7 @@ impl GcHeap {
         let ty = self.get_node_gc_type(node);
         let gross_size = std::mem::size_of::<GcHead>() + ty.size as usize;
 
-        if let Some(f) = ty.dispose_fn {
+        if let Some(f) = ty.drop_fn {
             unsafe {
                 f(node.as_ref().payload().as_ptr());
             }
@@ -270,7 +270,7 @@ mod sweep_test {
     /// Helper function to count nodes in a partition
     fn count_nodes_in_partition(heap: &GcHeap, partition_id: GcPartitionId) -> usize {
         let mut count = 0;
-        if let Some(head) = heap.partition_heads.get(&partition_id).copied().flatten() {
+        if let Some(head) = heap.partition_nodes.get(&partition_id).copied().flatten() {
             let mut current = Some(head);
             while let Some(node) = current {
                 unsafe {
@@ -288,7 +288,7 @@ mod sweep_test {
         partition_id: GcPartitionId,
     ) -> Vec<NonNull<GcHead>> {
         let mut nodes = Vec::new();
-        if let Some(head) = heap.partition_heads.get(&partition_id).copied().flatten() {
+        if let Some(head) = heap.partition_nodes.get(&partition_id).copied().flatten() {
             let mut current = Some(head);
             while let Some(node) = current {
                 unsafe {
@@ -368,7 +368,7 @@ mod sweep_test {
         assert_eq!(count_nodes_in_partition(&heap, partition_id), 2);
 
         // Verify chain head is now the node with value 4
-        let head = heap.partition_heads.get(&partition_id).copied().flatten();
+        let head = heap.partition_nodes.get(&partition_id).copied().flatten();
         assert!(head.is_some(), "Chain head should exist");
 
         unsafe {
@@ -417,7 +417,7 @@ mod sweep_test {
         assert_eq!(count_nodes_in_partition(&heap, partition_id), 0);
 
         // Chain head should be None
-        let head = heap.partition_heads.get(&partition_id).copied().flatten();
+        let head = heap.partition_nodes.get(&partition_id).copied().flatten();
         assert!(
             head.is_none(),
             "Chain head should be None after removing all nodes"

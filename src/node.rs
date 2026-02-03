@@ -23,7 +23,7 @@ bitflags::bitflags! {
         const ROOT = 1 << 1;
 
         /// internal use, denotes a node has been traced.
-        const TRACE_DONE = 1 << 2;
+        const TRACED = 1 << 2;
 
         #[cfg(debug_assertions)]
         const MAGIC_NUM = 1 << 7;
@@ -42,20 +42,28 @@ pub struct GcHead {
     /// XRef partition id (16bit) + Partition id (16bit)
     pub(super) partition: u32,
 
+    #[cfg(debug_assertions)]
+    pub(super) alloc_in: GcPartitionId,
+
     /// Pointer to next object (for list traversal)
     pub(super) next: Option<NonNull<GcHead>>,
 }
 
 impl std::fmt::Debug for GcHead {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GcHead")
-            .field("ptr", &(self as *const Self))
-            .field("scope", &self.get_partition_id())
+        let mut s = f.debug_struct("GcHead");
+
+        s.field("ptr", &(self as *const Self))
+            .field("scope", &self.get_partition_id().0)
             .field("type", &self.gc_type_id())
             .field("flags", &self.flags())
-            .field("xref", &self.xref_partition())
-            .field("weak", &self.weakref_index())
-            .finish()
+            .field("xref", &self.xref_partition().0)
+            .field("weak", &self.weakref_index());
+
+        #[cfg(debug_assertions)]
+        s.field("alloc", &self.alloc_in);
+
+        s.finish()
     }
 }
 
@@ -155,13 +163,7 @@ impl GcHead {
     #[inline(always)]
     pub unsafe fn payload(&self) -> NonNull<u8> {
         #[cfg(debug_assertions)]
-        debug_assert!(
-            self.test_valid(),
-            "invalid gc node {self:p}, attrs={:#x}, flags={:?}, xref={:?}",
-            self.attrs,
-            self.flags(),
-            self.xref_partition(),
-        );
+        debug_assert!(self.test_valid(), "invalid gc node {self:?}");
 
         unsafe {
             NonNull::from_ref(self)
@@ -327,7 +329,7 @@ impl<T> GcRef<T> {
 
         // Check if trace/dispose callback matches
         heap.type_registry
-            .with_type_id(type_id, |t| (t.trace_fn, t.dispose_fn))
+            .with_type_id(type_id, |t| (t.trace_fn, t.drop_fn))
             .and_then(|(trace, dispose)| {
                 if std::ptr::fn_addr_eq(trace, expected_trace_fn)
                     && match (dispose, expected_dispose_fn) {

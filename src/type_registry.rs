@@ -9,7 +9,7 @@ use crate::{GcHead, GcHeap, GcTracable, trace::GcTraceOp};
 pub struct GcTypeInfo {
     pub size: u32,
     pub(super) trace_fn: fn(NonNull<GcHead>, GcTraceOp),
-    pub(super) dispose_fn: Option<unsafe fn(*mut u8)>,
+    pub(super) drop_fn: Option<unsafe fn(*mut u8)>,
 
     #[cfg(debug_assertions)]
     pub type_id: std::any::TypeId,
@@ -33,7 +33,7 @@ impl TypeRegistry {
         entries.push(GcTypeInfo {
             size: 0,
             trace_fn: noop_trace_fn,
-            dispose_fn: None,
+            drop_fn: None,
 
             #[cfg(debug_assertions)]
             type_id: std::any::TypeId::of::<()>(),
@@ -71,7 +71,7 @@ impl TypeRegistry {
             let info = GcTypeInfo {
                 size: std::mem::size_of::<T>() as u32,
                 trace_fn: trace_fn::<T>,
-                dispose_fn: if std::mem::needs_drop::<T>() {
+                drop_fn: if std::mem::needs_drop::<T>() {
                     Some(dispose_fn::<T>)
                 } else {
                     None

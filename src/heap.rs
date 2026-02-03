@@ -17,7 +17,7 @@ pub struct GcHeap {
     /// Partition management
     pub(super) partitions: GcPartitionMgr,
     /// LUT: Object list heads for each partition
-    pub(super) partition_heads: HashMap<GcPartitionId, Option<NonNull<GcHead>>>,
+    pub(super) partition_nodes: HashMap<GcPartitionId, Option<NonNull<GcHead>>>,
     /// LUT: Root object lists for each partition
     pub(super) partition_roots: HashMap<GcPartitionId, Vec<NonNull<GcHead>>>,
     /// Weak reference list, each slot stores (version, GcHeader)
@@ -46,7 +46,7 @@ impl GcHeap {
 
         Self {
             partitions,
-            partition_heads: HashMap::with_capacity(8),
+            partition_nodes: HashMap::with_capacity(8),
             partition_roots: HashMap::with_capacity(8),
             weak_slots: Vec::new(),
             type_registry: TypeRegistry::new(),
@@ -112,7 +112,6 @@ impl GcHeap {
                 {
                     return Err((GcError::PartitionFull, data));
                 } else {
-                    // Type information
                     let type_idx = self.type_registry.register::<T>();
                     debug_assert!(type_idx != 0);
 
@@ -141,8 +140,11 @@ impl GcHeap {
                                     0xFF00_0000 | ((type_idx as u32) << 8)
                                 }
                             },
-                            partition: 0, // NONE
+                            partition: 0,
                             next: None,
+
+                            #[cfg(debug_assertions)]
+                            alloc_in: partition_id,
                         };
 
                         // Initialize data
@@ -182,7 +184,7 @@ impl GcHeap {
             debug_assert_eq!(node.as_ref().get_partition_id(), GcPartitionId::NONE);
             (*node.as_ptr()).set_partition_id(partition_id);
 
-            let chain = self.partition_heads.entry(partition_id).or_insert(None);
+            let chain = self.partition_nodes.entry(partition_id).or_insert(None);
             (*node.as_ptr()).next = *chain;
             *chain = Some(node);
         }
@@ -193,7 +195,7 @@ impl GcHeap {
         let partition_id = unsafe { node.as_ref().get_partition_id() };
 
         if partition_id != GcPartitionId::NONE {
-            let chain = self.partition_heads.get_mut(&partition_id).unwrap();
+            let chain = self.partition_nodes.get_mut(&partition_id).unwrap();
 
             let mut current = *chain;
             let mut prev: Option<NonNull<GcHead>> = None;
@@ -359,7 +361,7 @@ impl GcHeap {
                 };
 
             // Get partition list head, manually traverse to avoid borrow conflicts
-            let head = match self.partition_heads.get(&partition_id) {
+            let head = match self.partition_nodes.get(&partition_id) {
                 Some(p) => *p,
                 None => return Ok(false),
             };
@@ -473,7 +475,7 @@ impl GcHeap {
 
                 // Take source partition's chain head
                 let src_head = match self
-                    .partition_heads
+                    .partition_nodes
                     .get_mut(&partition_id)
                     .and_then(Option::take)
                 {
@@ -496,7 +498,7 @@ impl GcHeap {
                 }
 
                 // Get dest partition head, create if doesn't exist
-                let dest_head = self.partition_heads.entry(parent).or_insert(None);
+                let dest_head = self.partition_nodes.entry(parent).or_insert(None);
                 unsafe {
                     (*last.as_ptr()).next = *dest_head;
                 }
@@ -537,7 +539,7 @@ mod heap_tests {
         let obj2: GcRef<String> = heap.alloc(child_id, "hello".to_string()).unwrap();
 
         // Verify objects are in child partition
-        let child_head = heap.partition_heads.get(&child_id).copied().flatten();
+        let child_head = heap.partition_nodes.get(&child_id).copied().flatten();
         assert!(child_head.is_some(), "Objects should be in child partition");
 
         // Verify partition ID before promote
@@ -558,14 +560,14 @@ mod heap_tests {
         heap.promote_all(child_id);
 
         // Verify child partition is now empty
-        let child_head_after = heap.partition_heads.get(&child_id).copied().flatten();
+        let child_head_after = heap.partition_nodes.get(&child_id).copied().flatten();
         assert!(
             child_head_after.is_none(),
             "Child partition should be empty after promote"
         );
 
         // Verify objects are now in root partition
-        let root_head = heap.partition_heads.get(&root_id).copied().flatten();
+        let root_head = heap.partition_nodes.get(&root_id).copied().flatten();
         assert!(root_head.is_some(), "Objects should be in root partition");
 
         // Verify partition ID after promote
@@ -594,7 +596,7 @@ mod heap_tests {
         let obj: GcRef<i32> = heap.alloc(root_id, 100).unwrap();
 
         // Get the head before promote
-        let root_head_before = heap.partition_heads.get(&root_id).copied().flatten();
+        let root_head_before = heap.partition_nodes.get(&root_id).copied().flatten();
         assert!(root_head_before.is_some());
 
         // Verify partition ID before promote
@@ -607,7 +609,7 @@ mod heap_tests {
         heap.promote_all(root_id);
 
         // Objects should still be in root partition
-        let root_head_after = heap.partition_heads.get(&root_id).copied().flatten();
+        let root_head_after = heap.partition_nodes.get(&root_id).copied().flatten();
         assert!(
             root_head_after.is_some(),
             "Root partition should unchanged after promote"

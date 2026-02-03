@@ -64,7 +64,7 @@ impl<'a> GcTracer<'a> {
             heap.as_ref().nodes_iter(partition_id).for_each(|mut n| {
                 let mut f = n.as_ref().flags();
                 let f0 = f;
-                f.remove(GcHeadFlag::TRACE_DONE | GcHeadFlag::MARKED);
+                f.remove(GcHeadFlag::TRACED | GcHeadFlag::MARKED);
                 if f0 != f {
                     n.as_mut().set_flags(f);
                 }
@@ -105,7 +105,7 @@ impl<'a> GcTracer<'a> {
                 .for_each(|mut n| {
                     let mut f = n.as_ref().flags();
                     let f0 = f;
-                    f.remove(GcHeadFlag::TRACE_DONE);
+                    f.remove(GcHeadFlag::TRACED);
                     if f0 != f {
                         n.as_mut().set_flags(f);
                     }
@@ -128,13 +128,13 @@ impl<'a> GcTracer<'a> {
         ignore_trace_flag: bool,
     ) {
         unsafe {
-            if (ignore_trace_flag || !node.as_ref().flags().contains(GcHeadFlag::TRACE_DONE))
+            if (ignore_trace_flag || !node.as_ref().flags().contains(GcHeadFlag::TRACED))
                 && node.as_ref().get_partition_id() == self.partition_id
             {
                 let propagate = callback(node, self.heap());
 
                 if !ignore_trace_flag {
-                    (*node.as_ptr()).set_flags(node.as_ref().flags().union(GcHeadFlag::TRACE_DONE));
+                    (*node.as_ptr()).set_flags(node.as_ref().flags().union(GcHeadFlag::TRACED));
                 }
 
                 if propagate {
@@ -245,7 +245,7 @@ impl<'a> GcTraceOp<'a> {
 impl GcHeap {
     /// A shortcut to GcTracer::new() with `self` being mut borrowed.
     #[inline(always)]
-    pub fn tracer(&mut self, partition_id: GcPartitionId) -> GcTracer<'_> {
+    pub fn tracer(&self, partition_id: GcPartitionId) -> GcTracer<'_> {
         GcTracer::new(NonNull::from(self), partition_id)
     }
 }
@@ -353,7 +353,7 @@ mod tests {
     /// Helper function to count marked nodes in a partition
     fn count_marked_nodes(heap: &GcHeap, partition_id: GcPartitionId) -> usize {
         let mut count = 0;
-        if let Some(head) = heap.partition_heads.get(&partition_id).copied().flatten() {
+        if let Some(head) = heap.partition_nodes.get(&partition_id).copied().flatten() {
             let mut current = Some(head);
             while let Some(node) = current {
                 unsafe {
@@ -371,7 +371,7 @@ mod tests {
     /// Helper function to get all node IDs in a partition
     fn get_all_node_ids(heap: &GcHeap, partition_id: GcPartitionId) -> Vec<u32> {
         let mut ids = Vec::new();
-        if let Some(head) = heap.partition_heads.get(&partition_id).copied().flatten() {
+        if let Some(head) = heap.partition_nodes.get(&partition_id).copied().flatten() {
             let mut current = Some(head);
             while let Some(node) = current {
                 unsafe {

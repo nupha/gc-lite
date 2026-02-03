@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::Cell, collections::HashMap};
+use std::{cell::Cell, collections::HashMap, ptr::NonNull};
 
 use crate::{GcHead, GcHeap, node::GcHeadFlag, node_iterator::NodeIterator};
 
@@ -347,10 +347,6 @@ impl<'a> Iterator for GcPartitionParentIter<'a> {
 }
 
 impl GcHeap {
-    //
-    // Partition Management
-    //
-
     /// Create a new top-level partition (root partition) with the specified memory limit
     ///
     /// # Parameters
@@ -362,7 +358,7 @@ impl GcHeap {
         let id = self
             .partitions
             .create_partition(Some(memory_limit), GcPartitionId::NONE);
-        self.partition_heads.insert(id, None);
+        self.partition_nodes.insert(id, None);
         self.partition_roots.insert(id, Vec::new());
         id
     }
@@ -376,15 +372,15 @@ impl GcHeap {
     /// The ID of the newly created sub-partition
     pub fn create_sub_partition(&mut self, parent: GcPartitionId) -> GcPartitionId {
         let id = self.partitions.create_partition(None, parent);
-        self.partition_heads.insert(id, None);
+        self.partition_nodes.insert(id, None);
         self.partition_roots.insert(id, Vec::new());
         id
     }
 
     /// Remove partition
     pub fn remove_partition(&mut self, partition_id: GcPartitionId) {
-        // recursively remove sub partitions
-        {
+        // recursively remove children
+        let parent_id = {
             let (parent_id, mut children) =
                 if let Some(par) = self.partitions.partitions.get_mut(&partition_id) {
                     (par.parent, std::mem::replace(&mut par.children, Vec::new()))
@@ -403,42 +399,114 @@ impl GcHeap {
                     .children
                     .retain(|&child_id| child_id != parent_id);
             }
+
+            parent_id
         };
 
-        // clean up unreachable nodes
-        self.collect(partition_id);
+        if let Some(chain) = self.partition_nodes.remove(&partition_id) {
+            //
+            // migrate xref nodes
+            //
+            let mut new_chain = chain;
+            let mut current = chain;
+            let mut prev: Option<NonNull<GcHead>> = None;
+            while let Some(mut node) = current {
+                current = unsafe { node.as_ref().next };
 
-        if let Some(chain) = self
-            .partition_heads
-            .remove(&partition_id)
-            .map(NodeIterator::new)
-        {
-            for mut node in chain {
                 let xref = unsafe { node.as_ref().xref_partition() };
-
                 if !xref.is_null() {
                     debug_assert_ne!(xref, partition_id);
 
-                    unsafe {
-                        let mut f = node.as_ref().flags();
-                        f.remove(GcHeadFlag::ROOT | GcHeadFlag::MARKED | GcHeadFlag::TRACE_DONE);
-                        node.as_mut().set_flags(f);
-
-                        node.as_mut().partition = 0; // clear partition & xref
+                    if let Some(last) = prev {
+                        unsafe {
+                            (*last.as_ptr()).next = current;
+                        }
+                    } else {
+                        new_chain = current; //chain head changed
                     }
 
-                    // attach to xref chain
+                    // clear flags and attach to xref chain
+                    unsafe {
+                        let mut f = node.as_ref().flags();
+                        f.remove(GcHeadFlag::ROOT | GcHeadFlag::MARKED | GcHeadFlag::TRACED);
+                        node.as_mut().set_flags(f);
+                        node.as_mut().partition = 0; // clear partition & xref
+                    }
                     self.attach(xref, node);
 
-                    // Update memory usage with rollup to xref partitions
+                    // Increase memory usage with rollup to xref partitions
                     self.partitions.update_mem_use(
                         xref,
                         (self.get_node_gc_type(node).size as usize + std::mem::size_of::<GcHead>())
                             as i32,
                     );
+                } else {
+                    prev = Some(node);
+                }
+            }
+
+            //
+            // dispose remainding nodes - all of them
+            //
+            if new_chain.is_some() {
+                #[cfg(debug_assertions)]
+                {
+                    eprintln!(
+                        "HINT: better to do collect/sweep yourself before removing the partition, if you have customized sweep logic."
+                    );
+                }
+
+                let mut freed_bytes = 0;
+                for p in NodeIterator::new(new_chain) {
+                    freed_bytes += unsafe { self.dispose(p) };
+                }
+
+                // Decrease memory usage
+                if !parent_id.is_null() {
+                    self.partitions
+                        .update_mem_use(parent_id, -(freed_bytes as i32));
                 }
             }
         }
+
+        //
+        // LEGACY LOGIC
+        //
+
+        // // clean up unreachable nodes
+        // self.collect(partition_id);
+
+        // if let Some(nodes_iter) = self
+        //     .partition_nodes
+        //     .remove(&partition_id)
+        //     .map(NodeIterator::new)
+        // {
+        //     for mut node in nodes_iter {
+        //         let xref = unsafe { node.as_ref().xref_partition() };
+
+        //         if !xref.is_null() {
+        //             debug_assert_ne!(xref, partition_id);
+
+        //             unsafe {
+        //                 let mut f = node.as_ref().flags();
+        //                 f.remove(GcHeadFlag::ROOT | GcHeadFlag::MARKED | GcHeadFlag::TRACED);
+        //                 node.as_mut().set_flags(f);
+
+        //                 node.as_mut().partition = 0; // clear partition & xref
+        //             }
+
+        //             // attach to xref chain
+        //             self.attach(xref, node);
+
+        //             // Update memory usage with rollup to xref partitions
+        //             self.partitions.update_mem_use(
+        //                 xref,
+        //                 (self.get_node_gc_type(node).size as usize + std::mem::size_of::<GcHead>())
+        //                     as i32,
+        //             );
+        //         }
+        //     }
+        // }
 
         self.partitions.partitions.remove(&partition_id).unwrap();
         self.partition_roots.remove(&partition_id);

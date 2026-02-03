@@ -26,7 +26,7 @@ impl<'a> NodeIterator<'a> {
     }
 
     pub(crate) fn from_heap(heap: &'a GcHeap, partition_id: GcPartitionId) -> Self {
-        Self::new(heap.partition_heads.get(&partition_id).copied().flatten())
+        Self::new(heap.partition_nodes.get(&partition_id).copied().flatten())
     }
 }
 
