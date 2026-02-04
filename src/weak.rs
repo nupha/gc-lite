@@ -78,12 +78,12 @@ impl<T> GcWeak<T> {
 
     /// get weakref index
     #[inline(always)]
-    pub(crate) fn index(&self) -> u16 {
+    pub fn index(&self) -> u16 {
         self.weak_id.index()
     }
 
     #[inline(always)]
-    pub(crate) fn version(&self) -> u16 {
+    pub fn version(&self) -> u16 {
         self.weak_id.version()
     }
 
@@ -104,12 +104,14 @@ impl GcHeap {
 
         if !node.weak_id.is_null() {
             // Weakref already exists, reuse it
-            debug_assert!((node.weak_id.index() as usize) < self.weak_slots.len());
-            let (ver, _ptr) =
-                unsafe { self.weak_slots.get_unchecked(node.weak_id.index() as usize) };
-            debug_assert!(
-                *ver == node.weak_id.version() && _ptr.is_some_and(|p| p == gc_ref.head_ptr)
-            );
+            #[cfg(debug_assertions)]
+            {
+                debug_assert!((node.weak_id.index() as usize) < self.weak_slots.len());
+                let (ver, ptr) = self.weak_slots[node.weak_id.index() as usize];
+                debug_assert!(
+                    ver == node.weak_id.version() && ptr.is_some_and(|p| p == gc_ref.head_ptr)
+                );
+            }
             GcWeak::from_id(node.weak_id)
         } else {
             if self.weak_slots.len() == u16::MAX as usize {
@@ -124,7 +126,7 @@ impl GcHeap {
                 .unwrap_or_else(|| {
                     // No free slots, extend list
                     let n = self.weak_slots.len();
-                    self.weak_slots.push((u16::MAX, None));
+                    self.weak_slots.push((0, None));
                     n
                 });
 
@@ -149,21 +151,25 @@ impl GcHeap {
 
     /// Upgrade weak reference
     pub fn upgrade<T>(&self, weak_ref: &GcWeak<T>) -> Option<GcRef<T>> {
-        self.weak_slots
-            .get(weak_ref.index() as usize)
-            .and_then(|(version, node)| {
-                if *version == weak_ref.version() {
-                    *node
-                } else {
-                    None
-                }
-            })
-            .and_then(|ptr| {
-                Some(GcRef {
-                    head_ptr: ptr,
-                    _marker: PhantomData,
+        if !weak_ref.weak_id.is_null() {
+            self.weak_slots
+                .get(weak_ref.index() as usize)
+                .and_then(|(version, node)| {
+                    if *version == weak_ref.version() {
+                        *node
+                    } else {
+                        None
+                    }
                 })
-            })
+                .and_then(|ptr| {
+                    Some(GcRef {
+                        head_ptr: ptr,
+                        _marker: PhantomData,
+                    })
+                })
+        } else {
+            None
+        }
     }
 }
 

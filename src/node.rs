@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    GcHeap, GcPartitionId, GcTracable,
+    GcHeap, GcPartitionId, GcTracable, GcWeak,
     trace::GcTraceOp,
     type_registry::{TypeRegistry, dispose_fn, trace_fn},
     weak::GcWeakId,
@@ -60,7 +60,12 @@ impl std::fmt::Debug for GcHead {
             .field("type", &self.gc_type_id())
             .field("flags", &self.flags())
             .field("xref", &self.xref_partition().0)
-            .field("weak", &self.weak());
+            .field(
+                "weak",
+                &self
+                    .weak()
+                    .map(|w| format!("{}#{}", w.index(), w.version())),
+            );
 
         #[cfg(debug_assertions)]
         s.field("alloc", &self.alloc_in);
@@ -145,7 +150,7 @@ impl GcHead {
     }
 
     /// get node weakref info
-    pub(crate) fn weak(&self) -> Option<GcWeakId> {
+    pub fn weak(&self) -> Option<GcWeakId> {
         if self.weak_id.is_null() {
             None
         } else {
@@ -269,7 +274,7 @@ impl<T> GcRef<T> {
     }
 
     #[inline(always)]
-    pub fn downgrade(&self, heap: &mut crate::GcHeap) -> crate::weak::GcWeak<T> {
+    pub fn downgrade(&self, heap: &mut GcHeap) -> GcWeak<T> {
         heap.downgrade(self)
     }
 
