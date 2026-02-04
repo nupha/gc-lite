@@ -1,6 +1,6 @@
 use std::ptr::NonNull;
 
-use crate::{GcHead, GcHeap, GcPartitionId, GcTracer};
+use crate::{GcHead, GcHeap, GcPartitionId};
 
 impl GcHead {
     /// Get cross reference partition
@@ -29,7 +29,10 @@ impl GcHead {
 impl GcHeap {
     /// Updates the node's cross-reference partition to a more general ancestor.
     /// Returns true if node's xref was updated, false if not.
-    pub fn set_xref(&mut self, from_partition: GcPartitionId, node: NonNull<GcHead>) -> bool {
+    pub fn set_xref(&mut self, from_partition: GcPartitionId, mut node: NonNull<GcHead>) -> bool {
+        log::trace!("[xref] {:?} -> {from_partition:?}", unsafe {
+            node.as_ref()
+        });
         debug_assert!(self.partition(from_partition).is_some());
 
         let (node_pid, xref0) = unsafe {
@@ -63,33 +66,37 @@ impl GcHeap {
             up = up2;
         }
 
-        // set xref (up) to node and resursively it's descendants
-        let mut tr = GcTracer::new_internal(NonNull::from_ref(self), node_pid);
-        tr.trace_internal(
-            node,
-            |mut n, _| unsafe {
-                let x0 = n.as_ref().xref_partition();
+        unsafe {
+            node.as_mut().set_xref_partition(up);
+        }
 
-                if x0.is_null() {
-                    n.as_mut().set_xref_partition(up);
-                    true
-                } else if x0 == up {
-                    false
-                } else {
-                    let up3 = self.common_parent2(up, x0);
-                    if up3 != x0 {
-                        n.as_mut().set_xref_partition(up3);
-                        true
-                    } else {
-                        false
-                    }
-                }
-            },
-            true,
-        );
+        // // set xref (up) to node and resursively it's descendants
+        // let mut tr = GcTracer::new_internal(NonNull::from_ref(self), node_pid);
+        // tr.trace_internal(
+        //     node,
+        //     |mut n, _| unsafe {
+        //         let x0 = n.as_ref().xref_partition();
+
+        //         if x0.is_null() {
+        //             n.as_mut().set_xref_partition(up);
+        //             true
+        //         } else if x0 == up {
+        //             false
+        //         } else {
+        //             let up3 = self.common_parent2(up, x0);
+        //             if up3 != x0 {
+        //                 n.as_mut().set_xref_partition(up3);
+        //                 true
+        //             } else {
+        //                 false
+        //             }
+        //         }
+        //     },
+        //     true,
+        // );
 
         self.set_root_node(node, true);
-        return true;
+        true
     }
 }
 

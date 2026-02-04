@@ -5,6 +5,7 @@ use std::ptr::NonNull;
 
 use crate::{
     GcHeap, allocator::GcAllocator, node::GcHead, partition::GcPartitionId, trace::GcTracer,
+    weak::GcWeakId,
 };
 
 impl GcHeap {
@@ -61,8 +62,7 @@ impl GcHeap {
             }
 
             // Update partition memory usage with rollup to parent partitions
-            self.partitions
-                .update_mem_use(partition_id, -(freed_bytes as i32));
+            self.mgr.update_mem_use(partition_id, -(freed_bytes as i32));
 
             freed_bytes
         } else {
@@ -96,7 +96,7 @@ impl GcHeap {
         partition_id: GcPartitionId,
         notify: Option<impl Fn(&GcHead)>,
     ) -> usize {
-        if self.partitions.partition(partition_id).is_some() {
+        if self.partition(partition_id).is_some() {
             self.tracer(partition_id).trace_roots(GcTracer::MARK_FUNC);
             self.sweep_internal(partition_id, Self::SWEEP_UNMARKED_FUNC, notify)
         } else {
@@ -127,15 +127,16 @@ impl GcHeap {
 
     /// Dispose a node
     pub(super) unsafe fn dispose(&mut self, node: NonNull<GcHead>) -> usize {
-        let gc_type_id = unsafe { (*node.as_ptr()).gc_type_id() };
-        debug_assert_ne!(gc_type_id, 0);
+        let hd = unsafe { node.as_ref() };
+        log::trace!("[dispose] {hd:?}");
 
-        if let Some(w) = unsafe { (*node.as_ptr()).weakref_index() } {
-            // clear weak slot node pointer - mark the weak slot is free.
-            debug_assert!((w as usize) < self.weak_slots.len());
+        if !hd.weak_id.is_null() {
+            // clear weak slot
+            let widx = hd.weak_id.index();
+            debug_assert!((widx as usize) < self.weak_slots.len());
             unsafe {
-                self.weak_slots.get_unchecked_mut(w as usize).1.take();
-                (*node.as_ptr()).set_weakref_index(None);
+                self.weak_slots.get_unchecked_mut(widx as usize).1.take();
+                (*node.as_ptr()).weak_id = GcWeakId::NULL;
             }
         }
 

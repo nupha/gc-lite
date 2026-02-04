@@ -46,6 +46,10 @@ impl<'a> GcTracer<'a> {
 
     /// create new tracer for specified partition.
     pub(crate) fn new_internal(heap: NonNull<GcHeap>, partition_id: GcPartitionId) -> Self {
+        unsafe {
+            debug_assert!(heap.as_ref().partition(partition_id).is_some());
+        }
+
         GcTracer {
             heap,
             partition_id,
@@ -190,6 +194,75 @@ impl<'a> GcTracer<'a> {
         }
     }
 
+    pub(crate) fn fix_xref_tree(&mut self, mut root_node: NonNull<GcHead>) {
+        let n = unsafe { root_node.as_ref() };
+        let xref = n.xref_partition();
+
+        debug_assert!(!xref.is_null());
+        debug_assert_eq!(n.get_partition_id(), self.partition_id);
+        debug_assert!(n.is_root());
+
+        let mut flags = n.flags();
+        flags.insert(GcHeadFlag::TRACED);
+        unsafe {
+            root_node.as_mut().set_flags(flags);
+        }
+
+        (self.heap().get_node_gc_type(root_node).trace_fn)(root_node, self.ctx());
+
+        for sub in std::mem::replace(&mut self.pendings, VecDeque::new()) {
+            unsafe {
+                if sub.as_ref().get_partition_id() == self.partition_id {
+                    self.set_xref_recursive(sub, xref);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn set_xref_recursive(&mut self, mut node: NonNull<GcHead>, xref: GcPartitionId) {
+        let n = unsafe { node.as_ref() };
+
+        debug_assert!(!xref.is_null());
+        debug_assert_eq!(n.get_partition_id(), self.partition_id);
+
+        let xref0 = n.xref_partition();
+        let fix = if !xref0.is_null() {
+            self.heap().common_parent2(xref, xref0)
+        } else {
+            xref
+        };
+
+        let trace_sub = if fix != xref0 {
+            unsafe {
+                node.as_mut().set_xref_partition(fix);
+            }
+            log::trace!("[fix_xref]: {n:?} -> {fix:?}");
+            true
+        } else {
+            let mut flags = n.flags();
+            flags.insert(GcHeadFlag::TRACED);
+            unsafe {
+                node.as_mut().set_flags(flags);
+            }
+            false
+        };
+
+        if trace_sub {
+            (self.heap().get_node_gc_type(node).trace_fn)(node, self.ctx());
+
+            let children = std::mem::replace(&mut self.pendings, VecDeque::new());
+            for sub in children {
+                unsafe {
+                    if sub.as_ref().get_partition_id() == self.partition_id
+                        && !sub.as_ref().flags().contains(GcHeadFlag::TRACED)
+                    {
+                        self.set_xref_recursive(sub, fix);
+                    }
+                }
+            }
+        }
+    }
+
     /// commit to trace pending nodes
     pub fn commit(&mut self, callback: impl Fn(NonNull<GcHead>, &GcHeap) -> bool) {
         self.do_commit(callback, false);
@@ -251,7 +324,7 @@ impl GcHeap {
 }
 
 #[macro_export]
-macro_rules! impl_collect_for_basic {
+macro_rules! impl_trace_for_basic {
     ($($ty:ty),*) => {
         $(
             unsafe impl GcTracable for $ty {
@@ -265,7 +338,7 @@ macro_rules! impl_collect_for_basic {
 }
 
 // Implement GcTracable for basic types
-impl_collect_for_basic!(
+impl_trace_for_basic!(
     u8,
     u16,
     u32,
@@ -306,6 +379,15 @@ unsafe impl<T: GcTracable> GcTracable for Box<T> {
     #[inline(always)]
     fn trace(&self, tr: GcTraceOp) {
         self.as_ref().trace(tr);
+    }
+}
+
+unsafe impl<T: GcTracable> GcTracable for [T] {
+    #[inline]
+    fn trace(&self, tr: GcTraceOp) {
+        for n in self {
+            n.trace(tr);
+        }
     }
 }
 

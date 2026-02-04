@@ -3,14 +3,37 @@
 
 use std::marker::PhantomData;
 
-use crate::{GcHead, GcRef, heap::GcHeap};
+use crate::{GcRef, heap::GcHeap};
+
+/// bit 16-31: slot index in weak_list
+/// bit 0-15:  version
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct GcWeakId(u32);
+
+impl GcWeakId {
+    pub(crate) const NULL: Self = Self(0);
+
+    pub fn index(&self) -> u16 {
+        (self.0 >> 16) as u16
+    }
+
+    pub fn version(&self) -> u16 {
+        self.0 as u16
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.0 == 0
+    }
+}
 
 /// Weak reference
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq)]
+#[repr(transparent)]
 pub struct GcWeak<T> {
-    /// bit 24-31: slot index in weak_list
-    /// bit 0-16: Version number, used to prevent conflicts from slot reuse
-    pub(crate) info: u32,
+    /// bit 16-31: slot index in weak_list
+    /// bit 0-15:  version
+    pub(crate) weak_id: GcWeakId,
 
     pub(crate) _marker: PhantomData<T>,
 }
@@ -18,7 +41,7 @@ pub struct GcWeak<T> {
 impl<T> Clone for GcWeak<T> {
     fn clone(&self) -> Self {
         Self {
-            info: self.info,
+            weak_id: self.weak_id,
             _marker: PhantomData,
         }
     }
@@ -28,33 +51,40 @@ impl<T> Copy for GcWeak<T> {}
 
 impl<T> Default for GcWeak<T> {
     fn default() -> Self {
-        Self::new(0xFF, 0xFFFF)
+        Self::new(0, 0)
     }
 }
 
 impl<T> std::fmt::Debug for GcWeak<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "GcWeak({}#{})", self.slot_index(), self.version())
+        write!(f, "GcWeak({}#{})", self.index(), self.version())
     }
 }
 
 impl<T> GcWeak<T> {
-    #[inline(always)]
-    pub(crate) fn new(slot_index: u8, version: u16) -> Self {
+    pub(crate) fn new(index: u16, version: u16) -> Self {
         Self {
-            info: ((slot_index as u32) << 24) | (version as u32),
+            weak_id: GcWeakId(((index as u32) << 16) | (version as u32)),
             _marker: PhantomData,
         }
     }
 
+    pub(crate) fn from_id(weak_id: GcWeakId) -> Self {
+        Self {
+            weak_id,
+            _marker: PhantomData,
+        }
+    }
+
+    /// get weakref index
     #[inline(always)]
-    pub(crate) fn slot_index(&self) -> u8 {
-        (self.info >> 24) as u8
+    pub(crate) fn index(&self) -> u16 {
+        self.weak_id.index()
     }
 
     #[inline(always)]
     pub(crate) fn version(&self) -> u16 {
-        self.info as u16
+        self.weak_id.version()
     }
 
     /// Upgrade weak reference to strong reference
@@ -67,17 +97,23 @@ impl<T> GcWeak<T> {
 impl GcHeap {
     /// Create weak reference.
     pub fn downgrade<T>(&mut self, gc_ref: &GcRef<T>) -> GcWeak<T> {
-        let mut node = gc_ref.head_ptr;
+        let node = unsafe {
+            let mut h = gc_ref.head_ptr;
+            h.as_mut()
+        };
 
-        if let Some(w) = unsafe { node.as_ref().weakref_index() } {
+        if !node.weak_id.is_null() {
             // Weakref already exists, reuse it
-            debug_assert!((w as usize) < self.weak_slots.len());
-            let (ver, _ptr) = unsafe { self.weak_slots.get_unchecked(w as usize) };
-            debug_assert!(_ptr.is_some());
-            GcWeak::new(w, *ver)
+            debug_assert!((node.weak_id.index() as usize) < self.weak_slots.len());
+            let (ver, _ptr) =
+                unsafe { self.weak_slots.get_unchecked(node.weak_id.index() as usize) };
+            debug_assert!(
+                *ver == node.weak_id.version() && _ptr.is_some_and(|p| p == gc_ref.head_ptr)
+            );
+            GcWeak::from_id(node.weak_id)
         } else {
-            if self.weak_slots.len() == u8::MAX as usize {
-                panic!("too may living weakrefs");
+            if self.weak_slots.len() == u16::MAX as usize {
+                panic!("too may weakrefs");
             }
 
             // Find a free slot
@@ -93,8 +129,6 @@ impl GcHeap {
                 });
 
             unsafe {
-                node.as_mut().set_weakref_index(Some(i as u8));
-
                 // Set slot `i` with node pointer and new version number
                 let curr_ver = self.weak_slots.get_unchecked(i).0;
                 let version = if curr_ver == u16::MAX {
@@ -102,9 +136,13 @@ impl GcHeap {
                 } else {
                     curr_ver + 1
                 };
-                *self.weak_slots.get_unchecked_mut(i) = (version, Some(gc_ref.head_ptr));
+                debug_assert!(version != 0);
 
-                GcWeak::new(i as _, version)
+                *self.weak_slots.get_unchecked_mut(i) = (version, Some(gc_ref.head_ptr));
+                let weak = GcWeak::new(i as _, version);
+                node.weak_id = weak.weak_id;
+
+                weak
             }
         }
     }
@@ -112,7 +150,7 @@ impl GcHeap {
     /// Upgrade weak reference
     pub fn upgrade<T>(&self, weak_ref: &GcWeak<T>) -> Option<GcRef<T>> {
         self.weak_slots
-            .get(weak_ref.slot_index() as usize)
+            .get(weak_ref.index() as usize)
             .and_then(|(version, node)| {
                 if *version == weak_ref.version() {
                     *node
@@ -129,22 +167,6 @@ impl GcHeap {
     }
 }
 
-impl GcHead {
-    /// Get weak index
-    #[inline(always)]
-    pub(crate) fn weakref_index(&self) -> Option<u8> {
-        let w = (self.attrs >> 24) as u8;
-        if w != u8::MAX { Some(w) } else { None }
-    }
-
-    /// Set weak index
-    #[inline(always)]
-    pub(crate) fn set_weakref_index(&mut self, index: Option<u8>) {
-        self.attrs =
-            (self.attrs & 0x00FF_FFFF) | ((index.map(|i| i).unwrap_or(u8::MAX) as u32) << 24);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,12 +178,12 @@ mod tests {
 
         // Test Clone
         let weak2 = weak1.clone();
-        assert_eq!(weak1.slot_index(), weak2.slot_index());
+        assert_eq!(weak1.index(), weak2.index());
 
         // Test Copy
         let weak3 = weak1;
         let weak4 = weak1; // Can be copied multiple times
-        assert_eq!(weak3.slot_index(), weak4.slot_index());
+        assert_eq!(weak3.index(), weak4.index());
     }
 
     /// Test WeakRef's equality
@@ -199,7 +221,7 @@ mod tests {
         let weak_string = GcWeak::<String>::new(1, 1);
 
         // Different type WeakRef with same slot should be equal (because only slot is compared)
-        debug_assert_eq!(weak_i32.slot_index(), weak_string.slot_index());
+        debug_assert_eq!(weak_i32.index(), weak_string.index());
         // But they are different types
         debug_assert_eq!(
             std::any::TypeId::of::<GcWeak<i32>>(),
@@ -215,20 +237,20 @@ mod tests {
     #[test]
     fn test_weak_ref_edge_cases() {
         // Test maximum slot value
-        let weak_max = GcWeak::<i32>::new(u8::MAX, 1);
+        let weak_max = GcWeak::<i32>::new(u16::MAX, 1);
 
-        debug_assert_eq!(weak_max.slot_index(), u8::MAX);
+        debug_assert_eq!(weak_max.index(), u16::MAX);
 
         // Test minimum slot value
         let weak_min = GcWeak::<i32>::new(0, 1);
-        debug_assert_eq!(weak_min.slot_index(), 0);
+        debug_assert_eq!(weak_min.index(), 0);
 
         // Test WeakRef comparison with same slot but different types
         let weak_i32 = GcWeak::<i32>::new(5, 1);
         let weak_string = GcWeak::<String>::new(5, 1);
 
         // Although types are different, slots are the same, should be equal
-        debug_assert_eq!(weak_i32.slot_index(), weak_string.slot_index());
+        debug_assert_eq!(weak_i32.index(), weak_string.index());
     }
 
     /// Test WeakRef's serialization compatibility

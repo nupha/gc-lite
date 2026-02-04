@@ -11,6 +11,7 @@ use crate::{
     GcHeap, GcPartitionId, GcTracable,
     trace::GcTraceOp,
     type_registry::{TypeRegistry, dispose_fn, trace_fn},
+    weak::GcWeakId,
 };
 
 bitflags::bitflags! {
@@ -34,16 +35,17 @@ bitflags::bitflags! {
 #[repr(C)]
 pub struct GcHead {
     /// Attributes of node:
-    /// * bit 24-31: weak reference index, u8::MAX means none
-    /// * bit 8-16:  type id
+    /// * bit 8-15:  type id
     /// * bit 0-7:   flags
     pub(super) attrs: u32,
 
     /// XRef partition id (16bit) + Partition id (16bit)
     pub(super) partition: u32,
 
+    pub(super) weak_id: GcWeakId,
+
     #[cfg(debug_assertions)]
-    pub(super) alloc_in: GcPartitionId,
+    pub(crate) alloc_in: GcPartitionId,
 
     /// Pointer to next object (for list traversal)
     pub(super) next: Option<NonNull<GcHead>>,
@@ -58,7 +60,7 @@ impl std::fmt::Debug for GcHead {
             .field("type", &self.gc_type_id())
             .field("flags", &self.flags())
             .field("xref", &self.xref_partition().0)
-            .field("weak", &self.weakref_index());
+            .field("weak", &self.weak());
 
         #[cfg(debug_assertions)]
         s.field("alloc", &self.alloc_in);
@@ -142,26 +144,18 @@ impl GcHead {
         self.partition = (self.partition & 0xFFFF_0000) | id.0 as u32;
     }
 
-    #[inline(always)]
-    pub(super) fn get_trace_fn(
-        &self,
-        type_registry: &TypeRegistry,
-    ) -> fn(NonNull<GcHead>, GcTraceOp) {
-        let f = type_registry.with_type_id(self.gc_type_id(), |t| t.trace_fn);
-
-        #[cfg(debug_assertions)]
-        {
-            f.unwrap()
-        }
-        #[cfg(not(debug_assertions))]
-        unsafe {
-            f.unwrap_unchecked()
+    /// get node weakref info
+    pub(crate) fn weak(&self) -> Option<GcWeakId> {
+        if self.weak_id.is_null() {
+            None
+        } else {
+            Some(self.weak_id)
         }
     }
 
     /// get raw pointer to payload data
-    #[inline(always)]
-    pub unsafe fn payload(&self) -> NonNull<u8> {
+    #[inline]
+    pub fn payload(&self) -> NonNull<u8> {
         #[cfg(debug_assertions)]
         debug_assert!(self.test_valid(), "invalid gc node {self:?}");
 
@@ -197,7 +191,6 @@ impl<T> DerefMut for GcRef<T> {
 }
 
 impl<T> Clone for GcRef<T> {
-    #[inline]
     fn clone(&self) -> Self {
         Self {
             head_ptr: self.head_ptr,
@@ -242,8 +235,8 @@ impl<T> std::fmt::Debug for GcRef<T> {
                 node.get_partition_id().0,
                 node.xref_partition().0,
             )?;
-            if let Some(w) = node.weakref_index() {
-                write!(f, " weak={w}")?;
+            if let Some(w) = node.weak() {
+                write!(f, " weak={w:?}")?;
             }
             write!(f, " data={:p}>", node.payload())
         }
