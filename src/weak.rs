@@ -3,7 +3,7 @@
 
 use std::marker::PhantomData;
 
-use crate::{GcRef, heap::GcHeap};
+use crate::{GcRef, GcTracable, heap::GcHeap};
 
 /// bit 16-31: slot index in weak_list
 /// bit 0-15:  version
@@ -30,7 +30,7 @@ impl GcWeakId {
 /// Weak reference
 #[derive(PartialEq)]
 #[repr(transparent)]
-pub struct GcWeak<T> {
+pub struct GcWeak<T: GcTracable> {
     /// bit 16-31: slot index in weak_list
     /// bit 0-15:  version
     pub(crate) weak_id: GcWeakId,
@@ -38,7 +38,7 @@ pub struct GcWeak<T> {
     pub(crate) _marker: PhantomData<T>,
 }
 
-impl<T> Clone for GcWeak<T> {
+impl<T: GcTracable> Clone for GcWeak<T> {
     fn clone(&self) -> Self {
         Self {
             weak_id: self.weak_id,
@@ -47,21 +47,21 @@ impl<T> Clone for GcWeak<T> {
     }
 }
 
-impl<T> Copy for GcWeak<T> {}
+impl<T: GcTracable> Copy for GcWeak<T> {}
 
-impl<T> Default for GcWeak<T> {
+impl<T: GcTracable> Default for GcWeak<T> {
     fn default() -> Self {
         Self::new(0, 0)
     }
 }
 
-impl<T> std::fmt::Debug for GcWeak<T> {
+impl<T: GcTracable> std::fmt::Debug for GcWeak<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "GcWeak({}#{})", self.index(), self.version())
     }
 }
 
-impl<T> GcWeak<T> {
+impl<T: GcTracable> GcWeak<T> {
     pub(crate) fn new(index: u16, version: u16) -> Self {
         Self {
             weak_id: GcWeakId(((index as u32) << 16) | (version as u32)),
@@ -96,7 +96,7 @@ impl<T> GcWeak<T> {
 
 impl GcHeap {
     /// Create weak reference.
-    pub fn downgrade<T>(&mut self, gc_ref: &GcRef<T>) -> GcWeak<T> {
+    pub fn downgrade<T: GcTracable>(&mut self, gc_ref: &GcRef<T>) -> GcWeak<T> {
         let node = unsafe {
             let mut h = gc_ref.head_ptr;
             h.as_mut()
@@ -150,7 +150,7 @@ impl GcHeap {
     }
 
     /// Upgrade weak reference
-    pub fn upgrade<T>(&self, weak_ref: &GcWeak<T>) -> Option<GcRef<T>> {
+    pub fn upgrade<T: GcTracable>(&self, weak_ref: &GcWeak<T>) -> Option<GcRef<T>> {
         if !weak_ref.weak_id.is_null() {
             self.weak_slots
                 .get(weak_ref.index() as usize)

@@ -24,7 +24,7 @@ pub struct GcHeap {
     /// Weak reference list, each slot stores (version, GcHeader)
     pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
     /// Type registry
-    pub(super) type_registry: crate::type_registry::TypeRegistry,
+    pub(super) gc_data_types: crate::type_registry::TypeRegistry,
 
     /// User provided opaque raw pointer
     opaque: *mut u8,
@@ -55,7 +55,7 @@ impl GcHeap {
             partition_nodes: HashMap::with_capacity(8),
             partition_roots: HashMap::with_capacity(8),
             weak_slots: Vec::new(),
-            type_registry: TypeRegistry::new(),
+            gc_data_types: TypeRegistry::new(),
             opaque: std::ptr::null_mut(),
         }
     }
@@ -102,11 +102,11 @@ impl GcHeap {
         }
     }
 
-    /// Allocate in partition
+    /// Allocate a node in given partition
     pub fn alloc<T: GcTracable>(
         &mut self,
         partition_id: GcPartitionId,
-        data: T,
+        payload: T,
     ) -> Result<GcRef<T>, (GcError, T)> {
         match self.partition_mut(partition_id) {
             Some(par) => {
@@ -115,20 +115,17 @@ impl GcHeap {
 
                 if unlikely(par.memory_limit > 0 && par.memory_used + gross_size > par.memory_limit)
                 {
-                    return Err((GcError::PartitionFull, data));
+                    return Err((GcError::PartitionFull, payload));
                 } else {
-                    let type_idx = self.type_registry.register::<T>(0);
-                    debug_assert!(type_idx != 0);
-
-                    // Allocate memory
+                    let gc_dtype = self.gc_data_types.register::<T>(0);
                     let ptr = match GcAllocator::allocate(gross_size) {
                         Some(p) => p,
                         None => {
-                            return Err((GcError::AllocationFailed, data));
+                            return Err((GcError::AllocationFailed, payload));
                         }
                     };
 
-                    // O.o VERY SLOW DEBUG
+                    // O.o SLOW DEBUG
                     #[cfg(debug_assertions)]
                     {
                         for pid in self.partition_ids() {
@@ -141,20 +138,18 @@ impl GcHeap {
                     }
 
                     unsafe {
-                        // Initialize header
                         let header_ptr = ptr.as_ptr().cast::<GcHead>();
-
                         (*header_ptr) = GcHead {
                             attrs: {
                                 #[cfg(debug_assertions)]
                                 {
                                     0xFF00_0000
-                                        | ((type_idx as u32) << 8)
+                                        | ((gc_dtype as u32) << 8)
                                         | (GcHeadFlag::MAGIC_NUM.bits() as u32)
                                 }
                                 #[cfg(not(debug_assertions))]
                                 {
-                                    0xFF00_0000 | ((type_idx as u32) << 8)
+                                    0xFF00_0000 | ((gc_dtype as u32) << 8)
                                 }
                             },
                             partition: 0,
@@ -167,9 +162,9 @@ impl GcHeap {
 
                         // Initialize data
                         let data_ptr = ptr.as_ptr().add(std::mem::size_of::<GcHead>()).cast::<T>();
-                        std::ptr::write(data_ptr, data);
+                        std::ptr::write(data_ptr, payload);
 
-                        debug_assert!((*header_ptr).gc_type_id() != 0);
+                        debug_assert!((*header_ptr).gc_dtype() != 0);
 
                         // Add to partition list
                         let header = NonNull::new_unchecked(header_ptr);
@@ -188,7 +183,7 @@ impl GcHeap {
                 }
             }
             None => {
-                return Err((GcError::PartitionNotFound, data));
+                return Err((GcError::PartitionNotFound, payload));
             }
         }
     }
@@ -281,7 +276,7 @@ impl GcHeap {
 
     /// Set/unset a gc_ref to be root
     #[inline(always)]
-    pub fn set_root<T>(&mut self, gc_ref: GcRef<T>, is_root: bool) {
+    pub fn set_root<T: GcTracable>(&mut self, gc_ref: GcRef<T>, is_root: bool) {
         self.set_root_node(gc_ref.head_ptr, is_root);
     }
 
@@ -353,7 +348,7 @@ impl GcHeap {
 
     /// Check if object is referenced by other objects
     #[deprecated]
-    fn is_node_referenced<T>(&mut self, gc_ref: GcRef<T>) -> GcResult<bool> {
+    fn is_node_referenced<T: GcTracable>(&mut self, gc_ref: GcRef<T>) -> GcResult<bool> {
         unsafe {
             let target = gc_ref.head_ptr;
             let partition_id = target.as_ref().get_partition_id();
@@ -377,7 +372,7 @@ impl GcHeap {
                     trace_fn(master, tracer.ctx());
 
                     // Check if target object is included in trace results
-                    tracer.pendings.iter().any(|h| *h == slave)
+                    tracer.traced_nodes.iter().any(|h| *h == slave)
                 };
 
             // Get partition list head, manually traverse to avoid borrow conflicts

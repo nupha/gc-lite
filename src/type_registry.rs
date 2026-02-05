@@ -18,7 +18,7 @@ pub struct GcTypeInfo {
     pub type_name: &'static str,
 }
 
-/// Type registry
+/// Data type info manager
 pub(crate) struct TypeRegistry {
     /// type_info registry list
     entries: Vec<GcTypeInfo>,
@@ -55,13 +55,14 @@ impl TypeRegistry {
     }
 
     #[inline(always)]
-    pub fn gc_type_of<T: GcTracable + 'static>(&self) -> Option<u8> {
+    pub fn gc_dtype_of<T: GcTracable + 'static>(&self) -> Option<u8> {
         self.type_to_idx.get(&std::any::TypeId::of::<T>()).copied()
     }
 
     /// Register new type
-    pub(crate) fn register<T: GcTracable + 'static>(&mut self, drop_order: u8) -> u8 {
-        debug_assert!(matches!(drop_order, 0 | 1 | 2 | 3));
+    pub(crate) fn register<T: GcTracable + 'static>(&mut self, drop_pass: u8) -> u8 {
+        debug_assert!(matches!(drop_pass, 0 | 1 | 2 | 3));
+
         let type_id = std::any::TypeId::of::<T>();
         let type_name = std::any::type_name::<T>();
 
@@ -85,7 +86,7 @@ impl TypeRegistry {
                     None
                 },
                 drop_pass: if std::mem::needs_drop::<T>() {
-                    drop_order
+                    drop_pass
                 } else {
                     0
                 },
@@ -98,23 +99,23 @@ impl TypeRegistry {
             self.entries.push(info);
             self.type_to_idx.insert(type_id, gc_type_id);
 
-            self.update_drop_pass();
+            self.update_drop_passes();
 
             gc_type_id
         }
     }
 
-    fn set_drop_order<T: GcTracable + 'static>(&mut self, order: u8) {
-        debug_assert!(order < 4);
-        if let Some(t) = self.gc_type_of::<T>() {
-            self.entries[t as usize].drop_pass = order;
-            self.update_drop_pass();
+    fn set_drop_pass<T: GcTracable + 'static>(&mut self, pass: u8) {
+        debug_assert!(pass < 4);
+        if let Some(t) = self.gc_dtype_of::<T>() {
+            self.entries[t as usize].drop_pass = pass;
+            self.update_drop_passes();
         } else {
-            self.register::<T>(order);
+            self.register::<T>(pass);
         }
     }
 
-    fn update_drop_pass(&mut self) {
+    fn update_drop_passes(&mut self) {
         self.drop_orders = [-1; 4];
         for o in self.entries.iter().skip(1).map(|t| t.drop_pass) {
             self.drop_orders[o as usize] = o as i8;
@@ -152,25 +153,25 @@ pub(super) unsafe fn dispose_fn<T>(data_ptr: *mut u8) {
 impl GcHeap {
     #[inline(always)]
     pub fn type_id_of<T: GcTracable + 'static>(&self) -> Option<u8> {
-        self.type_registry.gc_type_of::<T>()
+        self.gc_data_types.gc_dtype_of::<T>()
     }
 
     pub fn set_gc_type_drop_order<T: GcTracable + 'static>(&mut self, order: u8) {
-        self.type_registry.set_drop_order::<T>(order);
+        self.gc_data_types.set_drop_pass::<T>(order);
     }
 
     pub fn get_node_gc_type(&self, node: NonNull<GcHead>) -> &GcTypeInfo {
         unsafe {
             &self
-                .type_registry
+                .gc_data_types
                 .entries
-                .get_unchecked(node.as_ref().gc_type_id() as usize)
+                .get_unchecked(node.as_ref().gc_dtype() as usize)
         }
     }
 
     pub(crate) fn gc_type_drop_passes<'a>(&self, pass: &'a mut [u8; 4]) -> &'a [u8] {
         let mut i = 0;
-        for o in self.type_registry.drop_orders.iter().filter(|o| **o >= 0) {
+        for o in self.gc_data_types.drop_orders.iter().filter(|o| **o >= 0) {
             pass[i as usize] = *o as u8;
             i += 1;
         }

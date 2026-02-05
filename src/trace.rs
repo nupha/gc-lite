@@ -25,8 +25,8 @@ pub struct GcTracer<'a> {
     pub(super) heap: NonNull<GcHeap>,
     pub(super) partition_id: GcPartitionId,
 
-    /// pending nodes to be marked later
-    pub(super) pendings: VecDeque<NonNull<GcHead>>,
+    /// collected nodes during tracing
+    pub(super) traced_nodes: VecDeque<NonNull<GcHead>>,
 
     _mark: PhantomData<&'a ()>,
 }
@@ -53,7 +53,7 @@ impl<'a> GcTracer<'a> {
         GcTracer {
             heap,
             partition_id,
-            pendings: VecDeque::new(),
+            traced_nodes: VecDeque::new(),
             _mark: PhantomData,
         }
     }
@@ -125,7 +125,8 @@ impl<'a> GcTracer<'a> {
         }
     }
 
-    fn do_trace(
+    /// Apply callback to `node`, and collect direct sub nodes for one depth
+    pub(crate) fn trace_one(
         &mut self,
         node: NonNull<GcHead>,
         callback: impl Fn(NonNull<GcHead>, &GcHeap) -> bool,
@@ -142,55 +143,36 @@ impl<'a> GcTracer<'a> {
                 }
 
                 if propagate {
-                    // trace into `node`
+                    // collect child nodes of `node`
                     (self.heap().get_node_gc_type(node).trace_fn)(node, self.ctx());
                 }
             }
         }
     }
 
-    fn do_commit(
-        &mut self,
-        callback: impl Fn(NonNull<GcHead>, &GcHeap) -> bool,
-        ignore_trace_flag: bool,
-    ) {
-        while let Some(ptr) = self.pendings.pop_front() {
-            self.do_trace(ptr, &callback, ignore_trace_flag);
-        }
-    }
-
-    pub(crate) fn trace_internal(
-        &mut self,
-        node: NonNull<GcHead>,
-        callback: impl Fn(NonNull<GcHead>, &GcHeap) -> bool,
-        ignore_trace_flag: bool,
-    ) {
-        self.do_trace(node, &callback, ignore_trace_flag);
-
-        if !self.pendings.is_empty() {
-            self.do_commit(callback, ignore_trace_flag);
-        }
-    }
-
+    /// Trace single `node` recursively for all descendant nodes,
+    /// apply `callback` on each of them.
     pub fn trace(
         &mut self,
         node: NonNull<GcHead>,
         callback: impl Fn(NonNull<GcHead>, &GcHeap) -> bool,
     ) {
-        self.trace_internal(node, callback, false);
+        // Note: to avoid cyclic dead loop, must check TRACED flag.
+        self.trace_one(node, &callback, false);
+
+        while let Some(n) = self.traced_nodes.pop_front() {
+            self.trace_one(n, &callback, false); // may insert new traced nodes 
+        }
     }
 
+    /// Trace multiple nodes recursively.
     pub fn trace_iter(
         &mut self,
         iter: impl Iterator<Item = NonNull<GcHead>>,
         callback: impl Fn(NonNull<GcHead>, &GcHeap) -> bool,
     ) {
         for ptr in iter {
-            self.do_trace(ptr, &callback, false);
-        }
-
-        if !self.pendings.is_empty() {
-            self.commit(callback);
+            self.trace(ptr, &callback);
         }
     }
 
@@ -210,13 +192,30 @@ impl<'a> GcTracer<'a> {
 
         (self.heap().get_node_gc_type(root_node).trace_fn)(root_node, self.ctx());
 
-        for sub in std::mem::replace(&mut self.pendings, VecDeque::new()) {
+        for sub in std::mem::replace(&mut self.traced_nodes, VecDeque::new()) {
             unsafe {
                 if sub.as_ref().get_partition_id() == self.partition_id {
                     self.set_xref_recursive(sub, xref);
                 }
             }
         }
+    }
+
+    pub fn trace_roots(&mut self, handle: impl Fn(NonNull<GcHead>, &GcHeap) -> bool) {
+        if let Some(roots) = unsafe { self.heap.as_ref().partition_roots.get(&self.partition_id) } {
+            self.trace_iter(roots.iter().copied(), &handle);
+        }
+    }
+
+    pub fn commit(&mut self, callback: impl Fn(NonNull<GcHead>, &GcHeap) -> bool) {
+        while let Some(n) = self.traced_nodes.pop_front() {
+            self.trace_one(n, &callback, false);
+        }
+    }
+
+    /// clear collected nodes
+    pub fn clear(&mut self) {
+        self.traced_nodes.clear();
     }
 
     pub(crate) fn set_xref_recursive(&mut self, mut node: NonNull<GcHead>, xref: GcPartitionId) {
@@ -250,7 +249,7 @@ impl<'a> GcTracer<'a> {
         if trace_sub {
             (self.heap().get_node_gc_type(node).trace_fn)(node, self.ctx());
 
-            let children = std::mem::replace(&mut self.pendings, VecDeque::new());
+            let children = std::mem::replace(&mut self.traced_nodes, VecDeque::new());
             for sub in children {
                 unsafe {
                     if sub.as_ref().get_partition_id() == self.partition_id
@@ -261,22 +260,6 @@ impl<'a> GcTracer<'a> {
                 }
             }
         }
-    }
-
-    /// commit to trace pending nodes
-    pub fn commit(&mut self, callback: impl Fn(NonNull<GcHead>, &GcHeap) -> bool) {
-        self.do_commit(callback, false);
-    }
-
-    pub fn trace_roots(&mut self, handle: impl Fn(NonNull<GcHead>, &GcHeap) -> bool) {
-        if let Some(roots) = unsafe { self.heap.as_ref().partition_roots.get(&self.partition_id) } {
-            self.trace_iter(roots.iter().copied(), &handle);
-        }
-    }
-
-    /// clear all pending nodes to be traced.
-    pub fn clear(&mut self) {
-        self.pendings.clear();
     }
 }
 
@@ -303,7 +286,7 @@ impl<'a> GcTraceOp<'a> {
     #[inline(always)]
     pub fn add_node(&mut self, node: NonNull<GcHead>) {
         unsafe {
-            self.tr.as_mut().pendings.push_back(node);
+            self.tr.as_mut().traced_nodes.push_back(node);
         }
     }
 
@@ -316,7 +299,7 @@ impl<'a> GcTraceOp<'a> {
 }
 
 impl GcHeap {
-    /// A shortcut to GcTracer::new() with `self` being mut borrowed.
+    /// A shortcut to GcTracer::new()
     #[inline(always)]
     pub fn tracer(&self, partition_id: GcPartitionId) -> GcTracer<'_> {
         GcTracer::new(NonNull::from(self), partition_id)
@@ -384,6 +367,24 @@ unsafe impl<T: GcTracable> GcTracable for Box<T> {
 
 unsafe impl<T: GcTracable> GcTracable for [T] {
     #[inline]
+    fn trace(&self, tr: GcTraceOp) {
+        for n in self {
+            n.trace(tr);
+        }
+    }
+}
+
+unsafe impl<T: GcTracable> GcTracable for Vec<T> {
+    #[inline]
+    fn trace(&self, tr: GcTraceOp) {
+        for n in self {
+            n.trace(tr);
+        }
+    }
+}
+
+unsafe impl<T: GcTracable> GcTracable for Box<[T]> {
+    #[inline(always)]
     fn trace(&self, tr: GcTraceOp) {
         for n in self {
             n.trace(tr);
@@ -546,7 +547,7 @@ mod tests {
         assert_eq!(count_marked_nodes(tracer.heap(), partition_id), 3);
 
         // Verify pendings is empty after processing
-        assert!(tracer.pendings.is_empty());
+        assert!(tracer.traced_nodes.is_empty());
     }
 
     /// Test 3: Deep nested tree with both algorithms

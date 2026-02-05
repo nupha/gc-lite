@@ -366,44 +366,6 @@ impl GcHeap {
         id
     }
 
-    /// Dispose all nodes along chain
-    pub(crate) fn dispose_all_nodes(&mut self, start: NonNull<GcHead>) -> usize {
-        let mut chain = Some(start);
-        let mut freed_bytes = 0;
-
-        for &pass in self.gc_type_drop_passes(&mut [0; 4]) {
-            log::trace!(
-                "[dipose_all] pass {pass}, count={}",
-                NodeIterator::new(chain).count()
-            );
-
-            let mut current = chain;
-            let mut prev: Option<NonNull<GcHead>> = None;
-
-            while let Some(node) = current {
-                unsafe {
-                    current = node.as_ref().next;
-
-                    if self.get_node_gc_type(node).drop_pass == pass {
-                        if let Some(mut p) = prev {
-                            p.as_mut().next = current;
-                        } else {
-                            chain = current;
-                        }
-                        freed_bytes += self.dispose(node);
-                    } else {
-                        prev = Some(node);
-                    }
-                }
-            }
-        }
-
-        debug_assert!(chain.is_none());
-        log::trace!("[dipose_all] done, freed {} bytes", freed_bytes);
-
-        freed_bytes
-    }
-
     /// Note: `since` is not included in result vec
     fn load_descendants(&self, since: GcPartitionId, lst: &mut Vec<GcPartitionId>) {
         for &ch in self.partition(since).unwrap().children() {
@@ -426,6 +388,7 @@ impl GcHeap {
 
         // remove resursivly from leaves to partition
         let mut freed_bytes = 0;
+
         while let Some(pid) = scopes.pop() {
             log::trace!("[close_scope] {pid:?}");
 
@@ -443,18 +406,18 @@ impl GcHeap {
                 });
 
                 for (r, _, _) in it {
-                    // each iter use a new tracer with all node's traced flag cleared
+                    // for each root xref, use a new tracer with all node's traced flag cleared
                     let mut tr = self.tracer(pid);
                     tr.fix_xref_tree(r);
                 }
             }
 
-            if let Some(chain) = self.partition_nodes.remove(&pid) {
+            if let Some(first) = self.partition_nodes.remove(&pid) {
                 //
                 // migrate xref nodes
                 //
-                let mut new_chain = chain;
-                let mut current = chain;
+                let mut head = first;
+                let mut current = first;
                 let mut prev: Option<NonNull<GcHead>> = None;
 
                 while let Some(mut node) = current {
@@ -470,7 +433,7 @@ impl GcHeap {
                                 (*last.as_ptr()).next = current;
                             }
                         } else {
-                            new_chain = current;
+                            head = current;
                         }
 
                         // clear flags and attach to xref chain
@@ -493,8 +456,8 @@ impl GcHeap {
                     }
                 }
 
-                if let Some(unused) = new_chain {
-                    freed_bytes += self.dispose_all_nodes(unused);
+                if let Some(first) = head {
+                    freed_bytes += self.dispose_all_nodes(first);
                 }
 
                 self.mgr.partitions.remove(&pid);
@@ -514,11 +477,11 @@ impl GcHeap {
         log::trace!("[remove_root_partition] {partition_id:?}");
         debug_assert!(self.partition(partition_id).unwrap().is_root());
 
-        let mut children = Vec::with_capacity(64);
-        children.push(partition_id);
-        self.load_descendants(partition_id, &mut children);
+        let mut scopes = Vec::with_capacity(64);
+        scopes.push(partition_id);
+        self.load_descendants(partition_id, &mut scopes);
 
-        for pid in children {
+        for pid in scopes {
             if let Some(chain) = self.partition_nodes.remove(&pid).unwrap() {
                 self.dispose_all_nodes(chain);
             }

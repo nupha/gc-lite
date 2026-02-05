@@ -10,7 +10,7 @@ use std::{
 use crate::{
     GcHeap, GcPartitionId, GcTracable, GcWeak,
     trace::GcTraceOp,
-    type_registry::{TypeRegistry, dispose_fn, trace_fn},
+    type_registry::{dispose_fn, trace_fn},
     weak::GcWeakId,
 };
 
@@ -31,7 +31,7 @@ bitflags::bitflags! {
     }
 }
 
-/// GC node head info
+/// GC node meta info
 #[repr(C)]
 pub struct GcHead {
     /// Attributes of node:
@@ -57,7 +57,7 @@ impl std::fmt::Debug for GcHead {
 
         s.field("ptr", &(self as *const Self))
             .field("scope", &self.get_partition_id().0)
-            .field("type", &self.gc_type_id())
+            .field("type", &self.gc_dtype())
             .field("flags", &self.flags())
             .field("xref", &self.xref_partition().0)
             .field(
@@ -75,9 +75,9 @@ impl std::fmt::Debug for GcHead {
 }
 
 impl GcHead {
-    /// Get node gc type id
+    /// Get node gc data type id
     #[inline(always)]
-    pub fn gc_type_id(&self) -> u8 {
+    pub fn gc_dtype(&self) -> u8 {
         ((self.attrs & 0xFF00) >> 8) as u8
     }
 
@@ -174,12 +174,12 @@ impl GcHead {
 
 /// Garbage collection reference
 #[repr(transparent)]
-pub struct GcRef<T> {
+pub struct GcRef<T: GcTracable> {
     pub(super) head_ptr: NonNull<GcHead>,
     pub(super) _marker: PhantomData<T>,
 }
 
-impl<T> Deref for GcRef<T> {
+impl<T: GcTracable> Deref for GcRef<T> {
     type Target = T;
 
     #[inline(always)]
@@ -188,14 +188,14 @@ impl<T> Deref for GcRef<T> {
     }
 }
 
-impl<T> DerefMut for GcRef<T> {
+impl<T: GcTracable> DerefMut for GcRef<T> {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { self.head_ptr.as_ref().payload().cast::<T>().as_mut() }
     }
 }
 
-impl<T> Clone for GcRef<T> {
+impl<T: GcTracable> Clone for GcRef<T> {
     fn clone(&self) -> Self {
         Self {
             head_ptr: self.head_ptr,
@@ -204,31 +204,31 @@ impl<T> Clone for GcRef<T> {
     }
 }
 
-impl<T> Copy for GcRef<T> {}
+impl<T: GcTracable> Copy for GcRef<T> {}
 
-impl<T> PartialEq for GcRef<T> {
+impl<T: GcTracable> PartialEq for GcRef<T> {
     #[inline(always)]
     fn eq(&self, other: &Self) -> bool {
         self.head_ptr == other.head_ptr
     }
 }
 
-impl<T> Eq for GcRef<T> {}
+impl<T: GcTracable> Eq for GcRef<T> {}
 
-impl<T> From<GcRef<T>> for NonNull<GcHead> {
+impl<T: GcTracable> From<GcRef<T>> for NonNull<GcHead> {
     #[inline(always)]
     fn from(r: GcRef<T>) -> Self {
         r.head_ptr
     }
 }
-impl<T> From<&GcRef<T>> for NonNull<GcHead> {
+impl<T: GcTracable> From<&GcRef<T>> for NonNull<GcHead> {
     #[inline(always)]
     fn from(r: &GcRef<T>) -> Self {
         r.head_ptr
     }
 }
 
-impl<T> std::fmt::Debug for GcRef<T> {
+impl<T: GcTracable> std::fmt::Debug for GcRef<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         #[cfg(debug_assertions)]
         unsafe {
@@ -255,7 +255,7 @@ impl<T> std::fmt::Debug for GcRef<T> {
     }
 }
 
-impl<T> GcRef<T> {
+impl<T: GcTracable> GcRef<T> {
     /// Make an invalid GcRef.
     ///
     /// # Safety
@@ -310,7 +310,7 @@ impl<T> GcRef<T> {
 
         // Check if pointer is valid
         let header = NonNull::new(header_ptr)?;
-        let type_id = unsafe { header.as_ref().gc_type_id() };
+        let type_id = unsafe { header.as_ref().gc_dtype() };
 
         // Verify function pointer matches
         let expected_dispose_fn: Option<unsafe fn(*mut u8)> = if std::mem::needs_drop::<T>() {
@@ -326,7 +326,7 @@ impl<T> GcRef<T> {
         }
 
         // Check if trace/dispose callback matches
-        heap.type_registry
+        heap.gc_data_types
             .with_type_id(type_id, |t| (t.trace_fn, t.drop_fn))
             .and_then(|(trace, dispose)| {
                 if std::ptr::fn_addr_eq(trace, expected_trace_fn)
@@ -403,12 +403,12 @@ impl GcRef<()> {
 }
 
 /// Garbage collection pointer wrapper (lifetime bound to GcContext)
-pub struct Gc<'heap, T> {
+pub struct Gc<'heap, T: GcTracable> {
     inner: GcRef<T>,
     _marker: std::marker::PhantomData<&'heap ()>,
 }
 
-impl<'heap, T> Deref for Gc<'heap, T> {
+impl<'heap, T: GcTracable> Deref for Gc<'heap, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -416,7 +416,7 @@ impl<'heap, T> Deref for Gc<'heap, T> {
     }
 }
 
-impl<'heap, T> DerefMut for Gc<'heap, T> {
+impl<'heap, T: GcTracable> DerefMut for Gc<'heap, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.inner.deref_mut()
     }

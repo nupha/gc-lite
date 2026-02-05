@@ -4,8 +4,8 @@
 use std::ptr::NonNull;
 
 use crate::{
-    GcHeap, allocator::GcAllocator, node::GcHead, partition::GcPartitionId, trace::GcTracer,
-    weak::GcWeakId,
+    GcHeap, allocator::GcAllocator, node::GcHead, node_iterator::NodeIterator,
+    partition::GcPartitionId, trace::GcTracer, weak::GcWeakId,
 };
 
 impl GcHeap {
@@ -160,8 +160,8 @@ impl GcHeap {
         self.collect(partition_id)
     }
 
-    /// Dispose a node
-    pub(super) unsafe fn dispose(&mut self, node: NonNull<GcHead>) -> usize {
+    /// Dispose one node
+    unsafe fn dispose(&mut self, node: NonNull<GcHead>) -> usize {
         let hd = unsafe { node.as_ref() };
         debug_assert!(hd.test_valid(), "[O.o] dispose valid node only");
         log::trace!("[dispose] {hd:?}");
@@ -190,113 +190,43 @@ impl GcHeap {
         gross_size
     }
 
-    // /// Analyze object dependencies and release in topological order
-    // fn release_with_dependency_analysis(
-    //     &mut self,
-    //     free_list: Vec<NonNull<GcHead>>,
-    //     _partition_id: GcPartitionId,
-    // ) -> usize {
-    //     // Initialize dependency graph and in-degree table
-    //     let mut graph: HashMap<NonNull<GcHead>, HashSet<NonNull<GcHead>>> = free_list
-    //         .iter()
-    //         .map(|&header| (header, HashSet::new()))
-    //         .collect();
-    //     let mut in_degree: HashMap<NonNull<GcHead>, usize> =
-    //         free_list.iter().map(|&header| (header, 0)).collect();
-    //
-    //     // Analyze object reference relationships
-    //     let mut tracer = GcTracer::new();
-    //     free_list.iter().for_each(|&source| unsafe {
-    //         // Call source object's trace function to trace all objects it references
-    //         let payload_ptr = (source.as_ptr() as *mut u8).add(std::mem::size_of::<GcHead>());
-    //         let trace_fn = (*source.as_ptr()).get_trace_fn(&self.type_registry);
-    //         tracer.clear();
-    //         trace_fn(payload_ptr, &mut tracer);
-    //
-    //         // Process trace results
-    //         while let Some(target) = tracer.next_header() {
-    //             if free_list.contains(&target) {
-    //                 graph
-    //                     .entry(source)
-    //                     .or_insert_with(HashSet::new)
-    //                     .insert(target);
-    //             }
-    //         }
-    //     });
-    //
-    //     // Calculate in-degrees
-    //     graph.values().flat_map(|deps| deps.iter()).for_each(|&p| {
-    //         *in_degree.entry(p).or_insert(0) += 1;
-    //     });
-    //
-    //     // Topological sort: using Kahn's algorithm
-    //     let mut queue: VecDeque<NonNull<GcHead>> = in_degree
-    //         .iter()
-    //         .filter_map(|(&node, &degree)| if degree == 0 { Some(node) } else { None })
-    //         .collect();
-    //
-    //     let mut release_order: Vec<NonNull<GcHead>> = Vec::new();
-    //
-    //     // Execute topological sort
-    //     while let Some(node) = queue.pop_front() {
-    //         release_order.push(node);
-    //
-    //         if let Some(dependencies) = graph.get(&node) {
-    //             dependencies.iter().for_each(|&neighbor| {
-    //                 if let Some(degree) = in_degree.get_mut(&neighbor) {
-    //                     *degree -= 1;
-    //                     if *degree == 0 {
-    //                         queue.push_back(neighbor);
-    //                     }
-    //                 }
-    //             });
-    //         }
-    //     }
-    //
-    //     // Handle circular references: remaining nodes released in arbitrary order
-    //     let remainings: Vec<NonNull<GcHead>> = in_degree
-    //         .iter()
-    //         .filter_map(|(&node, &degree)| {
-    //             if degree > 0 && !release_order.contains(&node) {
-    //                 Some(node)
-    //             } else {
-    //                 None
-    //             }
-    //         })
-    //         .collect();
-    //     release_order.extend(remainings);
-    //
-    //     // Release objects in topological order
-    //     release_order
-    //         .into_iter()
-    //         .map(|p| unsafe {
-    //             // Handle weak references - add boundary checks to prevent out-of-bounds crash
-    //             if let Some(weak_ref_index) = (*p.as_ptr()).get_weak_ref_index() {
-    //                 // Boundary check: ensure index is within valid range
-    //                 if weak_ref_index < self.weakrefs_list.len() {
-    //                     self.weakrefs_list[weak_ref_index].1.take();
-    //                 }
-    //                 // Reset weak reference index to prevent dangling references
-    //                 (*p.as_ptr()).set_weak_ref_index(None);
-    //             }
-    //
-    //             let type_id = (*p.as_ptr()).get_type_idx();
-    //             let size = self.type_registry.with_idx(type_id, |t| t.size).unwrap();
-    //             let gross_size = std::mem::size_of::<GcHead>() + size;
-    //
-    //             // Call dispose function - wrapped in unsafe block
-    //             let dispose_fn = (*p.as_ptr()).get_dispose_fn(&self.type_registry);
-    //             let payload_ptr = (p.as_ptr() as *mut u8).add(std::mem::size_of::<GcHead>());
-    //             dispose_fn(payload_ptr);
-    //
-    //             // Deallocate memory
-    //             let ptr = p.as_ptr() as *mut u8;
-    //             crate::allocator::Allocator::deallocate(NonNull::new_unchecked(ptr), gross_size);
-    //
-    //             gross_size
-    //         })
-    //         .sum()
-    // }
+    /// Dispose all nodes along chain
+    pub(crate) fn dispose_all_nodes(&mut self, start: NonNull<GcHead>) -> usize {
+        let mut chain = Some(start);
+        let mut freed_bytes = 0;
+
+        for &pass in self.gc_type_drop_passes(&mut [0; 4]) {
+            log::trace!(
+                "[dipose_all] pass {pass}, count={}",
+                NodeIterator::new(chain).count()
+            );
+
+            let mut current = chain;
+            let mut prev: Option<NonNull<GcHead>> = None;
+
+            while let Some(node) = current {
+                unsafe {
+                    current = node.as_ref().next;
+
+                    if self.get_node_gc_type(node).drop_pass == pass {
+                        if let Some(mut p) = prev {
+                            p.as_mut().next = current;
+                        } else {
+                            chain = current;
+                        }
+                        freed_bytes += self.dispose(node);
+                    } else {
+                        prev = Some(node);
+                    }
+                }
+            }
+        }
+
+        debug_assert!(chain.is_none());
+        log::trace!("[dipose_all] done, freed {} bytes", freed_bytes);
+
+        freed_bytes
+    }
 }
 
 #[cfg(test)]
