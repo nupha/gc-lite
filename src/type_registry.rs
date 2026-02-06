@@ -54,8 +54,14 @@ impl TypeRegistry {
         }
     }
 
+    pub(crate) fn gc_dtype_info<T: GcTracable + 'static>(&self) -> Option<&GcTypeInfo> {
+        self.type_to_idx
+            .get(&std::any::TypeId::of::<T>())
+            .and_then(|&i| self.entries.get(i as usize))
+    }
+
     #[inline(always)]
-    pub fn gc_dtype_of<T: GcTracable + 'static>(&self) -> Option<u8> {
+    pub fn gc_dtype_id<T: GcTracable + 'static>(&self) -> Option<u8> {
         self.type_to_idx.get(&std::any::TypeId::of::<T>()).copied()
     }
 
@@ -107,7 +113,7 @@ impl TypeRegistry {
 
     fn set_drop_pass<T: GcTracable + 'static>(&mut self, pass: u8) {
         debug_assert!(pass < 4);
-        if let Some(t) = self.gc_dtype_of::<T>() {
+        if let Some(t) = self.gc_dtype_id::<T>() {
             self.entries[t as usize].drop_pass = pass;
             self.update_drop_passes();
         } else {
@@ -153,7 +159,7 @@ pub(super) unsafe fn dispose_fn<T>(data_ptr: *mut u8) {
 impl GcHeap {
     #[inline(always)]
     pub fn type_id_of<T: GcTracable + 'static>(&self) -> Option<u8> {
-        self.gc_data_types.gc_dtype_of::<T>()
+        self.gc_data_types.gc_dtype_id::<T>()
     }
 
     pub fn set_gc_type_drop_order<T: GcTracable + 'static>(&mut self, order: u8) {

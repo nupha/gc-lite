@@ -72,7 +72,7 @@ fn demonstrate_weak_references(
     // Try upgrading after releasing strong reference
     println!("\n3. Upgrade weak reference after releasing strong reference...");
     heap.set_root(strong_ref, false);
-    heap.collect_garbage(partition);
+    heap.collect(partition);
 
     match weak_ref.upgrade(heap) {
         Some(_) => {
@@ -114,7 +114,7 @@ fn demonstrate_cyclic_references(
 
     // Trigger garbage collection
     println!("\n2. Trigger garbage collection (circular references still exist)...");
-    let freed = heap.collect_garbage(partition);
+    let freed = heap.collect(partition);
     println!("  回收了 {} 字节内存", freed);
 
     // Verify circular references still exist
@@ -127,7 +127,7 @@ fn demonstrate_cyclic_references(
     heap.set_root(node1, false);
     heap.set_root(node2, false);
 
-    let freed = heap.collect_garbage(partition);
+    let freed = heap.collect(partition);
     println!(
         "  Freed {} bytes of memory (circular references correctly collected)",
         freed
@@ -185,7 +185,7 @@ fn demonstrate_complex_structures(
 
     // Trigger garbage collection
     println!("\n2. Trigger garbage collection...");
-    let freed = heap.collect_garbage(partition);
+    let freed = heap.collect(partition);
     println!("  回收了 {} 字节内存", freed);
 
     // Verify data structure integrity
@@ -304,9 +304,9 @@ fn demonstrate_cross_context_detection() -> GcResult<()> {
 
     // Clean up
     context1.set_root(obj1, false);
-    context1.collect_garbage(partition1);
+    context1.collect(partition1);
     context2.set_root(obj2, false);
-    context2.collect_garbage(partition2);
+    context2.collect(partition2);
 
     Ok(())
 }

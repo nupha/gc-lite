@@ -4,8 +4,7 @@
 use std::ptr::NonNull;
 
 use crate::{
-    GcHeap, allocator::GcAllocator, node::GcHead, node_iterator::NodeIterator,
-    partition::GcPartitionId, trace::GcTracer, weak::GcWeakId,
+    GcHeap, node::GcHead, node_iterator::NodeIterator, partition::GcPartitionId, trace::GcTracer,
 };
 
 impl GcHeap {
@@ -21,37 +20,40 @@ impl GcHeap {
         notify: Option<impl Fn(&GcHead)>,
     ) -> usize {
         if let Some(first) = self.partition_nodes.get(&partition_id).copied() {
-            let mut head = first;
+            let mut link_head = first;
             let mut freed_bytes = 0;
 
             for &pass in self.gc_type_drop_passes(&mut [0; 4]) {
-                let mut current = head;
+                let mut current = link_head;
                 let mut prev: Option<NonNull<GcHead>> = None;
 
                 while let Some(mut p) = current {
                     unsafe {
+                        debug_assert!(p.as_ref().test_valid());
+
                         current = p.as_ref().next;
 
                         if self.get_node_gc_type(p).drop_pass == pass && predicate(p.as_mut()) {
                             if let Some(last) = prev {
                                 (*last.as_ptr()).next = current;
                             } else {
-                                head = current;
+                                link_head = current;
                             }
 
-                            // If root node: remove from root list
-                            if p.as_ref().is_root()
-                                && let Some(lst) = self.partition_roots.get_mut(&partition_id)
-                            {
-                                if let Some(i) = lst.iter().position(|x| *x == p) {
-                                    lst.swap_remove(i);
-                                }
-                            }
-
+                            let is_root = p.as_ref().is_root();
                             if let Some(cb) = &notify {
                                 cb(p.as_ref());
                             }
                             freed_bytes += self.dispose(p);
+
+                            // If root node: remove from root list
+                            if is_root
+                                && let Some(lst) = self.partition_roots.get_mut(&partition_id)
+                            {
+                                if let Some(i) = lst.iter().position(|&x| x == p) {
+                                    lst.swap_remove(i);
+                                }
+                            }
                         } else {
                             prev = Some(p);
                         }
@@ -59,44 +61,12 @@ impl GcHeap {
                 }
             }
 
-            // let mut current = head;
-            // let mut prev: Option<NonNull<GcHead>> = None;
-            // while let Some(mut p) = current {
-            //     unsafe {
-            //         current = p.as_ref().next;
-
-            //         if predicate(p.as_mut()) {
-            //             if let Some(last) = prev {
-            //                 (*last.as_ptr()).next = current;
-            //             } else {
-            //                 head = current; //chain head changed
-            //             }
-
-            //             // If root node: remove from root list
-            //             if p.as_ref().is_root()
-            //                 && let Some(lst) = self.partition_roots.get_mut(&partition_id)
-            //             {
-            //                 if let Some(i) = lst.iter().position(|x| *x == p) {
-            //                     lst.swap_remove(i);
-            //                 }
-            //             }
-
-            //             if let Some(cb) = &notify {
-            //                 cb(p.as_ref());
-            //             }
-            //             freed_bytes += self.dispose(p);
-            //         } else {
-            //             prev = Some(p);
-            //         }
-            //     }
-            // }
-
-            if first != head {
-                // update nodes head
-                *self.partition_nodes.get_mut(&partition_id).unwrap() = head;
+            if first != link_head {
+                // update nodes link
+                *self.partition_nodes.get_mut(&partition_id).unwrap() = link_head;
             }
 
-            // Update partition memory usage with rollup to parent partitions
+            // Decrease partitions memory usage
             self.mgr.update_mem_use(partition_id, -(freed_bytes as i32));
 
             freed_bytes
@@ -131,63 +101,33 @@ impl GcHeap {
         partition_id: GcPartitionId,
         notify: Option<impl Fn(&GcHead)>,
     ) -> usize {
-        if self.partition(partition_id).is_some() {
-            self.tracer(partition_id).trace_roots(GcTracer::MARK_FUNC);
-            self.sweep_internal(partition_id, Self::SWEEP_UNMARKED_FUNC, notify)
-        } else {
-            0
-        }
+        debug_assert!(self.partition(partition_id).is_some());
+        self.tracer(partition_id).trace_roots(GcTracer::MARK_FUNC);
+        self.sweep_internal(partition_id, Self::SWEEP_UNMARKED_FUNC, notify)
     }
 
     /// Collect garbage on given partition, call notify with node *BEFORE* it is disposed.
-    #[inline(always)]
+    #[inline]
     pub fn collect_notify(
         &mut self,
         partition_id: GcPartitionId,
         notify: impl Fn(&GcHead),
     ) -> usize {
-        self.collect_internal(partition_id, Some(notify))
+        if self.partition(partition_id).is_some() {
+            self.collect_internal(partition_id, Some(notify))
+        } else {
+            0
+        }
     }
 
     /// Collect garbage on given partition
-    #[inline(always)]
+    #[inline]
     pub fn collect(&mut self, partition_id: GcPartitionId) -> usize {
-        self.collect_internal(partition_id, Self::NULL_NOTIFY_FN)
-    }
-
-    #[deprecated(note = "use ::collect() instead")]
-    pub fn collect_garbage(&mut self, partition_id: GcPartitionId) -> usize {
-        self.collect(partition_id)
-    }
-
-    /// Dispose one node
-    unsafe fn dispose(&mut self, node: NonNull<GcHead>) -> usize {
-        let hd = unsafe { node.as_ref() };
-        debug_assert!(hd.test_valid(), "[O.o] dispose valid node only");
-        log::trace!("[dispose] {hd:?}");
-
-        if !hd.weak_id.is_null() {
-            // clear weak slot
-            let widx = hd.weak_id.index();
-            debug_assert!((widx as usize) < self.weak_slots.len());
-            unsafe {
-                self.weak_slots.get_unchecked_mut(widx as usize).1.take();
-                (*node.as_ptr()).weak_id = GcWeakId::NULL;
-            }
+        if self.partition(partition_id).is_some() {
+            self.collect_internal(partition_id, Self::NULL_NOTIFY_FN)
+        } else {
+            0
         }
-
-        let ty = self.get_node_gc_type(node);
-        let gross_size = std::mem::size_of::<GcHead>() + ty.size as usize;
-
-        if let Some(f) = ty.drop_fn {
-            unsafe {
-                f(node.as_ref().payload().as_ptr());
-            }
-        }
-
-        GcAllocator::deallocate(node.cast::<u8>(), gross_size);
-
-        gross_size
     }
 
     /// Dispose all nodes along chain
@@ -206,6 +146,8 @@ impl GcHeap {
 
             while let Some(node) = current {
                 unsafe {
+                    debug_assert!(node.as_ref().test_valid());
+
                     current = node.as_ref().next;
 
                     if self.get_node_gc_type(node).drop_pass == pass {

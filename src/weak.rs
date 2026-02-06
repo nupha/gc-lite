@@ -9,21 +9,21 @@ use crate::{GcRef, GcTracable, heap::GcHeap};
 /// bit 0-15:  version
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct GcWeakId(u32);
+pub struct GcWeakRawId(u32);
 
-impl GcWeakId {
+impl GcWeakRawId {
     pub(crate) const NULL: Self = Self(0);
 
-    pub fn index(&self) -> u16 {
+    pub const fn index(&self) -> u16 {
         (self.0 >> 16) as u16
     }
 
-    pub fn version(&self) -> u16 {
+    pub const fn version(&self) -> u16 {
         self.0 as u16
     }
 
-    pub fn is_null(&self) -> bool {
-        self.0 == 0
+    pub const fn is_null(&self) -> bool {
+        self.version() == 0
     }
 }
 
@@ -33,7 +33,7 @@ impl GcWeakId {
 pub struct GcWeak<T: GcTracable> {
     /// bit 16-31: slot index in weak_list
     /// bit 0-15:  version
-    pub(crate) weak_id: GcWeakId,
+    pub(crate) weak_id: GcWeakRawId,
 
     pub(crate) _marker: PhantomData<T>,
 }
@@ -51,7 +51,10 @@ impl<T: GcTracable> Copy for GcWeak<T> {}
 
 impl<T: GcTracable> Default for GcWeak<T> {
     fn default() -> Self {
-        Self::new(0, 0)
+        Self {
+            weak_id: GcWeakRawId::NULL,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -63,13 +66,14 @@ impl<T: GcTracable> std::fmt::Debug for GcWeak<T> {
 
 impl<T: GcTracable> GcWeak<T> {
     pub(crate) fn new(index: u16, version: u16) -> Self {
+        debug_assert!(version > 0);
         Self {
-            weak_id: GcWeakId(((index as u32) << 16) | (version as u32)),
+            weak_id: GcWeakRawId(((index as u32) << 16) | (version as u32)),
             _marker: PhantomData,
         }
     }
 
-    pub(crate) fn from_id(weak_id: GcWeakId) -> Self {
+    pub(crate) fn from_id(weak_id: GcWeakRawId) -> Self {
         Self {
             weak_id,
             _marker: PhantomData,
@@ -118,13 +122,12 @@ impl GcHeap {
                 panic!("too may weakrefs");
             }
 
-            // Find a free slot
+            // Get free slot
             let i = self
                 .weak_slots
                 .iter()
                 .position(|(_, slot)| slot.is_none())
                 .unwrap_or_else(|| {
-                    // No free slots, extend list
                     let n = self.weak_slots.len();
                     self.weak_slots.push((0, None));
                     n
@@ -138,10 +141,9 @@ impl GcHeap {
                 } else {
                     curr_ver + 1
                 };
-                debug_assert!(version != 0);
 
-                *self.weak_slots.get_unchecked_mut(i) = (version, Some(gc_ref.head_ptr));
                 let weak = GcWeak::new(i as _, version);
+                *self.weak_slots.get_unchecked_mut(i) = (version, Some(gc_ref.head_ptr));
                 node.weak_id = weak.weak_id;
 
                 weak
@@ -161,11 +163,9 @@ impl GcHeap {
                         None
                     }
                 })
-                .and_then(|ptr| {
-                    Some(GcRef {
-                        head_ptr: ptr,
-                        _marker: PhantomData,
-                    })
+                .map(|ptr| GcRef {
+                    head_ptr: ptr,
+                    _marker: PhantomData,
                 })
         } else {
             None

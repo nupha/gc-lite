@@ -1,17 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{collections::HashMap, marker::PhantomData, ptr::NonNull};
+use std::{collections::HashMap, ptr::NonNull};
 
 use crate::{
     GcError, GcResult, GcTracer,
-    allocator::GcAllocator,
-    node::{GcHead, GcHeadFlag, GcRef},
+    node::{GcHead, GcRef},
     partition::{GcPartitionId, GcPartitionMgr},
     trace::GcTracable,
     type_registry::TypeRegistry,
-    unlikely,
-    weak::GcWeakId,
 };
 
 pub struct GcHeap {
@@ -35,11 +32,11 @@ impl Drop for GcHeap {
         // heap world is gone, dealloc all nodes live in it, regardless their status.
         log::trace!("[heap::drop]");
 
-        let pids = self.partition_nodes.keys().copied().collect::<Vec<_>>();
+        let mut kv = std::mem::take(&mut self.partition_nodes);
 
-        for pid in pids {
-            if let Some(start) = self.partition_nodes.remove(&pid).unwrap() {
-                self.dispose_all_nodes(start);
+        for (_, link) in kv.drain() {
+            if let Some(link) = link {
+                self.dispose_all_nodes(link);
             }
         }
     }
@@ -102,105 +99,27 @@ impl GcHeap {
         }
     }
 
-    /// Allocate a node in given partition
-    pub fn alloc<T: GcTracable>(
-        &mut self,
-        partition_id: GcPartitionId,
-        payload: T,
-    ) -> Result<GcRef<T>, (GcError, T)> {
-        match self.partition_mut(partition_id) {
-            Some(par) => {
-                let size = std::mem::size_of::<T>();
-                let gross_size = std::mem::size_of::<GcHead>() + size;
-
-                if unlikely(par.memory_limit > 0 && par.memory_used + gross_size > par.memory_limit)
-                {
-                    return Err((GcError::PartitionFull, payload));
-                } else {
-                    let gc_dtype = self.gc_data_types.register::<T>(0);
-                    let ptr = match GcAllocator::allocate(gross_size) {
-                        Some(p) => p,
-                        None => {
-                            return Err((GcError::AllocationFailed, payload));
-                        }
-                    };
-
-                    // O.o SLOW DEBUG
-                    #[cfg(debug_assertions)]
-                    {
-                        for pid in self.partition_ids() {
-                            if self.nodes_iter(pid).any(|n| n == ptr.cast()) {
-                                panic!(
-                                    "[O.o] !!! node {ptr:?} is referenced in {pid:?}, but was actually disposed"
-                                );
-                            }
-                        }
-                    }
-
-                    unsafe {
-                        let header_ptr = ptr.as_ptr().cast::<GcHead>();
-                        (*header_ptr) = GcHead {
-                            attrs: {
-                                #[cfg(debug_assertions)]
-                                {
-                                    0xFF00_0000
-                                        | ((gc_dtype as u32) << 8)
-                                        | (GcHeadFlag::MAGIC_NUM.bits() as u32)
-                                }
-                                #[cfg(not(debug_assertions))]
-                                {
-                                    0xFF00_0000 | ((gc_dtype as u32) << 8)
-                                }
-                            },
-                            partition: 0,
-                            weak_id: GcWeakId::NULL,
-                            next: None,
-
-                            #[cfg(debug_assertions)]
-                            alloc_in: partition_id,
-                        };
-
-                        // Initialize data
-                        let data_ptr = ptr.as_ptr().add(std::mem::size_of::<GcHead>()).cast::<T>();
-                        std::ptr::write(data_ptr, payload);
-
-                        debug_assert!((*header_ptr).gc_dtype() != 0);
-
-                        // Add to partition list
-                        let header = NonNull::new_unchecked(header_ptr);
-                        self.attach(partition_id, header);
-
-                        // Update memory usage with rollup to parent partitions
-                        self.mgr.update_mem_use(partition_id, gross_size as i32);
-
-                        log::trace!("[alloc] {:?}", header.as_ref());
-
-                        Ok(GcRef {
-                            head_ptr: header,
-                            _marker: PhantomData,
-                        })
-                    }
-                }
-            }
-            None => {
-                return Err((GcError::PartitionNotFound, payload));
-            }
-        }
-    }
-
-    /// Attach a node to given partition.
-    /// Note: this method only attach node to chain, but *NOT* increase partition's mem_use.
+    /// Attach a node to partition's nodes link.
+    ///
+    /// # Note
+    ///
+    /// This method **DO NOT** increase partitions' mem_use.
     #[inline]
     pub(crate) fn attach(&mut self, partition_id: GcPartitionId, node: NonNull<GcHead>) {
-        debug_assert_ne!(partition_id, GcPartitionId::NONE);
+        debug_assert!(!partition_id.is_null());
+        debug_assert!(self.partition_nodes.contains_key(&partition_id));
 
         unsafe {
-            debug_assert_eq!(node.as_ref().get_partition_id(), GcPartitionId::NONE);
+            debug_assert!(node.as_ref().get_partition_id().is_null());
             (*node.as_ptr()).set_partition_id(partition_id);
 
-            let chain = self.partition_nodes.entry(partition_id).or_insert(None);
-            (*node.as_ptr()).next = *chain;
-            *chain = Some(node);
+            let link_head = self
+                .partition_nodes
+                .get_mut(&partition_id)
+                .unwrap_unchecked();
+
+            (*node.as_ptr()).next = *link_head;
+            link_head.replace(node);
         }
     }
 
@@ -208,7 +127,7 @@ impl GcHeap {
     pub(crate) fn detach(&mut self, node: NonNull<GcHead>) {
         let partition_id = unsafe { node.as_ref().get_partition_id() };
 
-        if partition_id != GcPartitionId::NONE {
+        if !partition_id.is_null() {
             let chain = self.partition_nodes.get_mut(&partition_id).unwrap();
 
             let mut current = *chain;

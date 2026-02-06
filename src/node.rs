@@ -7,12 +7,7 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::{
-    GcHeap, GcPartitionId, GcTracable, GcWeak,
-    trace::GcTraceOp,
-    type_registry::{dispose_fn, trace_fn},
-    weak::GcWeakId,
-};
+use crate::{GcHeap, GcPartitionId, GcTracable, GcTracer, GcWeak, weak::GcWeakRawId};
 
 bitflags::bitflags! {
     #[repr(transparent)]
@@ -27,28 +22,32 @@ bitflags::bitflags! {
         const TRACED = 1 << 2;
 
         #[cfg(debug_assertions)]
+        const CHECK_REF = 1 << 6;
+        #[cfg(debug_assertions)]
         const MAGIC_NUM = 1 << 7;
     }
 }
 
-/// GC node meta info
-#[repr(C)]
+/// GC node info
+// #[repr(C)]
 pub struct GcHead {
     /// Attributes of node:
-    /// * bit 8-15:  type id
+    /// * bit 8-15:  gc datatype id
     /// * bit 0-7:   flags
     pub(super) attrs: u32,
 
     /// XRef partition id (16bit) + Partition id (16bit)
     pub(super) partition: u32,
 
-    pub(super) weak_id: GcWeakId,
-
-    #[cfg(debug_assertions)]
-    pub(crate) alloc_in: GcPartitionId,
+    pub(super) weak_id: GcWeakRawId,
 
     /// Pointer to next object (for list traversal)
     pub(super) next: Option<NonNull<GcHead>>,
+
+    #[cfg(debug_assertions)]
+    pub(crate) alloc_in: GcPartitionId,
+    #[cfg(debug_assertions)]
+    pub(crate) type_name: &'static str,
 }
 
 impl std::fmt::Debug for GcHead {
@@ -57,18 +56,20 @@ impl std::fmt::Debug for GcHead {
 
         s.field("ptr", &(self as *const Self))
             .field("scope", &self.get_partition_id().0)
-            .field("type", &self.gc_dtype())
-            .field("flags", &self.flags())
-            .field("xref", &self.xref_partition().0)
-            .field(
-                "weak",
-                &self
-                    .weak()
-                    .map(|w| format!("{}#{}", w.index(), w.version())),
-            );
+            //.field("dtype", &self.gc_dtype())
+            //.field("flags", &self.flags())
+            //.field("xref", &self.xref_partition().0)
+           ;
+
+        if let Some(w) = self.weak() {
+            s.field("weak", &format!("{}#{}", w.index(), w.version()));
+        }
 
         #[cfg(debug_assertions)]
-        s.field("alloc", &self.alloc_in);
+        {
+            s.field("type_name", &self.type_name)
+                .field("alloc", &self.alloc_in);
+        }
 
         s.finish()
     }
@@ -81,9 +82,13 @@ impl GcHead {
         ((self.attrs & 0xFF00) >> 8) as u8
     }
 
+    /// test if node is valid
     #[cfg(debug_assertions)]
     pub fn test_valid(&self) -> bool {
-        self.flags().contains(GcHeadFlag::MAGIC_NUM)
+        !self.alloc_in.is_null()
+            && self.gc_dtype() != 0
+            && self.flags().contains(GcHeadFlag::MAGIC_NUM)
+            && self.next.is_none_or(|n| n.is_aligned())
     }
 
     #[inline(always)]
@@ -136,6 +141,21 @@ impl GcHead {
         self.set_flags(f);
     }
 
+    #[cfg(debug_assertions)]
+    pub fn has_check_ref(&self) -> bool {
+        self.flags().contains(GcHeadFlag::CHECK_REF)
+    }
+    #[cfg(debug_assertions)]
+    pub fn set_check_ref(&mut self, b: bool) {
+        let mut f = self.flags();
+        if b {
+            f.insert(GcHeadFlag::CHECK_REF);
+        } else {
+            f.remove(GcHeadFlag::CHECK_REF);
+        }
+        self.set_flags(f);
+    }
+
     /// Get partition ID
     #[inline(always)]
     pub fn get_partition_id(&self) -> GcPartitionId {
@@ -150,7 +170,7 @@ impl GcHead {
     }
 
     /// get node weakref info
-    pub fn weak(&self) -> Option<GcWeakId> {
+    pub fn weak(&self) -> Option<GcWeakRawId> {
         if self.weak_id.is_null() {
             None
         } else {
@@ -163,12 +183,17 @@ impl GcHead {
     pub fn payload(&self) -> NonNull<u8> {
         #[cfg(debug_assertions)]
         debug_assert!(self.test_valid(), "invalid gc node {self:?}");
+        unsafe { NonNull::from_ref(self).add(1).cast::<u8>() }
+    }
 
-        unsafe {
-            NonNull::from_ref(self)
-                .cast::<u8>()
-                .add(std::mem::size_of::<GcHead>())
-        }
+    /// Get direct children (one-depth) of `self`
+    pub fn children(&self, heap: &GcHeap, restrict: GcPartitionId) -> Vec<NonNull<GcHead>> {
+        let mut tr = GcTracer::new(heap, restrict, false);
+        let node = NonNull::from_ref(self);
+        (heap.get_node_gc_type(node).trace_fn)(node, tr.ctx());
+        let mut lst = tr.take_traced_nodes();
+        lst.retain(|&x| x != node); // remove self reference
+        lst.into()
     }
 }
 
@@ -256,14 +281,61 @@ impl<T: GcTracable> std::fmt::Debug for GcRef<T> {
 }
 
 impl<T: GcTracable> GcRef<T> {
-    /// Make an invalid GcRef.
+    /// Create GcRef<T> from &T reference
+    ///
+    /// This method verifies that the passed reference comes from a valid GC object.
+    /// It ensures safety by checking if the corresponding GcHead is in the GC context.
+    ///
+    /// # Parameters
+    /// - `data_ref`: Reference to convert, must come from valid GcRef object
+    ///
+    /// # Return Value
+    /// - `Some(GcRef<T>)`: If reference comes from valid GC object
+    /// - `None`: If reference is not from GC object or object is invalid
     ///
     /// # Safety
+    /// Caller must ensure the passed reference indeed comes from a valid GcRef object.
+    pub fn try_from_ref(heap: &GcHeap, data_ref: &T) -> Option<Self> {
+        let node = unsafe {
+            NonNull::from_ref(data_ref)
+                .cast::<u8>()
+                .sub(std::mem::size_of::<GcHead>())
+                .cast::<GcHead>()
+        };
+
+        if let Some(dtype_id) = heap.type_id_of::<T>()
+            && dtype_id == unsafe { node.as_ref().gc_dtype() }
+        {
+            #[cfg(debug_assertions)]
+            debug_assert!(unsafe { node.as_ref().test_valid() });
+
+            Some(Self {
+                head_ptr: node,
+                _marker: PhantomData,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Unsafe conversion from &T to GcRef<T>, main focus on speed.
     ///
-    /// Don't access this pointer.
-    pub fn dangling() -> Self {
+    /// Safety
+    /// You must ensure &T comes from GcRef<T>, otherwise consequences are unpredictable.
+    #[inline]
+    pub unsafe fn from_ref_unchecked(data_ref: &T) -> Self {
+        let node = unsafe {
+            NonNull::from_ref(data_ref)
+                .cast::<u8>()
+                .sub(std::mem::size_of::<GcHead>())
+                .cast::<GcHead>()
+        };
+
+        #[cfg(debug_assertions)]
+        debug_assert!(unsafe { node.as_ref().test_valid() });
+
         Self {
-            head_ptr: NonNull::dangling(),
+            head_ptr: node,
             _marker: PhantomData,
         }
     }
@@ -284,86 +356,6 @@ impl<T: GcTracable> GcRef<T> {
         unsafe { self.head_ptr.as_ref().is_root() }
     }
 
-    /// Create GcRef<T> from &T reference
-    ///
-    /// This method verifies that the passed reference comes from a valid GC object.
-    /// It ensures safety by checking if the corresponding GcHead is in the GC context.
-    ///
-    /// # Parameters
-    /// - `data_ref`: Reference to convert, must come from valid GcRef object
-    ///
-    /// # Return Value
-    /// - `Some(GcRef<T>)`: If reference comes from valid GC object
-    /// - `None`: If reference is not from GC object or object is invalid
-    ///
-    /// # Safety
-    /// Caller must ensure the passed reference indeed comes from a valid GcRef object.
-    pub fn try_from_ref(heap: &GcHeap, data_ref: &T) -> Option<Self>
-    where
-        T: GcTracable,
-    {
-        // 获取数据指针
-        let data_ptr = data_ref as *const T as *mut u8;
-
-        // Subtract forward to get header pointer
-        let header_ptr = unsafe { data_ptr.sub(std::mem::size_of::<GcHead>()).cast::<GcHead>() };
-
-        // Check if pointer is valid
-        let header = NonNull::new(header_ptr)?;
-        let type_id = unsafe { header.as_ref().gc_dtype() };
-
-        // Verify function pointer matches
-        let expected_dispose_fn: Option<unsafe fn(*mut u8)> = if std::mem::needs_drop::<T>() {
-            Some(dispose_fn::<T>)
-        } else {
-            None
-        };
-        let expected_trace_fn: unsafe fn(NonNull<GcHead>, GcTraceOp) = trace_fn::<T>;
-
-        // If type index is 0, not a valid GC object
-        if type_id == 0 {
-            return None;
-        }
-
-        // Check if trace/dispose callback matches
-        heap.gc_data_types
-            .with_type_id(type_id, |t| (t.trace_fn, t.drop_fn))
-            .and_then(|(trace, dispose)| {
-                if std::ptr::fn_addr_eq(trace, expected_trace_fn)
-                    && match (dispose, expected_dispose_fn) {
-                        (Some(a), Some(b)) => std::ptr::fn_addr_eq(a, b),
-                        (None, None) => true,
-                        _ => false,
-                    }
-                {
-                    Some(Self {
-                        head_ptr: header,
-                        _marker: PhantomData,
-                    })
-                } else {
-                    None
-                }
-            })
-    }
-
-    /// Unsafe conversion from &T to GcRef<T>, main focus on speed.
-    ///
-    /// Safety
-    /// You must ensure &T comes from GcRef<T>, otherwise consequences are unpredictable.
-    #[inline(always)]
-    pub unsafe fn from_ref_unchecked(data_ref: &T) -> Self
-    where
-        T: GcTracable,
-    {
-        let data_ptr = data_ref as *const T as *mut u8;
-        Self {
-            head_ptr: unsafe {
-                NonNull::new_unchecked(data_ptr.sub(std::mem::size_of::<GcHead>()).cast::<GcHead>())
-            },
-            _marker: PhantomData,
-        }
-    }
-
     /// get node raw pointer
     #[inline(always)]
     pub fn node_ptr(&self) -> NonNull<GcHead> {
@@ -380,25 +372,6 @@ impl<T: GcTracable> GcRef<T> {
     #[inline(always)]
     pub fn node_info_mut(&mut self) -> &mut GcHead {
         unsafe { self.head_ptr.as_mut() }
-    }
-
-    #[cfg(debug_assertions)]
-    pub fn test_valid(&self) -> bool {
-        unsafe { self.head_ptr.as_ref().test_valid() }
-    }
-}
-
-impl GcRef<()> {
-    /// Unsafe conversion from GcHead raw pointer to untyped GcRef<()>.
-    ///
-    /// Safety
-    /// You must ensure GcHead raw pointer comes from GcRef<T>, otherwise consequences are unpredictable.
-    #[inline(always)]
-    pub unsafe fn from_head_ptr(head_ptr: NonNull<GcHead>) -> Self {
-        Self {
-            head_ptr,
-            _marker: PhantomData,
-        }
     }
 }
 
@@ -469,5 +442,20 @@ impl<'heap, T: GcTracable> Gc<'heap, T> {
     #[inline(always)]
     pub fn is_root(&self) -> bool {
         self.inner.is_root()
+    }
+}
+
+impl GcHeap {
+    #[cfg(debug_assertions)]
+    pub fn debug_assert_node_valid(&self, node: NonNull<GcHead>, recursive: bool) {
+        if recursive {
+            let mut tr = self.tracer(GcPartitionId::NONE);
+            tr.trace(node, |n, _| unsafe {
+                debug_assert!(n.as_ref().test_valid(), "node {:?} is invalid", n.as_ref());
+                true
+            });
+        } else {
+            debug_assert!(unsafe { node.as_ref().test_valid() });
+        }
     }
 }

@@ -6,6 +6,7 @@ use std::{collections::VecDeque, marker::PhantomData, ptr::NonNull};
 use crate::{
     GcHeap, GcPartitionId, GcRef,
     node::{GcHead, GcHeadFlag},
+    node_iterator::NodeIterator,
 };
 
 /// Garbage collection object tracing trait
@@ -13,19 +14,28 @@ use crate::{
 /// Any type that wants to be managed by the garbage collection system must implement this trait.
 /// This ensures that only types that explicitly support garbage collection can be allocated.
 pub unsafe trait GcTracable: 'static {
-    /// Trace all GC references within the object
-    ///
-    /// This method is called during the marking phase to find all other GC objects referenced within the object.
-    /// Implementers should call the `trace` closure to mark all referenced objects.
+    /// To collect referenced nodes for one depth
     fn trace(&self, tr: GcTraceOp);
+
+    #[cfg(debug_assertions)]
+    fn debug_set_alloc_ref_check(&self, heap: &GcHeap) {
+        let mut tr = GcTracer::new(heap, GcPartitionId::NONE, false);
+        self.trace(tr.ctx());
+
+        for mut n in tr.take_traced_nodes() {
+            unsafe {
+                n.as_mut().set_check_ref(true);
+            }
+        }
+    }
 }
 
-/// Tracer, used to trace object references during marking phase
 pub struct GcTracer<'a> {
     pub(super) heap: NonNull<GcHeap>,
-    pub(super) partition_id: GcPartitionId,
-
+    /// restrict trace scope. NULL for no-restrict
+    pub(super) restrict: GcPartitionId,
     /// collected nodes during tracing
+    /// TODO: use HashSet to uniquify?
     pub(super) traced_nodes: VecDeque<NonNull<GcHead>>,
 
     _mark: PhantomData<&'a ()>,
@@ -44,35 +54,49 @@ impl<'a> GcTracer<'a> {
         }
     }
 
-    /// create new tracer for specified partition.
-    pub(crate) fn new_internal(heap: NonNull<GcHeap>, partition_id: GcPartitionId) -> Self {
-        unsafe {
-            debug_assert!(heap.as_ref().partition(partition_id).is_some());
-        }
+    /// create new tracer, optionally clear all nodes' visit and mark flags.
+    pub fn new(heap: &GcHeap, restrict: GcPartitionId, clear_flags: bool) -> Self {
+        debug_assert!(restrict.is_null() || heap.partition(restrict).is_some());
 
-        GcTracer {
-            heap,
-            partition_id,
+        let tr = GcTracer {
+            heap: NonNull::from_ref(heap),
+            restrict,
             traced_nodes: VecDeque::new(),
             _mark: PhantomData,
-        }
-    }
+        };
 
-    /// create new tracer for specified partition.
-    /// clear all visit and mark flags to be ready for new tracing.
-    pub fn new(heap: NonNull<GcHeap>, partition_id: GcPartitionId) -> Self {
-        let tr = GcTracer::new_internal(heap, partition_id);
-
-        // clear node flags
-        unsafe {
-            heap.as_ref().nodes_iter(partition_id).for_each(|mut n| {
-                let mut f = n.as_ref().flags();
-                let f0 = f;
-                f.remove(GcHeadFlag::TRACED | GcHeadFlag::MARKED);
-                if f0 != f {
-                    n.as_mut().set_flags(f);
+        if clear_flags {
+            // clear node flags
+            if !restrict.is_null() {
+                let start = heap.partition_nodes.get(&restrict).unwrap();
+                let nodes = NodeIterator::new(*start);
+                for mut n in nodes {
+                    unsafe {
+                        let mut f = n.as_ref().flags();
+                        let f0 = f;
+                        f.remove(GcHeadFlag::TRACED | GcHeadFlag::MARKED);
+                        if f0 != f {
+                            n.as_mut().set_flags(f);
+                        }
+                    }
                 }
-            });
+            } else {
+                let nodes = heap
+                    .partition_nodes
+                    .values()
+                    .flat_map(|&n| NodeIterator::new(n));
+
+                for mut n in nodes {
+                    unsafe {
+                        let mut f = n.as_ref().flags();
+                        let f0 = f;
+                        f.remove(GcHeadFlag::TRACED | GcHeadFlag::MARKED);
+                        if f0 != f {
+                            n.as_mut().set_flags(f);
+                        }
+                    }
+                }
+            }
         }
 
         tr
@@ -90,10 +114,12 @@ impl<'a> GcTracer<'a> {
 
     /// clear mark of each node in partition
     pub fn clear_marks(&mut self) {
+        debug_assert!(!self.restrict.is_null());
+
         unsafe {
             self.heap
                 .as_mut()
-                .nodes_iter(self.partition_id)
+                .nodes_iter(self.restrict)
                 .for_each(|mut n| {
                     n.as_mut().set_marked(false);
                 });
@@ -102,10 +128,12 @@ impl<'a> GcTracer<'a> {
 
     /// clear visited flag of each node
     pub fn clear_visit_flags(&mut self) {
+        debug_assert!(!self.restrict.is_null());
+
         unsafe {
             self.heap
                 .as_mut()
-                .nodes_iter(self.partition_id)
+                .nodes_iter(self.restrict)
                 .for_each(|mut n| {
                     let mut f = n.as_ref().flags();
                     let f0 = f;
@@ -134,16 +162,17 @@ impl<'a> GcTracer<'a> {
     ) {
         unsafe {
             if (ignore_trace_flag || !node.as_ref().flags().contains(GcHeadFlag::TRACED))
-                && node.as_ref().get_partition_id() == self.partition_id
+                && (self.restrict.is_null() || self.restrict == node.as_ref().get_partition_id())
             {
-                let propagate = callback(node, self.heap());
+                // apply callback on `node`
+                let trace_sub = callback(node, self.heap());
 
                 if !ignore_trace_flag {
                     (*node.as_ptr()).set_flags(node.as_ref().flags().union(GcHeadFlag::TRACED));
                 }
 
-                if propagate {
-                    // collect child nodes of `node`
+                if trace_sub {
+                    // collect direct children nodes of `node`
                     (self.heap().get_node_gc_type(node).trace_fn)(node, self.ctx());
                 }
             }
@@ -181,7 +210,7 @@ impl<'a> GcTracer<'a> {
         let xref = n.xref_partition();
 
         debug_assert!(!xref.is_null());
-        debug_assert_eq!(n.get_partition_id(), self.partition_id);
+        debug_assert_eq!(n.get_partition_id(), self.restrict);
         debug_assert!(n.is_root());
 
         let mut flags = n.flags();
@@ -192,9 +221,9 @@ impl<'a> GcTracer<'a> {
 
         (self.heap().get_node_gc_type(root_node).trace_fn)(root_node, self.ctx());
 
-        for sub in std::mem::replace(&mut self.traced_nodes, VecDeque::new()) {
+        for sub in self.take_traced_nodes() {
             unsafe {
-                if sub.as_ref().get_partition_id() == self.partition_id {
+                if self.restrict.is_null() || sub.as_ref().get_partition_id() == self.restrict {
                     self.set_xref_recursive(sub, xref);
                 }
             }
@@ -202,7 +231,7 @@ impl<'a> GcTracer<'a> {
     }
 
     pub fn trace_roots(&mut self, handle: impl Fn(NonNull<GcHead>, &GcHeap) -> bool) {
-        if let Some(roots) = unsafe { self.heap.as_ref().partition_roots.get(&self.partition_id) } {
+        if let Some(roots) = unsafe { self.heap.as_ref().partition_roots.get(&self.restrict) } {
             self.trace_iter(roots.iter().copied(), &handle);
         }
     }
@@ -218,11 +247,16 @@ impl<'a> GcTracer<'a> {
         self.traced_nodes.clear();
     }
 
+    /// take out collected nodes
+    pub fn take_traced_nodes(&mut self) -> VecDeque<NonNull<GcHead>> {
+        std::mem::replace(&mut self.traced_nodes, VecDeque::new())
+    }
+
     pub(crate) fn set_xref_recursive(&mut self, mut node: NonNull<GcHead>, xref: GcPartitionId) {
         let n = unsafe { node.as_ref() };
 
         debug_assert!(!xref.is_null());
-        debug_assert_eq!(n.get_partition_id(), self.partition_id);
+        debug_assert_eq!(n.get_partition_id(), self.restrict);
 
         let xref0 = n.xref_partition();
         let fix = if !xref0.is_null() {
@@ -252,7 +286,7 @@ impl<'a> GcTracer<'a> {
             let children = std::mem::replace(&mut self.traced_nodes, VecDeque::new());
             for sub in children {
                 unsafe {
-                    if sub.as_ref().get_partition_id() == self.partition_id
+                    if (self.restrict.is_null() || sub.as_ref().get_partition_id() == self.restrict)
                         && !sub.as_ref().flags().contains(GcHeadFlag::TRACED)
                     {
                         self.set_xref_recursive(sub, fix);
@@ -276,21 +310,26 @@ impl<'a> GcTraceOp<'a> {
         unsafe { &*self.tr.as_ref().heap.as_ptr() }
     }
 
-    /// Submit a gc refrence to tracer, whilch will be traced later.
+    /// Submit a GcRef to collected list
     #[inline(always)]
     pub fn add<T: GcTracable>(&mut self, gc_ref: GcRef<T>) {
         self.add_node(gc_ref.head_ptr);
     }
 
-    /// Submit a node to tracer, whilch will be traced later.
-    #[inline(always)]
+    /// Submit a node to collected list
+    #[inline]
     pub fn add_node(&mut self, node: NonNull<GcHead>) {
         unsafe {
-            self.tr.as_mut().traced_nodes.push_back(node);
+            if (self.tr.as_ref().restrict.is_null()
+                || self.tr.as_ref().restrict == node.as_ref().get_partition_id())
+                && !self.tr.as_ref().traced_nodes.iter().any(|&n| n == node)
+            {
+                self.tr.as_mut().traced_nodes.push_back(node);
+            }
         }
     }
 
-    /// Submit nodes to tracer, whilch will be traced later.
+    /// Submit nodes to collected list
     pub fn add_nodes(&mut self, nodes: impl Iterator<Item = NonNull<GcHead>>) {
         for n in nodes {
             self.add_node(n);
@@ -299,14 +338,13 @@ impl<'a> GcTraceOp<'a> {
 }
 
 impl GcHeap {
-    /// A shortcut to GcTracer::new()
+    /// A shortcut to GcTracer::new(scope, true)
     #[inline(always)]
-    pub fn tracer(&self, partition_id: GcPartitionId) -> GcTracer<'_> {
-        GcTracer::new(NonNull::from(self), partition_id)
+    pub fn tracer(&self, restrict: GcPartitionId) -> GcTracer<'_> {
+        GcTracer::new(self, restrict, true)
     }
 }
 
-#[macro_export]
 macro_rules! impl_trace_for_basic {
     ($($ty:ty),*) => {
         $(

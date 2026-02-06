@@ -92,7 +92,7 @@ fn main() -> GcResult<()> {
 
     // Manually trigger garbage collection for partition1
     println!("\nManually trigger garbage collection for partition1...");
-    let freed = heap.collect_garbage(partition1);
+    let freed = heap.collect(partition1);
     println!("  Collected {} bytes", freed);
 
     // Verify root objects are still valid
@@ -102,7 +102,7 @@ fn main() -> GcResult<()> {
 
     // Manually trigger garbage collection for partition2
     println!("\nManually trigger garbage collection for partition2...");
-    let freed = heap.collect_garbage(partition2);
+    let freed = heap.collect(partition2);
     println!("  Collected {} bytes", freed);
 
     // Verify partition2 root objects are still valid
@@ -116,7 +116,7 @@ fn main() -> GcResult<()> {
 
     // Trigger garbage collection for partition1 again
     println!("\nTrigger garbage collection for partition1 again...");
-    let freed = heap.collect_garbage(partition1);
+    let freed = heap.collect(partition1);
     println!("  Collected {} bytes", freed);
 
     // Verify remaining root objects are still valid
@@ -180,7 +180,7 @@ fn main() -> GcResult<()> {
 
     // Trigger garbage collection, verify circular references are handled correctly
     println!("\nGarbage collection for handling circular references...");
-    let freed = heap.collect_garbage(partition1);
+    let freed = heap.collect(partition1);
     println!("  回收了 {} 字节内存", freed);
 
     // Demonstrate partition deletion

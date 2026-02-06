@@ -367,7 +367,7 @@ fn test_memory_usage_increases_with_allocation() {
         )
         .unwrap();
     heap.set_root(root_obj, true);
-    let freed = heap.collect_garbage(id);
+    let freed = heap.collect(id);
     assert!(freed > 0);
 
     let after_gc_memory = heap.partition(id).unwrap().memory_used();
@@ -499,7 +499,7 @@ fn test_root_objects_preserve_during_gc() {
     heap.set_root(obj, true);
 
     // Trigger GC
-    let freed = heap.collect_garbage(id);
+    let freed = heap.collect(id);
     assert_eq!(freed, 0);
 
     // Object should still be valid
@@ -536,7 +536,7 @@ fn test_non_root_objects_collected() {
     // non_root_obj is not set as root
 
     // Trigger GC
-    let freed = heap.collect_garbage(id);
+    let freed = heap.collect(id);
     assert!(freed > 0);
 
     // Root object should still be valid
@@ -570,7 +570,7 @@ fn test_manual_garbage_collection() {
     let before = heap.partition(id).unwrap().memory_used();
 
     // Trigger GC
-    let freed = heap.collect_garbage(id);
+    let freed = heap.collect(id);
 
     // Should have freed some memory
     assert!(freed > 0);
@@ -604,14 +604,14 @@ fn test_circular_reference_handling() {
     assert_eq!(node1_val, 1);
     assert_eq!(node2_val, 2);
 
-    let freed = heap.collect_garbage(id);
+    let freed = heap.collect(id);
     assert_eq!(freed, 0); // Nothing freed because both are roots
 
     // Clear roots - circular reference should be collected
     heap.set_root(node1, false);
     heap.set_root(node2, false);
 
-    let freed = heap.collect_garbage(id);
+    let freed = heap.collect(id);
     assert!(freed > 0); // Circular reference should be freed
 }
 
@@ -665,7 +665,7 @@ fn test_weak_reference_after_collection() {
 
     // Clear root and collect
     heap.set_root(obj, false);
-    heap.collect_garbage(id);
+    heap.collect(id);
 
     // Upgrade should fail after object is collected
     let upgraded = weak_ref.upgrade(&heap);
