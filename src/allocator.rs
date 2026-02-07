@@ -8,22 +8,43 @@ use crate::{
 };
 
 impl GcHeap {
-    fn mem_alloc(size: usize) -> Option<NonNull<u8>> {
+    fn mem_alloc(&mut self, size: usize) -> Option<NonNull<u8>> {
         debug_assert_ne!(size, 0);
 
         let layout = Layout::from_size_align(size, std::mem::align_of::<usize>()).ok()?;
+        debug_assert_eq!(layout.size(), size);
+
         unsafe {
             let ptr = std::alloc::alloc(layout);
-            if ptr.is_null() {
-                None
-            } else {
+
+            if !ptr.is_null() {
+                #[cfg(debug_assertions)]
+                {
+                    let n = NonNull::new_unchecked(ptr).cast::<GcHead>();
+                    debug_assert!(
+                        !self.debug_living_nodes.contains(&n),
+                        "node {ptr:?} already exists?"
+                    );
+                    self.debug_living_nodes.insert(n);
+                }
+
                 Some(NonNull::new_unchecked(ptr))
+            } else {
+                None
             }
         }
     }
 
-    fn mem_dealloc(ptr: NonNull<u8>, data_size: usize, gross_size: usize) {
+    fn mem_dealloc(&mut self, ptr: NonNull<u8>, gross_size: usize) {
         debug_assert_ne!(gross_size, 0);
+
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(
+                self.debug_living_nodes.contains(&ptr.cast()),
+                "[O.o] node {ptr:?} has been disposed?"
+            );
+        }
 
         let ly = Layout::from_size_align(gross_size, std::mem::align_of::<usize>());
 
@@ -32,11 +53,11 @@ impl GcHeap {
         #[cfg(not(debug_assertions))]
         let layout = unsafe { ly.unwrap_unchecked() };
 
+        debug_assert_eq!(layout.size(), gross_size);
+
         unsafe {
-            // debug: set mem to zeros before dealloc,
-            // so that node MAGIC_NUM flag will be cleared, which marks the node validity.
             #[cfg(debug_assertions)]
-            std::ptr::write_bytes(ptr.as_ptr(), 0, data_size);
+            self.debug_living_nodes.remove(&ptr.cast());
 
             std::alloc::dealloc(ptr.as_ptr(), layout);
         }
@@ -59,7 +80,7 @@ impl GcHeap {
                 } else {
                     let gc_dtype = self.gc_data_types.register::<T>(0);
 
-                    let ptr = match Self::mem_alloc(gross_size) {
+                    let ptr = match self.mem_alloc(gross_size) {
                         Some(p) => p,
                         None => {
                             return Err((GcError::AllocationFailed, payload));
@@ -175,7 +196,14 @@ impl GcHeap {
             }
         }
 
-        Self::mem_dealloc(node.cast::<u8>(), ty.size as usize, gross_size);
+        #[cfg(debug_assertions)]
+        unsafe {
+            // clear head info
+            (*node.as_ptr()).attrs = 0;
+            (*node.as_ptr()).next.take();
+        }
+
+        self.mem_dealloc(node.cast::<u8>(), gross_size);
 
         gross_size
     }

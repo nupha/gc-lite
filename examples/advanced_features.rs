@@ -150,10 +150,10 @@ fn demonstrate_complex_structures(
     let mut child1 = heap
         .alloc(partition, TreeNode::new("Child 1"))
         .map_err(|(err, _)| err)?;
-    let mut child2 = heap
+    let child2 = heap
         .alloc(partition, TreeNode::new("Child 2"))
         .map_err(|(err, _)| err)?;
-    let mut grandchild = heap
+    let grandchild = heap
         .alloc(partition, TreeNode::new("Grandchild"))
         .map_err(|(err, _)| err)?;
 

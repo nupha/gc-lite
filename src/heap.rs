@@ -23,6 +23,9 @@ pub struct GcHeap {
     /// Type registry
     pub(super) gc_data_types: crate::type_registry::TypeRegistry,
 
+    #[cfg(debug_assertions)]
+    pub(crate) debug_living_nodes: std::collections::HashSet<NonNull<GcHead>>,
+
     /// User provided opaque raw pointer
     opaque: *mut u8,
 }
@@ -39,6 +42,8 @@ impl Drop for GcHeap {
                 self.dispose_all_nodes(link);
             }
         }
+
+        debug_assert!(self.debug_living_nodes.is_empty(), "[O.o] has leaked nodes");
     }
 }
 
@@ -54,6 +59,9 @@ impl GcHeap {
             weak_slots: Vec::new(),
             gc_data_types: TypeRegistry::new(),
             opaque: std::ptr::null_mut(),
+
+            #[cfg(debug_assertions)]
+            debug_living_nodes: std::collections::HashSet::with_capacity(1024),
         }
     }
 

@@ -22,8 +22,6 @@ bitflags::bitflags! {
         const TRACED = 1 << 2;
 
         #[cfg(debug_assertions)]
-        const CHECK_REF = 1 << 6;
-        #[cfg(debug_assertions)]
         const MAGIC_NUM = 1 << 7;
     }
 }
@@ -58,8 +56,7 @@ impl std::fmt::Debug for GcHead {
             .field("scope", &self.get_partition_id().0)
             //.field("dtype", &self.gc_dtype())
             //.field("flags", &self.flags())
-            //.field("xref", &self.xref_partition().0)
-           ;
+            .field("xref", &self.xref_partition().0);
 
         if let Some(w) = self.weak() {
             s.field("weak", &format!("{}#{}", w.index(), w.version()));
@@ -137,21 +134,6 @@ impl GcHead {
             f.insert(GcHeadFlag::ROOT);
         } else {
             f.remove(GcHeadFlag::ROOT);
-        }
-        self.set_flags(f);
-    }
-
-    #[cfg(debug_assertions)]
-    pub fn has_check_ref(&self) -> bool {
-        self.flags().contains(GcHeadFlag::CHECK_REF)
-    }
-    #[cfg(debug_assertions)]
-    pub fn set_check_ref(&mut self, b: bool) {
-        let mut f = self.flags();
-        if b {
-            f.insert(GcHeadFlag::CHECK_REF);
-        } else {
-            f.remove(GcHeadFlag::CHECK_REF);
         }
         self.set_flags(f);
     }

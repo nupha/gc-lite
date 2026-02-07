@@ -14,20 +14,8 @@ use crate::{
 /// Any type that wants to be managed by the garbage collection system must implement this trait.
 /// This ensures that only types that explicitly support garbage collection can be allocated.
 pub unsafe trait GcTracable: 'static {
-    /// To collect referenced nodes for one depth
+    /// Collect directly referenced children gc nodes
     fn trace(&self, tr: GcTraceOp);
-
-    #[cfg(debug_assertions)]
-    fn debug_set_alloc_ref_check(&self, heap: &GcHeap) {
-        let mut tr = GcTracer::new(heap, GcPartitionId::NONE, false);
-        self.trace(tr.ctx());
-
-        for mut n in tr.take_traced_nodes() {
-            unsafe {
-                n.as_mut().set_check_ref(true);
-            }
-        }
-    }
 }
 
 pub struct GcTracer<'a> {
@@ -345,46 +333,49 @@ impl GcHeap {
     }
 }
 
-macro_rules! impl_trace_for_basic {
+macro_rules! impl_dummy_trace_for_primitive {
     ($($ty:ty),*) => {
         $(
             unsafe impl GcTracable for $ty {
                 #[inline(always)]
-                fn trace(&self, _: GcTraceOp) {
-                    // This type doesn't contain any GC references, so trace method is empty
-                }
+                fn trace(&self, _: GcTraceOp) { }
+            }
+            unsafe impl GcTracable for [$ty] {
+                #[inline(always)]
+                fn trace(&self, _: GcTraceOp) { }
+            }
+            unsafe impl GcTracable for Vec<$ty> {
+                #[inline(always)]
+                fn trace(&self, _: GcTraceOp) { }
+            }
+            unsafe impl GcTracable for Box<[$ty]> {
+                #[inline(always)]
+                fn trace(&self, _: GcTraceOp) { }
             }
         )*
     };
 }
 
 // Implement GcTracable for basic types
-impl_trace_for_basic!(
-    u8,
-    u16,
-    u32,
-    u64,
-    u128,
-    i8,
-    i16,
-    i32,
-    i64,
-    i128,
-    f32,
-    f64,
-    usize,
-    isize,
-    bool,
-    char,
-    str,
-    ()
+impl_dummy_trace_for_primitive!(
+    u8, u16, u32, u64, u128, i8, i16, i32, i64, i128, f32, f64, usize, isize, bool, char
 );
 
+unsafe impl GcTracable for str {
+    #[inline(always)]
+    fn trace(&self, _: GcTraceOp) {}
+}
+unsafe impl GcTracable for &'static str {
+    #[inline(always)]
+    fn trace(&self, _: GcTraceOp) {}
+}
 unsafe impl GcTracable for String {
     #[inline(always)]
-    fn trace(&self, _: GcTraceOp) {
-        // String don't have gc ref
-    }
+    fn trace(&self, _: GcTraceOp) {}
+}
+unsafe impl GcTracable for &'static String {
+    #[inline(always)]
+    fn trace(&self, _: GcTraceOp) {}
 }
 
 unsafe impl<T: GcTracable> GcTracable for Option<T> {
@@ -396,39 +387,43 @@ unsafe impl<T: GcTracable> GcTracable for Option<T> {
     }
 }
 
-unsafe impl<T: GcTracable> GcTracable for Box<T> {
-    #[inline(always)]
-    fn trace(&self, tr: GcTraceOp) {
-        self.as_ref().trace(tr);
-    }
-}
+//
+// BUGGY! could cause panic
+//
 
-unsafe impl<T: GcTracable> GcTracable for [T] {
-    #[inline]
-    fn trace(&self, tr: GcTraceOp) {
-        for n in self {
-            n.trace(tr);
-        }
-    }
-}
+// unsafe impl<T: GcTracable> GcTracable for Box<T> {
+//     #[inline(always)]
+//     fn trace(&self, tr: GcTraceOp) {
+//         self.as_ref().trace(tr);
+//     }
+// }
 
-unsafe impl<T: GcTracable> GcTracable for Vec<T> {
-    #[inline]
-    fn trace(&self, tr: GcTraceOp) {
-        for n in self {
-            n.trace(tr);
-        }
-    }
-}
+// unsafe impl<T: GcTracable> GcTracable for [T] {
+//     #[inline]
+//     fn trace(&self, tr: GcTraceOp) {
+//         for n in self {
+//             n.trace(tr);
+//         }
+//     }
+// }
 
-unsafe impl<T: GcTracable> GcTracable for Box<[T]> {
-    #[inline(always)]
-    fn trace(&self, tr: GcTraceOp) {
-        for n in self {
-            n.trace(tr);
-        }
-    }
-}
+// unsafe impl<T: GcTracable> GcTracable for Vec<T> {
+//     #[inline]
+//     fn trace(&self, tr: GcTraceOp) {
+//         for n in self {
+//             n.trace(tr);
+//         }
+//     }
+// }
+
+// unsafe impl<T: GcTracable> GcTracable for Box<[T]> {
+//     #[inline(always)]
+//     fn trace(&self, tr: GcTraceOp) {
+//         for n in self {
+//             n.trace(tr);
+//         }
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
