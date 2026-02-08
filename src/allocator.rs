@@ -90,7 +90,7 @@ impl GcHeap {
                     // O.o SLOW DEBUG
                     #[cfg(debug_assertions)]
                     {
-                        let mut tr = crate::GcTracer::new(self, GcPartitionId::NONE, true);
+                        let mut tr = crate::GcTracer::new(self, crate::GcTraceRestrict::No, true);
                         for &link in self.partition_nodes.values() {
                             if let Some(first) = link {
                                 tr.trace(first, |n, _| {
@@ -141,9 +141,11 @@ impl GcHeap {
                         next: None,
 
                         #[cfg(debug_assertions)]
-                        alloc_in: partition_id,
+                        dbg_id: head.as_ptr() as usize,
                         #[cfg(debug_assertions)]
-                        type_name: std::any::type_name::<T>(),
+                        dbg_type_name: std::any::type_name::<T>(),
+                        #[cfg(debug_assertions)]
+                        dbg_heap: NonNull::from_ref(self),
                     };
 
                     unsafe {
@@ -176,7 +178,7 @@ impl GcHeap {
         log::trace!("[dispose] {hd:?}");
 
         #[cfg(debug_assertions)]
-        debug_assert!(hd.test_valid());
+        hd.debug_assert_node_valid(self);
 
         if !hd.weak_id.is_null() {
             // clear weak slot
@@ -190,17 +192,21 @@ impl GcHeap {
         let ty = self.get_node_gc_type(node);
         let gross_size = std::mem::size_of::<GcHead>() + ty.size as usize;
 
+        unsafe {
+            // #[cfg(debug_assertions)]
+            // {
+            //     (*node.as_ptr()).attrs = 0;
+            //     (*node.as_ptr()).weak_id = GcWeakRawId::NULL;
+            //     (*node.as_ptr()).next.take();
+            // }
+
+            std::ptr::drop_in_place(node.cast::<GcHead>().as_ptr());
+        }
+
         if let Some(f) = ty.drop_fn {
             unsafe {
                 f(node.as_ref().payload().as_ptr());
             }
-        }
-
-        #[cfg(debug_assertions)]
-        unsafe {
-            // clear head info
-            (*node.as_ptr()).attrs = 0;
-            (*node.as_ptr()).next.take();
         }
 
         self.mem_dealloc(node.cast::<u8>(), gross_size);

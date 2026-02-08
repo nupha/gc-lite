@@ -7,7 +7,9 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::{GcHeap, GcPartitionId, GcTracable, GcTracer, GcWeak, weak::GcWeakRawId};
+use crate::{
+    GcHeap, GcPartitionId, GcTracable, GcTraceRestrict, GcTracer, GcWeak, weak::GcWeakRawId,
+};
 
 bitflags::bitflags! {
     #[repr(transparent)]
@@ -27,7 +29,6 @@ bitflags::bitflags! {
 }
 
 /// GC node info
-// #[repr(C)]
 pub struct GcHead {
     /// Attributes of node:
     /// * bit 8-15:  gc datatype id
@@ -43,9 +44,11 @@ pub struct GcHead {
     pub(super) next: Option<NonNull<GcHead>>,
 
     #[cfg(debug_assertions)]
-    pub(crate) alloc_in: GcPartitionId,
+    pub(crate) dbg_id: usize,
     #[cfg(debug_assertions)]
-    pub(crate) type_name: &'static str,
+    pub(crate) dbg_type_name: &'static str,
+    #[cfg(debug_assertions)]
+    pub(crate) dbg_heap: NonNull<GcHeap>,
 }
 
 impl std::fmt::Debug for GcHead {
@@ -64,8 +67,8 @@ impl std::fmt::Debug for GcHead {
 
         #[cfg(debug_assertions)]
         {
-            s.field("type_name", &self.type_name)
-                .field("alloc", &self.alloc_in);
+            s.field("type_name", &self.dbg_type_name)
+                .field("id", &format!("0x{:x}", self.dbg_id));
         }
 
         s.finish()
@@ -77,15 +80,6 @@ impl GcHead {
     #[inline(always)]
     pub fn gc_dtype(&self) -> u8 {
         ((self.attrs & 0xFF00) >> 8) as u8
-    }
-
-    /// test if node is valid
-    #[cfg(debug_assertions)]
-    pub fn test_valid(&self) -> bool {
-        !self.alloc_in.is_null()
-            && self.gc_dtype() != 0
-            && self.flags().contains(GcHeadFlag::MAGIC_NUM)
-            && self.next.is_none_or(|n| n.is_aligned())
     }
 
     #[inline(always)]
@@ -161,21 +155,60 @@ impl GcHead {
     }
 
     /// get raw pointer to payload data
-    #[inline]
+    #[inline(always)]
     pub fn payload(&self) -> NonNull<u8> {
         #[cfg(debug_assertions)]
-        debug_assert!(self.test_valid(), "invalid gc node {self:?}");
+        self.debug_assert_node_valid_simple();
+
         unsafe { NonNull::from_ref(self).add(1).cast::<u8>() }
     }
 
-    /// Get direct children (one-depth) of `self`
-    pub fn children(&self, heap: &GcHeap, restrict: GcPartitionId) -> Vec<NonNull<GcHead>> {
-        let mut tr = GcTracer::new(heap, restrict, false);
+    /// Get one-depth direct children of `self` node
+    pub fn children(&self, heap: &GcHeap, restrict: GcTraceRestrict) -> Vec<NonNull<GcHead>> {
         let node = NonNull::from_ref(self);
+
+        let mut tr = GcTracer::new(heap, restrict, false);
         (heap.get_node_gc_type(node).trace_fn)(node, tr.ctx());
+
         let mut lst = tr.take_traced_nodes();
         lst.retain(|&x| x != node); // remove self reference
         lst.into()
+    }
+}
+
+#[cfg(debug_assertions)]
+impl GcHead {
+    pub fn debug_assert_node_valid_simple(&self) {
+        debug_assert_eq!(self as *const Self as usize, self.dbg_id);
+        debug_assert!(
+            self.gc_dtype() != 0
+                && self.flags().contains(GcHeadFlag::MAGIC_NUM)
+                && self.next.is_none_or(|n| n.is_aligned()),
+            "bad node: {self:?}"
+        )
+    }
+
+    pub fn debug_assert_node_valid(&self, heap: &GcHeap) {
+        debug_assert_eq!(self.dbg_heap, NonNull::from_ref(heap));
+        debug_assert!(
+            unsafe {
+                self.dbg_heap
+                    .as_ref()
+                    .debug_living_nodes
+                    .contains(&NonNull::from_ref(self))
+            },
+            "unknown node: {self:?}"
+        );
+        self.debug_assert_node_valid_simple();
+    }
+
+    pub fn debug_assert_node_tree_valid(&self, heap: &GcHeap) {
+        debug_assert_eq!(self.dbg_heap, NonNull::from_ref(heap));
+        let mut tr = heap.tracer(GcTraceRestrict::No);
+        tr.trace(NonNull::from_ref(self), |n, _| unsafe {
+            n.as_ref().debug_assert_node_valid(heap);
+            true
+        });
     }
 }
 
@@ -228,6 +261,7 @@ impl<T: GcTracable> From<GcRef<T>> for NonNull<GcHead> {
         r.head_ptr
     }
 }
+
 impl<T: GcTracable> From<&GcRef<T>> for NonNull<GcHead> {
     #[inline(always)]
     fn from(r: &GcRef<T>) -> Self {
@@ -237,28 +271,7 @@ impl<T: GcTracable> From<&GcRef<T>> for NonNull<GcHead> {
 
 impl<T: GcTracable> std::fmt::Debug for GcRef<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        #[cfg(debug_assertions)]
-        unsafe {
-            let node = self.head_ptr.as_ref();
-            write!(
-                f,
-                "GcRef<{:p} scope={} xref={}",
-                self.head_ptr,
-                node.get_partition_id().0,
-                node.xref_partition().0,
-            )?;
-            if let Some(w) = node.weak() {
-                write!(f, " weak={w:?}")?;
-            }
-            write!(f, " data={:p}>", node.payload())
-        }
-
-        #[cfg(not(debug_assertions))]
-        {
-            write!(f, "GcRef<{:p}:{:p}>", self.head_ptr, unsafe {
-                self.head_ptr.as_ref().payload()
-            })
-        }
+        unsafe { write!(f, "GcRef<{:?}>", self.head_ptr.as_ref()) }
     }
 }
 
@@ -289,7 +302,9 @@ impl<T: GcTracable> GcRef<T> {
             && dtype_id == unsafe { node.as_ref().gc_dtype() }
         {
             #[cfg(debug_assertions)]
-            debug_assert!(unsafe { node.as_ref().test_valid() });
+            unsafe {
+                node.as_ref().debug_assert_node_valid(heap);
+            }
 
             Some(Self {
                 head_ptr: node,
@@ -302,19 +317,17 @@ impl<T: GcTracable> GcRef<T> {
 
     /// Unsafe conversion from &T to GcRef<T>, main focus on speed.
     ///
-    /// Safety
-    /// You must ensure &T comes from GcRef<T>, otherwise consequences are unpredictable.
+    /// # Safety
+    ///
+    /// Caller must ensure &T comes from GcRef<T>, otherwise consequences are unpredictable.
     #[inline]
     pub unsafe fn from_ref_unchecked(data_ref: &T) -> Self {
-        let node = unsafe {
-            NonNull::from_ref(data_ref)
-                .cast::<u8>()
-                .sub(std::mem::size_of::<GcHead>())
-                .cast::<GcHead>()
-        };
+        let node = unsafe { NonNull::from_ref(data_ref).cast::<GcHead>().sub(1) };
 
         #[cfg(debug_assertions)]
-        debug_assert!(unsafe { node.as_ref().test_valid() });
+        unsafe {
+            node.as_ref().debug_assert_node_valid_simple();
+        }
 
         Self {
             head_ptr: node,
@@ -424,20 +437,5 @@ impl<'heap, T: GcTracable> Gc<'heap, T> {
     #[inline(always)]
     pub fn is_root(&self) -> bool {
         self.inner.is_root()
-    }
-}
-
-impl GcHeap {
-    #[cfg(debug_assertions)]
-    pub fn debug_assert_node_valid(&self, node: NonNull<GcHead>, recursive: bool) {
-        if recursive {
-            let mut tr = self.tracer(GcPartitionId::NONE);
-            tr.trace(node, |n, _| unsafe {
-                debug_assert!(n.as_ref().test_valid(), "node {:?} is invalid", n.as_ref());
-                true
-            });
-        } else {
-            debug_assert!(unsafe { node.as_ref().test_valid() });
-        }
     }
 }

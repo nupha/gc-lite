@@ -4,7 +4,7 @@
 use std::{collections::HashMap, ptr::NonNull};
 
 use crate::{
-    GcError, GcResult, GcTracer,
+    GcError, GcResult, GcTraceRestrict, GcTracer,
     node::{GcHead, GcRef},
     partition::{GcPartitionId, GcPartitionMgr},
     trace::GcTracable,
@@ -17,11 +17,11 @@ pub struct GcHeap {
     /// LUT: Object list heads for each partition
     pub(super) partition_nodes: HashMap<GcPartitionId, Option<NonNull<GcHead>>>,
     /// LUT: Root object lists for each partition
-    pub(super) partition_roots: HashMap<GcPartitionId, Vec<NonNull<GcHead>>>,
+    pub(super) partition_root_nodes: HashMap<GcPartitionId, Vec<NonNull<GcHead>>>,
     /// Weak reference list, each slot stores (version, GcHeader)
     pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
     /// Type registry
-    pub(super) gc_data_types: crate::type_registry::TypeRegistry,
+    pub(super) gc_data_types: TypeRegistry,
 
     #[cfg(debug_assertions)]
     pub(crate) debug_living_nodes: std::collections::HashSet<NonNull<GcHead>>,
@@ -55,7 +55,7 @@ impl GcHeap {
         Self {
             mgr: partitions,
             partition_nodes: HashMap::with_capacity(8),
-            partition_roots: HashMap::with_capacity(8),
+            partition_root_nodes: HashMap::with_capacity(8),
             weak_slots: Vec::new(),
             gc_data_types: TypeRegistry::new(),
             opaque: std::ptr::null_mut(),
@@ -107,72 +107,74 @@ impl GcHeap {
         }
     }
 
-    /// Attach a node to partition's nodes link.
+    /// Attach a node to partition's nodes chain.
     ///
     /// # Note
     ///
     /// This method **DO NOT** increase partitions' mem_use.
     #[inline]
-    pub(crate) fn attach(&mut self, partition_id: GcPartitionId, node: NonNull<GcHead>) {
+    pub(crate) fn attach(&mut self, partition_id: GcPartitionId, mut node: NonNull<GcHead>) {
         debug_assert!(!partition_id.is_null());
         debug_assert!(self.partition_nodes.contains_key(&partition_id));
 
         unsafe {
             debug_assert!(node.as_ref().get_partition_id().is_null());
-            (*node.as_ptr()).set_partition_id(partition_id);
+            debug_assert!(node.as_ref().next.is_none());
 
-            let link_head = self
+            node.as_mut().set_partition_id(partition_id);
+
+            let cur_head = self
                 .partition_nodes
-                .get_mut(&partition_id)
+                .remove(&partition_id)
                 .unwrap_unchecked();
 
-            (*node.as_ptr()).next = *link_head;
-            link_head.replace(node);
+            node.as_mut().next = cur_head;
+            self.partition_nodes.insert(partition_id, Some(node));
         }
     }
 
-    /// Remove a node from partition
-    pub(crate) fn detach(&mut self, node: NonNull<GcHead>) {
-        let partition_id = unsafe { node.as_ref().get_partition_id() };
+    // /// Remove a node from partition
+    // pub(crate) fn detach(&mut self, node: NonNull<GcHead>) {
+    //     let partition_id = unsafe { node.as_ref().get_partition_id() };
 
-        if !partition_id.is_null() {
-            let chain = self.partition_nodes.get_mut(&partition_id).unwrap();
+    //     if !partition_id.is_null() {
+    //         let chain = self.partition_nodes.get_mut(&partition_id).unwrap();
 
-            let mut current = *chain;
-            let mut prev: Option<NonNull<GcHead>> = None;
+    //         let mut current = *chain;
+    //         let mut prev: Option<NonNull<GcHead>> = None;
 
-            while let Some(header) = current {
-                unsafe {
-                    if header == node {
-                        // take out from chain
-                        if let Some(mut p) = prev {
-                            p.as_mut().next = header.as_ref().next;
-                        } else {
-                            *chain = header.as_ref().next;
-                        }
+    //         while let Some(header) = current {
+    //             unsafe {
+    //                 if header == node {
+    //                     // take out from chain
+    //                     if let Some(mut p) = prev {
+    //                         p.as_mut().next = header.as_ref().next;
+    //                     } else {
+    //                         *chain = header.as_ref().next;
+    //                     }
 
-                        if node.as_ref().is_root() {
-                            if let Some(roots) = self.partition_roots.get_mut(&partition_id) {
-                                roots.retain(|p| node != *p);
-                            }
-                            (*node.as_ptr()).set_root(false);
-                        }
+    //                     if node.as_ref().is_root() {
+    //                         if let Some(roots) = self.partition_root_nodes.get_mut(&partition_id) {
+    //                             roots.retain(|p| node != *p);
+    //                         }
+    //                         (*node.as_ptr()).set_root(false);
+    //                     }
 
-                        // clear partition id
-                        (*node.as_ptr()).partition = GcPartitionId::NONE.0 as _;
+    //                     // clear partition id
+    //                     (*node.as_ptr()).partition = GcPartitionId::NONE.0 as _;
 
-                        return;
-                    }
+    //                     return;
+    //                 }
 
-                    prev = Some(header);
-                    current = header.as_ref().next;
-                }
-            }
+    //                 prev = Some(header);
+    //                 current = header.as_ref().next;
+    //             }
+    //         }
 
-            #[cfg(debug_assertions)]
-            unreachable!("node not exist");
-        }
-    }
+    //         #[cfg(debug_assertions)]
+    //         unreachable!("node not exist");
+    //     }
+    // }
 
     /// Set/unset a node to be root
     pub fn set_root_node(&mut self, node: NonNull<GcHead>, is_root: bool) {
@@ -184,7 +186,7 @@ impl GcHeap {
             if is_root {
                 // Add to partition's root object list, create if doesn't exist
                 let roots = self
-                    .partition_roots
+                    .partition_root_nodes
                     .entry(pid)
                     .or_insert_with(|| Vec::with_capacity(8));
                 if !roots.contains(&node) {
@@ -192,7 +194,7 @@ impl GcHeap {
                 }
             } else {
                 // Remove from partition's root object list
-                if let Some(roots) = self.partition_roots.get_mut(&pid) {
+                if let Some(roots) = self.partition_root_nodes.get_mut(&pid) {
                     if let Some(pos) = roots.iter().position(|&r| r == node) {
                         roots.swap_remove(pos);
                     }
@@ -273,72 +275,9 @@ impl GcHeap {
     //     unsafe { Ok(self.dispose(header)) }
     // }
 
-    /// Check if object is referenced by other objects
-    #[deprecated]
-    fn is_node_referenced<T: GcTracable>(&mut self, gc_ref: GcRef<T>) -> GcResult<bool> {
-        unsafe {
-            let target = gc_ref.head_ptr;
-            let partition_id = target.as_ref().get_partition_id();
-
-            // Verify partition exists
-            if self.partition(partition_id).is_none() {
-                return Err(GcError::PartitionNotFound);
-            }
-
-            // Verify object is allocated from this context
-            if !self.contains(target) {
-                return Err(GcError::InvalidReference);
-            }
-
-            // Check if specified object references target object master -> slave
-            let check_obj_reference =
-                |master: NonNull<GcHead>, slave: NonNull<GcHead>, tracer: &mut GcTracer| -> bool {
-                    // Call master's trace function to trace all objects it references
-                    tracer.clear();
-                    let trace_fn = tracer.heap().get_node_gc_type(master).trace_fn;
-                    trace_fn(master, tracer.ctx());
-
-                    // Check if target object is included in trace results
-                    tracer.traced_nodes.iter().any(|h| *h == slave)
-                };
-
-            // Get partition list head, manually traverse to avoid borrow conflicts
-            let head = match self.partition_nodes.get(&partition_id) {
-                Some(p) => *p,
-                None => return Ok(false),
-            };
-
-            let mut referenced = false;
-            let mut tracer = self.tracer(partition_id);
-            let mut current = head;
-
-            while let Some(node) = current {
-                if node != target {
-                    // Check if this object references target object
-                    if check_obj_reference(node, target, &mut tracer) {
-                        referenced = true;
-                        break;
-                    }
-                }
-                current = (*node.as_ptr()).next;
-            }
-
-            // Clear all possible marks to ensure they don't affect subsequent GC operations
-            // This seems unnecessary as we directly call dispose_fn and don't set marked flags, so clearing is not needed.
-            // For conservative protection, we still keep the code to clear mark flags.
-            let mut current = head;
-            while let Some(mut node) = current {
-                node.as_mut().set_marked(false);
-                current = node.as_ref().next;
-            }
-
-            Ok(referenced)
-        }
-    }
-
     /// Check if `node` was allocated in this heap
     pub fn contains(&self, node: NonNull<GcHead>) -> bool {
-        self.nodes_iter(unsafe { node.as_ref().get_partition_id() })
+        self.nodes(unsafe { node.as_ref().get_partition_id() })
             .any(|p| p == node)
     }
 
@@ -384,7 +323,7 @@ impl GcHeap {
             }
         }
 
-        let mut tr = self.tracer(partition_id);
+        let mut tr = self.tracer(GcTraceRestrict::Collect(partition_id));
         tr.trace_iter(stack.iter().copied(), |mut n, _| unsafe {
             if !n.as_ref().is_marked() {
                 n.as_mut().set_marked(true);
@@ -395,7 +334,7 @@ impl GcHeap {
         });
 
         let b = unsafe { node.as_ref().is_marked() };
-        tr.clear_marks();
+        tr.clear_marked_flag();
 
         b
     }

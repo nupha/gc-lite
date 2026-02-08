@@ -7,30 +7,24 @@ use crate::GcPartitionId;
 use crate::heap::GcHeap;
 use crate::node::GcHead;
 
-/// Node iterator
-///
-/// Used to traverse all GC nodes in a specified partition
-/// Returns GcHead pointer, doesn't care about specific type
-pub struct NodeIterator<'a> {
+/// Iterate along node link chain
+#[repr(transparent)]
+pub struct NodeLinkIter<'a> {
     current: Option<NonNull<GcHead>>,
     _marker: std::marker::PhantomData<&'a ()>,
 }
 
-impl<'a> NodeIterator<'a> {
-    /// Create iterator from chain head
-    pub(crate) fn new(head: Option<NonNull<GcHead>>) -> Self {
+impl<'a> NodeLinkIter<'a> {
+    /// Create iterator from starting node
+    pub fn new(starting: Option<NonNull<GcHead>>) -> Self {
         Self {
-            current: head,
+            current: starting,
             _marker: std::marker::PhantomData,
         }
     }
-
-    pub(crate) fn from_heap(heap: &'a GcHeap, partition_id: GcPartitionId) -> Self {
-        Self::new(heap.partition_nodes.get(&partition_id).copied().flatten())
-    }
 }
 
-impl<'a> Iterator for NodeIterator<'a> {
+impl<'a> Iterator for NodeLinkIter<'a> {
     type Item = NonNull<GcHead>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -43,9 +37,8 @@ impl<'a> Iterator for NodeIterator<'a> {
 }
 
 impl GcHeap {
-    /// Get node iterator for specified partition
-    #[inline(always)]
-    pub fn nodes_iter(&self, partition_id: GcPartitionId) -> NodeIterator<'_> {
-        NodeIterator::from_heap(self, partition_id)
+    #[inline]
+    pub fn nodes(&self, partition_id: GcPartitionId) -> NodeLinkIter<'_> {
+        NodeLinkIter::new(self.partition_nodes.get(&partition_id).copied().flatten())
     }
 }

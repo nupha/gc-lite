@@ -4,7 +4,7 @@
 use std::ptr::NonNull;
 
 use crate::{
-    GcHeap, node::GcHead, node_iterator::NodeIterator, partition::GcPartitionId, trace::GcTracer,
+    GcHeap, node::GcHead, node_iterator::NodeLinkIter, partition::GcPartitionId, trace::GcTracer,
 };
 
 impl GcHeap {
@@ -13,59 +13,65 @@ impl GcHeap {
     pub const SWEEP_UNMARKED_FUNC: fn(&mut GcHead) -> bool = |node| !node.is_marked();
 
     /// call optional notify with node *BEFORE* it is disposed.
-    fn sweep_internal(
+    fn do_sweep(
         &mut self,
         partition_id: GcPartitionId,
         predicate: impl Fn(&mut GcHead) -> bool,
         notify: Option<impl Fn(&GcHead)>,
     ) -> usize {
-        if let Some(first) = self.partition_nodes.get(&partition_id).copied() {
-            let mut link_head = first;
+        if let Some(link0) = self.partition_nodes.remove(&partition_id) {
+            let mut link1 = link0;
             let mut freed_bytes = 0;
 
             for &pass in self.gc_type_drop_passes(&mut [0; 4]) {
-                let mut current = link_head;
+                let mut current = link1;
                 let mut prev: Option<NonNull<GcHead>> = None;
 
-                while let Some(mut p) = current {
+                while let Some(mut this) = current {
                     unsafe {
-                        debug_assert!(p.as_ref().test_valid());
+                        #[cfg(debug_assertions)]
+                        this.as_ref().debug_assert_node_valid(self);
 
-                        current = p.as_ref().next;
+                        current = this.as_mut().next;
 
-                        if self.get_node_gc_type(p).drop_pass == pass && predicate(p.as_mut()) {
-                            if let Some(last) = prev {
-                                (*last.as_ptr()).next = current;
+                        if self.get_node_gc_type(this).drop_pass == pass && predicate(this.as_mut())
+                        {
+                            debug_assert!(this.as_ref().xref_partition().is_null());
+
+                            if let Some(mut p) = prev {
+                                p.as_mut().next = current;
                             } else {
-                                link_head = current;
+                                link1 = current;
                             }
 
-                            let is_root = p.as_ref().is_root();
                             if let Some(cb) = &notify {
-                                cb(p.as_ref());
+                                cb(this.as_ref());
                             }
-                            freed_bytes += self.dispose(p);
+                            let is_root = this.as_ref().is_root();
+
+                            freed_bytes += self.dispose(this);
 
                             // If root node: remove from root list
                             if is_root
-                                && let Some(lst) = self.partition_roots.get_mut(&partition_id)
+                                && let Some(lst) = self.partition_root_nodes.get_mut(&partition_id)
                             {
-                                if let Some(i) = lst.iter().position(|&x| x == p) {
+                                if let Some(i) = lst.iter().position(|&x| x == this) {
                                     lst.swap_remove(i);
                                 }
                             }
                         } else {
-                            prev = Some(p);
+                            prev = Some(this);
                         }
                     }
                 }
+
+                if link1.is_none() {
+                    break;
+                }
             }
 
-            if first != link_head {
-                // update nodes link
-                *self.partition_nodes.get_mut(&partition_id).unwrap() = link_head;
-            }
-
+            // update node link for partition
+            self.partition_nodes.insert(partition_id, link1);
             // Decrease partitions memory usage
             self.mgr.update_mem_use(partition_id, -(freed_bytes as i32));
 
@@ -83,7 +89,7 @@ impl GcHeap {
         predicate: impl Fn(&mut GcHead) -> bool,
         notify: impl Fn(&GcHead),
     ) -> usize {
-        self.sweep_internal(partition_id, predicate, Some(notify))
+        self.do_sweep(partition_id, predicate, Some(notify))
     }
 
     #[inline(always)]
@@ -92,7 +98,7 @@ impl GcHeap {
         partition_id: GcPartitionId,
         predicate: impl Fn(&mut GcHead) -> bool,
     ) -> usize {
-        self.sweep_internal(partition_id, predicate, Self::NULL_NOTIFY_FN)
+        self.do_sweep(partition_id, predicate, Self::NULL_NOTIFY_FN)
     }
 
     /// Collect garbage on given partition, optionally call notify with node *BEFORE* it is disposed.
@@ -102,8 +108,9 @@ impl GcHeap {
         notify: Option<impl Fn(&GcHead)>,
     ) -> usize {
         debug_assert!(self.partition(partition_id).is_some());
-        self.tracer(partition_id).trace_roots(GcTracer::MARK_FUNC);
-        self.sweep_internal(partition_id, Self::SWEEP_UNMARKED_FUNC, notify)
+        self.tracer(crate::GcTraceRestrict::Collect(partition_id))
+            .trace_roots(GcTracer::MARK_FUNC);
+        self.do_sweep(partition_id, Self::SWEEP_UNMARKED_FUNC, notify)
     }
 
     /// Collect garbage on given partition, call notify with node *BEFORE* it is disposed.
@@ -131,40 +138,46 @@ impl GcHeap {
     }
 
     /// Dispose all nodes along chain
-    pub(crate) fn dispose_all_nodes(&mut self, start: NonNull<GcHead>) -> usize {
-        let mut chain = Some(start);
+    pub(crate) fn dispose_all_nodes(&mut self, head: NonNull<GcHead>) -> usize {
+        let mut link = Some(head);
         let mut freed_bytes = 0;
 
         for &pass in self.gc_type_drop_passes(&mut [0; 4]) {
             log::trace!(
                 "[dipose_all] pass {pass}, count={}",
-                NodeIterator::new(chain).count()
+                NodeLinkIter::new(link).count()
             );
 
-            let mut current = chain;
+            let mut current = link;
             let mut prev: Option<NonNull<GcHead>> = None;
 
-            while let Some(node) = current {
+            while let Some(this) = current {
                 unsafe {
-                    debug_assert!(node.as_ref().test_valid());
+                    #[cfg(debug_assertions)]
+                    this.as_ref().debug_assert_node_valid(self);
 
-                    current = node.as_ref().next;
+                    current = this.as_ref().next;
 
-                    if self.get_node_gc_type(node).drop_pass == pass {
+                    if self.get_node_gc_type(this).drop_pass == pass {
                         if let Some(mut p) = prev {
                             p.as_mut().next = current;
                         } else {
-                            chain = current;
+                            link = current;
                         }
-                        freed_bytes += self.dispose(node);
+
+                        freed_bytes += self.dispose(this);
                     } else {
-                        prev = Some(node);
+                        prev = Some(this);
                     }
                 }
             }
+
+            if link.is_none() {
+                break;
+            }
         }
 
-        debug_assert!(chain.is_none());
+        debug_assert!(link.is_none());
         log::trace!("[dipose_all] done, freed {} bytes", freed_bytes);
 
         freed_bytes
@@ -180,13 +193,7 @@ mod sweep_test {
     fn count_nodes_in_partition(heap: &GcHeap, partition_id: GcPartitionId) -> usize {
         let mut count = 0;
         if let Some(head) = heap.partition_nodes.get(&partition_id).copied().flatten() {
-            let mut current = Some(head);
-            while let Some(node) = current {
-                unsafe {
-                    count += 1;
-                    current = node.as_ref().next;
-                }
-            }
+            count = NodeLinkIter::new(Some(head)).count();
         }
         count
     }
@@ -391,7 +398,7 @@ mod sweep_test {
 
         // Verify root list contains the object
         assert!(
-            heap.partition_roots
+            heap.partition_root_nodes
                 .get(&partition_id)
                 .unwrap()
                 .contains(&objects[0].head_ptr)
@@ -415,7 +422,7 @@ mod sweep_test {
         // Root should be removed from root list
         assert!(
             !heap
-                .partition_roots
+                .partition_root_nodes
                 .get(&partition_id)
                 .unwrap()
                 .contains(&objects[0].head_ptr)

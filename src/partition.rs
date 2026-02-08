@@ -3,7 +3,7 @@
 
 use std::{cell::Cell, collections::HashMap, ptr::NonNull};
 
-use crate::{GcHead, GcHeap, node::GcHeadFlag, node_iterator::NodeIterator};
+use crate::{GcHead, GcHeap, node::GcHeadFlag, node_iterator::NodeLinkIter};
 
 thread_local! {
     /// Thread-local partition ID counter (starts from 1, 0 is invalid/null)
@@ -345,7 +345,7 @@ impl GcHeap {
             .mgr
             .create_partition(Some(memory_limit), GcPartitionId::NONE);
         self.partition_nodes.insert(id, None);
-        self.partition_roots.insert(id, Vec::new());
+        self.partition_root_nodes.insert(id, Vec::new());
 
         id
     }
@@ -360,7 +360,7 @@ impl GcHeap {
     pub fn create_sub_partition(&mut self, parent: GcPartitionId) -> GcPartitionId {
         let id = self.mgr.create_partition(None, parent);
         self.partition_nodes.insert(id, None);
-        self.partition_roots.insert(id, Vec::new());
+        self.partition_root_nodes.insert(id, Vec::new());
         id
     }
 
@@ -375,18 +375,6 @@ impl GcHeap {
     /// Remove a partition, and dispose unused nodes.
     /// For non-root partition, migrate xref nodes is optionally performed.
     pub fn remove_partition(&mut self, partition_id: GcPartitionId) {
-        // O.o
-        unsafe {
-            if partition_id.0 == 14 {
-                for n in self.nodes_iter(partition_id) {
-                    log::debug!("[O.o] DROP 14: {:?}", n.as_ref());
-                    for c in n.as_ref().children(self, GcPartitionId::NONE) {
-                        log::debug!("[O.o] DROP 14:  CHILD {:?}", c.as_ref());
-                    }
-                }
-            }
-        }
-
         let parent_id = self.partition(partition_id).unwrap().parent();
         if parent_id.is_null() {
             return self.remove_root_partition(partition_id);
@@ -405,7 +393,7 @@ impl GcHeap {
             //
             // trace to fix xref tree for descendants
             //
-            if let Some(roots) = self.partition_roots.remove(&pid) {
+            if let Some(roots) = self.partition_root_nodes.remove(&pid) {
                 let it = roots.iter().filter_map(|n| unsafe {
                     let xref = n.as_ref().xref_partition();
                     if !xref.is_null() {
@@ -417,56 +405,57 @@ impl GcHeap {
 
                 for (r, _, _) in it {
                     // for each root xref, use a new tracer with all node's traced flag cleared
-                    let mut tr = self.tracer(pid);
+                    let mut tr = self.tracer(crate::GcTraceRestrict::Collect(pid));
                     tr.fix_xref_tree(r);
                 }
             }
 
-            if let Some(first) = self.partition_nodes.remove(&pid) {
+            if let Some(link0) = self.partition_nodes.remove(&pid) {
                 //
                 // migrate xref nodes
                 //
-                let mut head = first;
-                let mut current = first;
+                let mut link1 = link0;
+                let mut current = link0;
                 let mut prev: Option<NonNull<GcHead>> = None;
 
-                while let Some(mut node) = current {
-                    current = unsafe { node.as_ref().next };
+                while let Some(mut this) = current {
+                    current = unsafe { this.as_ref().next };
 
-                    let xref = unsafe { node.as_ref().xref_partition() };
+                    let xref = unsafe { this.as_ref().xref_partition() };
                     if !xref.is_null() {
-                        log::trace!("[migrate] {:?} -> {xref:?}", unsafe { node.as_ref() });
+                        log::trace!("[migrate] {:?} -> {xref:?}", unsafe { this.as_ref() });
                         debug_assert_ne!(xref, pid);
 
-                        if let Some(last) = prev {
+                        if let Some(p) = prev {
                             unsafe {
-                                (*last.as_ptr()).next = current;
+                                (*p.as_ptr()).next = current;
                             }
                         } else {
-                            head = current;
+                            link1 = current;
                         }
 
                         // clear flags and attach to xref chain
                         unsafe {
-                            let mut f = node.as_ref().flags();
+                            let mut f = this.as_ref().flags();
                             f.remove(GcHeadFlag::ROOT | GcHeadFlag::MARKED | GcHeadFlag::TRACED);
-                            node.as_mut().set_flags(f);
-                            node.as_mut().partition = 0; // clear partition & xref
+                            this.as_mut().set_flags(f);
+                            this.as_mut().partition = 0; // clear partition & xref
+                            this.as_mut().next.take();
                         }
-                        self.attach(xref, node);
+                        self.attach(xref, this);
 
                         // Increase memory usage with rollup to xref partitions
                         self.mgr.update_mem_use(
                             xref,
-                            (self.get_node_gc_type(node).size as usize
+                            (self.get_node_gc_type(this).size as usize
                                 + std::mem::size_of::<GcHead>()) as i32,
                         );
                     } else {
-                        prev = Some(node);
+                        prev = Some(this);
                     }
                 }
 
-                if let Some(first) = head {
+                if let Some(first) = link1 {
                     freed_bytes += self.dispose_all_nodes(first);
                 }
 
@@ -490,12 +479,14 @@ impl GcHeap {
         let mut scopes = Vec::with_capacity(64);
         scopes.push(partition_id);
         self.load_descendants(partition_id, &mut scopes);
+        log::debug!("[descendant_partitions] {:?}", &scopes[1..]);
 
-        for pid in scopes {
+        // from descendants to ancestor - using ::pop() from tail.
+        while let Some(pid) = scopes.pop() {
             if let Some(chain) = self.partition_nodes.remove(&pid).unwrap() {
                 self.dispose_all_nodes(chain);
             }
-            self.partition_roots.remove(&pid);
+            self.partition_root_nodes.remove(&pid);
             self.mgr.partitions.remove(&pid);
         }
     }

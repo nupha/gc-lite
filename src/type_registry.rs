@@ -24,9 +24,9 @@ pub(crate) struct TypeRegistry {
     entries: Vec<GcTypeInfo>,
     /// type ident to idx lookup table
     type_to_idx: HashMap<std::any::TypeId, u8>,
-    /// enabled drop order
-    drop_orders: [i8; 4],
-    drop_orders_count: u8,
+
+    drop_passes: [u8; 4],
+    drop_passes_count: u8,
 }
 
 impl TypeRegistry {
@@ -49,8 +49,8 @@ impl TypeRegistry {
         Self {
             entries,
             type_to_idx: HashMap::with_capacity(8),
-            drop_orders: [-1; 4],
-            drop_orders_count: 0,
+            drop_passes: [0; 4],
+            drop_passes_count: 0,
         }
     }
 
@@ -86,10 +86,13 @@ impl TypeRegistry {
             let info = GcTypeInfo {
                 size: std::mem::size_of::<T>() as u32,
                 trace_fn: trace_fn::<T>,
-                drop_fn: if std::mem::needs_drop::<T>() {
+                drop_fn: {
                     Some(dispose_fn::<T>)
-                } else {
-                    None
+                    // if std::mem::needs_drop::<T>() {
+                    //     Some(dispose_fn::<T>)
+                    // } else {
+                    //     None
+                    // }
                 },
                 drop_pass: if std::mem::needs_drop::<T>() {
                     drop_pass
@@ -122,24 +125,16 @@ impl TypeRegistry {
     }
 
     fn update_drop_passes(&mut self) {
-        self.drop_orders = [-1; 4];
-        for o in self.entries.iter().skip(1).map(|t| t.drop_pass) {
-            self.drop_orders[o as usize] = o as i8;
+        let mut toggles = [false; 4];
+        for i in self.entries.iter().skip(1).map(|t| t.drop_pass) {
+            toggles[i as usize] = true;
         }
 
-        let n = self.drop_orders.iter().filter(|o| **o >= 0).count();
-        self.drop_orders_count = n as u8;
-    }
-
-    /// Get type information by type index
-    #[inline(always)]
-    pub(crate) fn with_type_id<R>(
-        &self,
-        type_id: u8,
-        f: impl FnOnce(&GcTypeInfo) -> R,
-    ) -> Option<R> {
-        debug_assert!(type_id != 0);
-        self.entries.get(type_id as usize).map(f)
+        self.drop_passes_count = 0;
+        for (i, _) in toggles.iter().enumerate().filter(|(_, b)| **b) {
+            self.drop_passes[self.drop_passes_count as usize] = i as u8;
+            self.drop_passes_count += 1;
+        }
     }
 }
 
@@ -152,6 +147,7 @@ pub(super) fn trace_fn<T: GcTracable>(node: NonNull<GcHead>, tr: GcTraceOp) {
 }
 
 /// Generic dispose function, used to call drop_in_place of specific type
+#[inline(never)]
 pub(super) unsafe fn dispose_fn<T>(data_ptr: *mut u8) {
     unsafe { std::ptr::drop_in_place(data_ptr.cast::<T>()) };
 }
@@ -162,25 +158,31 @@ impl GcHeap {
         self.gc_data_types.gc_dtype_id::<T>()
     }
 
-    pub fn set_gc_type_drop_order<T: GcTracable + 'static>(&mut self, order: u8) {
-        self.gc_data_types.set_drop_pass::<T>(order);
+    pub fn set_gc_type_drop_order<T: GcTracable + 'static>(&mut self, pass: u8) {
+        self.gc_data_types.set_drop_pass::<T>(pass);
     }
 
-    pub fn get_node_gc_type(&self, node: NonNull<GcHead>) -> &GcTypeInfo {
+    #[inline]
+    pub(crate) fn get_node_gc_type(&self, node: NonNull<GcHead>) -> &GcTypeInfo {
+        #[cfg(debug_assertions)]
+        {
+            &self.gc_data_types.entries[unsafe { node.as_ref().gc_dtype() as usize }]
+        }
+
+        #[cfg(not(debug_assertions))]
         unsafe {
-            &self
-                .gc_data_types
+            self.gc_data_types
                 .entries
                 .get_unchecked(node.as_ref().gc_dtype() as usize)
         }
     }
 
-    pub(crate) fn gc_type_drop_passes<'a>(&self, pass: &'a mut [u8; 4]) -> &'a [u8] {
-        let mut i = 0;
-        for o in self.gc_data_types.drop_orders.iter().filter(|o| **o >= 0) {
-            pass[i as usize] = *o as u8;
-            i += 1;
+    #[inline]
+    pub(crate) fn gc_type_drop_passes<'a>(&self, passes: &'a mut [u8; 4]) -> &'a [u8] {
+        for i in 0..self.gc_data_types.drop_passes_count as usize {
+            passes[i] = self.gc_data_types.drop_passes[i];
         }
-        pass
+
+        &passes[0..self.gc_data_types.drop_passes_count as usize]
     }
 }
