@@ -4,7 +4,7 @@
 use std::{collections::HashMap, ptr::NonNull};
 
 use crate::{
-    GcError, GcResult, GcTraceRestrict, GcTracer,
+    GcTraceRestrict, GcTracer,
     node::{GcHead, GcRef},
     partition::{GcPartitionId, GcPartitionMgr},
     trace::GcTracable,
@@ -43,7 +43,11 @@ impl Drop for GcHeap {
             }
         }
 
-        debug_assert!(self.debug_living_nodes.is_empty(), "[O.o] has leaked nodes");
+        debug_assert!(
+            self.debug_living_nodes.is_empty(),
+            "[O.o] has leaked nodes {:?}",
+            self.debug_living_nodes
+        );
     }
 }
 
@@ -324,14 +328,7 @@ impl GcHeap {
         }
 
         let mut tr = self.tracer(GcTraceRestrict::Collect(partition_id));
-        tr.trace_iter(stack.iter().copied(), |mut n, _| unsafe {
-            if !n.as_ref().is_marked() {
-                n.as_mut().set_marked(true);
-                true
-            } else {
-                false
-            }
-        });
+        tr.trace_iter(stack.iter().copied(), GcTracer::MARK_FUNC);
 
         let b = unsafe { node.as_ref().is_marked() };
         tr.clear_marked_flag();

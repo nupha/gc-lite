@@ -23,7 +23,7 @@ impl GcHeap {
                     let n = NonNull::new_unchecked(ptr).cast::<GcHead>();
                     debug_assert!(
                         !self.debug_living_nodes.contains(&n),
-                        "node {ptr:?} already exists?"
+                        "node {ptr:?} already exists"
                     );
                     self.debug_living_nodes.insert(n);
                 }
@@ -39,12 +39,10 @@ impl GcHeap {
         debug_assert_ne!(gross_size, 0);
 
         #[cfg(debug_assertions)]
-        {
-            debug_assert!(
-                self.debug_living_nodes.contains(&ptr.cast()),
-                "[O.o] node {ptr:?} has been disposed?"
-            );
-        }
+        debug_assert!(
+            self.debug_living_nodes.contains(&ptr.cast()),
+            "[O.o] node {ptr:?} has been disposed?"
+        );
 
         let ly = Layout::from_size_align(gross_size, std::mem::align_of::<usize>());
 
@@ -87,37 +85,13 @@ impl GcHeap {
                         }
                     };
 
-                    // O.o SLOW DEBUG
-                    #[cfg(debug_assertions)]
+                    // trace payload's descendants for possible cross reference
                     {
-                        let mut tr = crate::GcTracer::new(self, crate::GcTraceRestrict::No, true);
-                        for &link in self.partition_nodes.values() {
-                            if let Some(first) = link {
-                                tr.trace(first, |n, _| {
-                                    debug_assert!(
-                                        n != ptr.cast(),
-                                        "[O.o] node ptr {ptr:?} conflict in reference"
-                                    );
-                                    true
-                                });
-                            }
+                        let mut tr = crate::GcTracer::new(self, crate::GcTraceRestrict::No, false);
+                        payload.trace(tr.ctx());
+                        while let Some(n) = tr.take_traced_nodes().pop_front() {
+                            self.set_xref(partition_id, n);
                         }
-
-                        // // trace payload to detect descendant nodes reference
-                        // let mut tr = crate::GcTracer::new(self, GcPartitionId::NONE, false);
-                        // payload.trace(tr.ctx());
-                        // while let Some(mut n) = tr.traced_nodes.pop_front() {
-                        //     unsafe {
-                        //         debug_assert!(
-                        //             n.as_ref().has_check_ref(),
-                        //             "alloc:{partition_id:?}, ref:{:?}, node: {:?}",
-                        //             n.as_ref().get_partition_id(),
-                        //             n.as_ref()
-                        //         );
-
-                        //         n.as_mut().set_check_ref(false);
-                        //     }
-                        // }
                     }
 
                     let head = ptr.cast::<GcHead>();
@@ -136,12 +110,11 @@ impl GcHeap {
                                 0xFF00_0000 | ((gc_dtype as u32) << 8)
                             }
                         },
+                        ref_count: 0,
                         partition: 0,
                         weak_id: GcWeakRawId::NULL,
                         next: None,
 
-                        #[cfg(debug_assertions)]
-                        dbg_id: head.as_ptr() as usize,
                         #[cfg(debug_assertions)]
                         dbg_type_name: std::any::type_name::<T>(),
                         #[cfg(debug_assertions)]
@@ -178,7 +151,10 @@ impl GcHeap {
         log::trace!("[dispose] {hd:?}");
 
         #[cfg(debug_assertions)]
-        hd.debug_assert_node_valid(self);
+        {
+            assert_eq!(hd.ref_count(), 0);
+            hd.debug_assert_node_valid(self);
+        }
 
         if !hd.weak_id.is_null() {
             // clear weak slot

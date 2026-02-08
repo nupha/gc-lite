@@ -72,7 +72,7 @@ fn demonstrate_out_of_memory() -> GcResult<()> {
     // Clean up - through garbage collection instead of manual release
     println!("  ✓ Automatic cleanup through GC");
     context.set_root(gc1, false);
-    context.collect(partition_id);
+    context.garbage_collect(partition_id);
 
     Ok(())
 }

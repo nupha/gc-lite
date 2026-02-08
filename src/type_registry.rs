@@ -140,6 +140,7 @@ impl TypeRegistry {
 
 fn noop_trace_fn(_: NonNull<GcHead>, _: GcTraceOp) {}
 
+#[inline(never)]
 pub(super) fn trace_fn<T: GcTracable>(node: NonNull<GcHead>, tr: GcTraceOp) {
     unsafe {
         node.as_ref().payload().cast::<T>().as_ref().trace(tr);

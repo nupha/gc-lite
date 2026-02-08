@@ -4,7 +4,8 @@
 use std::ptr::NonNull;
 
 use crate::{
-    GcHeap, node::GcHead, node_iterator::NodeLinkIter, partition::GcPartitionId, trace::GcTracer,
+    GcHeap, GcTraceRestrict, node::GcHead, node_iterator::NodeLinkIter, partition::GcPartitionId,
+    trace::GcTracer,
 };
 
 impl GcHeap {
@@ -36,7 +37,18 @@ impl GcHeap {
 
                         if self.get_node_gc_type(this).drop_pass == pass && predicate(this.as_mut())
                         {
-                            debug_assert!(this.as_ref().xref_partition().is_null());
+                            #[cfg(debug_assertions)]
+                            {
+                                use crate::node::GcHeadFlag;
+
+                                debug_assert!(
+                                    !this.as_ref().flags().contains(GcHeadFlag::MARKED),
+                                    "{:?}",
+                                    this.as_ref()
+                                );
+                                debug_assert_eq!(this.as_ref().ref_count(), 0);
+                                debug_assert!(this.as_ref().xref_partition().is_null());
+                            }
 
                             if let Some(mut p) = prev {
                                 p.as_mut().next = current;
@@ -102,26 +114,26 @@ impl GcHeap {
     }
 
     /// Collect garbage on given partition, optionally call notify with node *BEFORE* it is disposed.
-    fn collect_internal(
+    fn do_garbage_collect(
         &mut self,
         partition_id: GcPartitionId,
         notify: Option<impl Fn(&GcHead)>,
     ) -> usize {
         debug_assert!(self.partition(partition_id).is_some());
-        self.tracer(crate::GcTraceRestrict::Collect(partition_id))
-            .trace_roots(GcTracer::MARK_FUNC);
+        let mut tr = GcTracer::new(self, GcTraceRestrict::No, true);
+        tr.trace_roots(partition_id, GcTracer::MARK_FUNC);
         self.do_sweep(partition_id, Self::SWEEP_UNMARKED_FUNC, notify)
     }
 
     /// Collect garbage on given partition, call notify with node *BEFORE* it is disposed.
     #[inline]
-    pub fn collect_notify(
+    pub fn garbage_collect_notify(
         &mut self,
         partition_id: GcPartitionId,
         notify: impl Fn(&GcHead),
     ) -> usize {
         if self.partition(partition_id).is_some() {
-            self.collect_internal(partition_id, Some(notify))
+            self.do_garbage_collect(partition_id, Some(notify))
         } else {
             0
         }
@@ -129,9 +141,9 @@ impl GcHeap {
 
     /// Collect garbage on given partition
     #[inline]
-    pub fn collect(&mut self, partition_id: GcPartitionId) -> usize {
+    pub fn garbage_collect(&mut self, partition_id: GcPartitionId) -> usize {
         if self.partition(partition_id).is_some() {
-            self.collect_internal(partition_id, Self::NULL_NOTIFY_FN)
+            self.do_garbage_collect(partition_id, Self::NULL_NOTIFY_FN)
         } else {
             0
         }
@@ -270,12 +282,13 @@ mod sweep_test {
 
         // Mark first 3 objects (0, 1, 2) for removal
         let removed = heap.sweep(partition_id, |node| {
-            unsafe {
-                let payload_ptr =
-                    (node as *mut GcHead as *mut u8).add(std::mem::size_of::<GcHead>());
-                let value = *(payload_ptr as *const i32);
-                value < 3 // Remove values 0, 1, 2
+            let payload_ptr = node.payload().cast::<i32>();
+            let value = unsafe { *payload_ptr.as_ptr() };
+            let b = value < 3; // Remove values 0, 1, 2
+            if b {
+                node.set_marked(true);
             }
+            b
         });
 
         assert!(removed > 0, "Should have freed some bytes");

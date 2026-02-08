@@ -34,6 +34,7 @@ pub struct GcHead {
     /// * bit 8-15:  gc datatype id
     /// * bit 0-7:   flags
     pub(super) attrs: u32,
+    pub(super) ref_count: u32,
 
     /// XRef partition id (16bit) + Partition id (16bit)
     pub(super) partition: u32,
@@ -43,8 +44,6 @@ pub struct GcHead {
     /// Pointer to next object (for list traversal)
     pub(super) next: Option<NonNull<GcHead>>,
 
-    #[cfg(debug_assertions)]
-    pub(crate) dbg_id: usize,
     #[cfg(debug_assertions)]
     pub(crate) dbg_type_name: &'static str,
     #[cfg(debug_assertions)]
@@ -58,7 +57,7 @@ impl std::fmt::Debug for GcHead {
         s.field("ptr", &(self as *const Self))
             .field("scope", &self.get_partition_id().0)
             //.field("dtype", &self.gc_dtype())
-            //.field("flags", &self.flags())
+            .field("flags", &self.flags())
             .field("xref", &self.xref_partition().0);
 
         if let Some(w) = self.weak() {
@@ -67,8 +66,7 @@ impl std::fmt::Debug for GcHead {
 
         #[cfg(debug_assertions)]
         {
-            s.field("type_name", &self.dbg_type_name)
-                .field("id", &format!("0x{:x}", self.dbg_id));
+            s.field("type_name", &self.dbg_type_name);
         }
 
         s.finish()
@@ -132,6 +130,11 @@ impl GcHead {
         self.set_flags(f);
     }
 
+    #[inline(always)]
+    pub fn is_traced(&self) -> bool {
+        self.flags().contains(GcHeadFlag::TRACED)
+    }
+
     /// Get partition ID
     #[inline(always)]
     pub fn get_partition_id(&self) -> GcPartitionId {
@@ -143,6 +146,24 @@ impl GcHead {
     pub(crate) fn set_partition_id(&mut self, id: GcPartitionId) {
         debug_assert!(self.get_partition_id().is_null() || self.get_partition_id() == id);
         self.partition = (self.partition & 0xFFFF_0000) | id.0 as u32;
+    }
+
+    #[inline(always)]
+    pub fn inc_ref(&mut self) -> u32 {
+        self.ref_count += 1;
+        self.ref_count
+    }
+
+    #[inline(always)]
+    pub fn dec_ref(&mut self) -> u32 {
+        debug_assert!(self.ref_count > 0);
+        self.ref_count -= 1;
+        self.ref_count
+    }
+
+    #[inline(always)]
+    pub fn ref_count(&self) -> u32 {
+        self.ref_count
     }
 
     /// get node weakref info
@@ -162,24 +183,11 @@ impl GcHead {
 
         unsafe { NonNull::from_ref(self).add(1).cast::<u8>() }
     }
-
-    /// Get one-depth direct children of `self` node
-    pub fn children(&self, heap: &GcHeap, restrict: GcTraceRestrict) -> Vec<NonNull<GcHead>> {
-        let node = NonNull::from_ref(self);
-
-        let mut tr = GcTracer::new(heap, restrict, false);
-        (heap.get_node_gc_type(node).trace_fn)(node, tr.ctx());
-
-        let mut lst = tr.take_traced_nodes();
-        lst.retain(|&x| x != node); // remove self reference
-        lst.into()
-    }
 }
 
 #[cfg(debug_assertions)]
 impl GcHead {
     pub fn debug_assert_node_valid_simple(&self) {
-        debug_assert_eq!(self as *const Self as usize, self.dbg_id);
         debug_assert!(
             self.gc_dtype() != 0
                 && self.flags().contains(GcHeadFlag::MAGIC_NUM)
@@ -207,7 +215,6 @@ impl GcHead {
         let mut tr = heap.tracer(GcTraceRestrict::No);
         tr.trace(NonNull::from_ref(self), |n, _| unsafe {
             n.as_ref().debug_assert_node_valid(heap);
-            true
         });
     }
 }
