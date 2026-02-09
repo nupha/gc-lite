@@ -7,7 +7,10 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::{GcHeap, GcPartitionId, GcTracable, GcTraceRestrict, GcWeak, weak::GcWeakRawId};
+use crate::{
+    GcHeap, GcPartitionId, GcTracable, GcTraceRestrict, GcWeak, type_registry::TypeRegistry,
+    weak::GcWeakRawId,
+};
 
 bitflags::bitflags! {
     #[repr(transparent)]
@@ -137,14 +140,9 @@ impl GcHead {
         GcPartitionId((self.partition & 0x0000_FFFF) as u16)
     }
 
-    #[deprecated(note = "alias to ::scope_id()")]
-    pub fn get_partition_id(&self) -> GcPartitionId {
-        self.scope_id()
-    }
-
-    /// Set partition ID
+    /// Set scope ID
     #[inline(always)]
-    pub(crate) fn set_partition_id(&mut self, id: GcPartitionId) {
+    pub(crate) fn set_scope_id(&mut self, id: GcPartitionId) {
         debug_assert!(self.scope_id().is_null() || self.scope_id() == id);
         self.partition = (self.partition & 0xFFFF_0000) | id.0 as u32;
     }
@@ -183,6 +181,18 @@ impl GcHead {
         self.debug_assert_node_valid_simple();
 
         unsafe { NonNull::from_ref(self).add(1).cast::<u8>() }
+    }
+
+    /// Get GcRef<T> from node. if node is not of type T, returns None
+    pub fn gc_ref<T: GcTracable>(&self) -> Option<GcRef<T>> {
+        if TypeRegistry::type_id_of::<T>().is_some_and(|i| i == self.gc_dtype()) {
+            Some(GcRef::<T> {
+                head_ptr: NonNull::from_ref(self),
+                _marker: PhantomData,
+            })
+        } else {
+            None
+        }
     }
 }
 
@@ -305,7 +315,7 @@ impl<T: GcTracable> GcRef<T> {
                 .cast::<GcHead>()
         };
 
-        if let Some(dtype_id) = heap.type_id_of::<T>()
+        if let Some(dtype_id) = GcHeap::type_id_of::<T>()
             && dtype_id == unsafe { node.as_ref().gc_dtype() }
         {
             #[cfg(debug_assertions)]

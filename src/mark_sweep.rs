@@ -5,7 +5,7 @@ use std::ptr::NonNull;
 
 use crate::{
     GcHeap, GcTraceRestrict, node::GcHead, node_iterator::NodeLinkIter, partition::GcPartitionId,
-    trace::GcTracer,
+    trace::GcTracer, type_registry::TypeRegistry,
 };
 
 impl GcHeap {
@@ -23,7 +23,7 @@ impl GcHeap {
             let mut freed_bytes = 0;
             let call_on_dispose = !std::ptr::addr_eq(&on_dispose, &Self::DUMMY_DISPOSE_CALLBACK);
 
-            for &pass in self.gc_type_drop_passes(&mut [0; 4]) {
+            for &pass in TypeRegistry::gc_type_drop_passes(&mut [0; 4]) {
                 let mut current = link1;
                 let mut prev: Option<NonNull<GcHead>> = None;
 
@@ -34,7 +34,8 @@ impl GcHeap {
 
                         current = this.as_mut().next;
 
-                        if self.get_node_gc_type(this).drop_pass == pass && predicate(this.as_mut())
+                        if predicate(this.as_mut())
+                            && TypeRegistry::with_node_gc_type(this, |ty| ty.drop_pass) == pass
                         {
                             #[cfg(debug_assertions)]
                             {
@@ -118,7 +119,7 @@ impl GcHeap {
         let mut link = Some(head);
         let mut freed_bytes = 0;
 
-        for &pass in self.gc_type_drop_passes(&mut [0; 4]) {
+        for &pass in TypeRegistry::gc_type_drop_passes(&mut [0; 4]) {
             log::trace!(
                 "[dipose_all] pass {pass}, count={}",
                 NodeLinkIter::new(link).count()
@@ -134,7 +135,7 @@ impl GcHeap {
 
                     current = this.as_ref().next;
 
-                    if self.get_node_gc_type(this).drop_pass == pass {
+                    if TypeRegistry::with_node_gc_type(this, |ty| ty.drop_pass) == pass {
                         if let Some(mut p) = prev {
                             p.as_mut().next = current;
                         } else {
@@ -312,7 +313,13 @@ mod sweep_test {
             .collect();
 
         // Remove all nodes
-        let removed = heap.sweep(partition_id, |_| true, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        let removed = heap.sweep(
+            partition_id,
+            |_| true,
+            |n| {
+                println!("dispose {n:?}");
+            },
+        );
 
         assert!(removed > 0, "Should have freed some bytes");
 

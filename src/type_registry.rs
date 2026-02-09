@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{collections::HashMap, ptr::NonNull};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    ops::{Deref, DerefMut},
+    ptr::NonNull,
+};
 
 use crate::{GcHead, GcHeap, GcTracable, trace::GcTraceOp};
 
@@ -18,7 +23,6 @@ pub struct GcTypeInfo {
     pub type_name: &'static str,
 }
 
-/// Data type info manager
 pub(crate) struct TypeRegistry {
     /// type_info registry list
     types: Vec<GcTypeInfo>,
@@ -31,7 +35,7 @@ pub(crate) struct TypeRegistry {
 
 impl TypeRegistry {
     pub(crate) fn new() -> Self {
-        let mut entries: Vec<GcTypeInfo> = Vec::with_capacity(16);
+        let mut entries: Vec<GcTypeInfo> = Vec::with_capacity(8);
 
         // type slot #0 is not used.
         entries.push(GcTypeInfo {
@@ -52,12 +56,6 @@ impl TypeRegistry {
             drop_passes: [0; 4],
             drop_passes_count: 0,
         }
-    }
-
-    pub(crate) fn gc_dtype_info<T: GcTracable + 'static>(&self) -> Option<&GcTypeInfo> {
-        self.type_to_idx
-            .get(&std::any::TypeId::of::<T>())
-            .and_then(|&i| self.types.get(i as usize))
     }
 
     #[inline(always)]
@@ -136,6 +134,51 @@ impl TypeRegistry {
             self.drop_passes_count += 1;
         }
     }
+
+    #[inline(always)]
+    pub(crate) fn with_gc_data_types<R>(f: impl FnOnce(&TypeRegistry) -> R) -> R {
+        GC_TYPES.with(|s| f(s.borrow().deref()))
+    }
+
+    #[inline(always)]
+    pub(crate) fn with_gc_data_types_mut<R>(f: impl FnOnce(&mut TypeRegistry) -> R) -> R {
+        GC_TYPES.with(|s| f(s.borrow_mut().deref_mut()))
+    }
+
+    #[inline(always)]
+    pub fn type_id_of<T: GcTracable + 'static>() -> Option<u8> {
+        Self::with_gc_data_types(|tt| tt.gc_dtype_id::<T>())
+    }
+
+    pub fn set_gc_type_drop_pass<T: GcTracable + 'static>(pass: u8) {
+        Self::with_gc_data_types_mut(|tt| {
+            tt.set_drop_pass::<T>(pass);
+        })
+    }
+
+    #[inline]
+    pub(crate) fn with_node_gc_type<R>(
+        node: NonNull<GcHead>,
+        f: impl FnOnce(&GcTypeInfo) -> R,
+    ) -> R {
+        let id = unsafe { node.as_ref().gc_dtype() } as usize;
+        Self::with_gc_data_types(|tt| unsafe {
+            debug_assert!(id < tt.types.len());
+            f(tt.types.get_unchecked(id))
+        })
+    }
+
+    #[inline]
+    pub(crate) fn gc_type_drop_passes<'a>(passes: &'a mut [u8; 4]) -> &'a [u8] {
+        let cnt = Self::with_gc_data_types(|tt| {
+            for i in 0..tt.drop_passes_count as usize {
+                passes[i] = tt.drop_passes[i];
+            }
+            tt.drop_passes_count
+        });
+
+        &passes[0..cnt as usize]
+    }
 }
 
 fn noop_trace_fn(_: NonNull<GcHead>, _: GcTraceOp) {}
@@ -153,37 +196,31 @@ pub(super) unsafe fn drop_fn<T>(data_ptr: *mut u8) {
     unsafe { std::ptr::drop_in_place(data_ptr.cast::<T>()) };
 }
 
+thread_local! {
+    static GC_TYPES: RefCell<TypeRegistry> = RefCell::new(TypeRegistry::new());
+}
+
 impl GcHeap {
     #[inline(always)]
-    pub fn type_id_of<T: GcTracable + 'static>(&self) -> Option<u8> {
-        self.gc_data_types.gc_dtype_id::<T>()
+    pub fn type_id_of<T: GcTracable + 'static>() -> Option<u8> {
+        TypeRegistry::type_id_of::<T>()
     }
 
-    pub fn set_gc_type_drop_order<T: GcTracable + 'static>(&mut self, pass: u8) {
-        self.gc_data_types.set_drop_pass::<T>(pass);
+    #[inline(always)]
+    pub fn set_gc_type_drop_pass<T: GcTracable + 'static>(pass: u8) {
+        TypeRegistry::set_gc_type_drop_pass::<T>(pass);
     }
 
-    #[inline]
-    pub(crate) fn get_node_gc_type(&self, node: NonNull<GcHead>) -> &GcTypeInfo {
-        #[cfg(debug_assertions)]
-        {
-            &self.gc_data_types.types[unsafe { node.as_ref().gc_dtype() as usize }]
-        }
-
-        #[cfg(not(debug_assertions))]
-        unsafe {
-            self.gc_data_types
-                .entries
-                .get_unchecked(node.as_ref().gc_dtype() as usize)
-        }
+    #[inline(always)]
+    pub(crate) fn with_node_gc_type<R>(
+        node: NonNull<GcHead>,
+        f: impl FnOnce(&GcTypeInfo) -> R,
+    ) -> R {
+        TypeRegistry::with_node_gc_type(node, f)
     }
 
-    #[inline]
-    pub(crate) fn gc_type_drop_passes<'a>(&self, passes: &'a mut [u8; 4]) -> &'a [u8] {
-        for i in 0..self.gc_data_types.drop_passes_count as usize {
-            passes[i] = self.gc_data_types.drop_passes[i];
-        }
-
-        &passes[0..self.gc_data_types.drop_passes_count as usize]
+    #[inline(always)]
+    pub(crate) fn gc_type_drop_passes<'a>(passes: &'a mut [u8; 4]) -> &'a [u8] {
+        TypeRegistry::gc_type_drop_passes(passes)
     }
 }

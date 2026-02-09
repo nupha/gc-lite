@@ -4,7 +4,8 @@
 use std::{alloc::Layout, marker::PhantomData, ptr::NonNull};
 
 use crate::{
-    GcError, GcHead, GcHeap, GcPartitionId, GcRef, GcTracable, unlikely, weak::GcWeakRawId,
+    GcError, GcHead, GcHeap, GcPartitionId, GcRef, GcTracable, type_registry::TypeRegistry,
+    unlikely, weak::GcWeakRawId,
 };
 
 impl GcHeap {
@@ -76,7 +77,8 @@ impl GcHeap {
                 {
                     return Err((GcError::PartitionFull, payload));
                 } else {
-                    let gc_dtype = self.gc_data_types.register::<T>(0);
+                    let gc_dtype = TypeRegistry::with_gc_data_types_mut(|tt| tt.register::<T>(0));
+                    // let gc_dtype = self.gc_data_types_mut().register::<T>(0);
 
                     let ptr = match self.mem_alloc(gross_size) {
                         Some(p) => p,
@@ -165,21 +167,14 @@ impl GcHeap {
             }
         }
 
-        let ty = self.get_node_gc_type(node);
-        let gross_size = std::mem::size_of::<GcHead>() + ty.size as usize;
+        let (size, drop_fn) = TypeRegistry::with_node_gc_type(node, |ty| (ty.size, ty.drop_fn));
+        let gross_size = std::mem::size_of::<GcHead>() + size as usize;
 
         unsafe {
-            // #[cfg(debug_assertions)]
-            // {
-            //     (*node.as_ptr()).attrs = 0;
-            //     (*node.as_ptr()).weak_id = GcWeakRawId::NULL;
-            //     (*node.as_ptr()).next.take();
-            // }
-
             std::ptr::drop_in_place(node.cast::<GcHead>().as_ptr());
         }
 
-        if let Some(f) = ty.drop_fn {
+        if let Some(f) = drop_fn {
             unsafe {
                 f(node.as_ref().payload().as_ptr());
             }

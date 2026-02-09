@@ -431,7 +431,7 @@ impl GcHeap {
                         // Increase memory usage with rollup to xref partitions
                         self.mgr.update_mem_use(
                             xref,
-                            (self.get_node_gc_type(this).size as usize
+                            (Self::with_node_gc_type(this, |ty| ty.size) as usize
                                 + std::mem::size_of::<GcHead>()) as i32,
                         );
                     } else {

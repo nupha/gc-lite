@@ -7,6 +7,7 @@ use crate::{
     GcHeap, GcPartitionId, GcRef,
     node::{GcHead, GcNodeFlag},
     node_iterator::NodeLinkIter,
+    type_registry::TypeRegistry,
 };
 
 /// Garbage collection object tracing trait
@@ -182,7 +183,7 @@ impl<'a> GcTracer<'a> {
 
                 if self.can_trace(pid) {
                     // collect direct children nodes of `node`
-                    (self.heap().get_node_gc_type(node).trace_fn)(node, self.ctx());
+                    (TypeRegistry::with_node_gc_type(node, |ty| ty.trace_fn))(node, self.ctx());
                 }
             }
         }
@@ -224,7 +225,7 @@ impl<'a> GcTracer<'a> {
             root_node.as_mut().set_flags(flags);
         }
 
-        (self.heap().get_node_gc_type(root_node).trace_fn)(root_node, self.ctx());
+        (TypeRegistry::with_node_gc_type(root_node, |ty| ty.trace_fn))(root_node, self.ctx());
 
         for sub in self.take_traced_nodes() {
             self.set_xref_recursive(sub, xref);
@@ -288,7 +289,7 @@ impl<'a> GcTracer<'a> {
         };
 
         if trace_sub {
-            (self.heap().get_node_gc_type(node).trace_fn)(node, self.ctx());
+            (TypeRegistry::with_node_gc_type(node, |ty| ty.trace_fn))(node, self.ctx());
 
             for ch in self.take_traced_nodes() {
                 unsafe {

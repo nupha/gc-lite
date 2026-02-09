@@ -8,7 +8,6 @@ use crate::{
     node::{GcHead, GcRef},
     partition::{GcPartitionId, GcPartitionMgr},
     trace::GcTracable,
-    type_registry::TypeRegistry,
 };
 
 pub struct GcHeap {
@@ -20,14 +19,11 @@ pub struct GcHeap {
     pub(super) partition_root_nodes: HashMap<GcPartitionId, Vec<NonNull<GcHead>>>,
     /// Weak reference list, each slot stores (version, GcHeader)
     pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
-    /// Type registry
-    pub(super) gc_data_types: TypeRegistry,
+    /// User provided opaque raw pointer
+    opaque: *mut u8,
 
     #[cfg(debug_assertions)]
     pub(crate) dbg_living_nodes: std::collections::HashSet<NonNull<GcHead>>,
-
-    /// User provided opaque raw pointer
-    opaque: *mut u8,
 }
 
 impl Drop for GcHeap {
@@ -52,6 +48,9 @@ impl Drop for GcHeap {
 }
 
 impl GcHeap {
+    //
+    // default callbacks
+    //
     pub const DUMMY_MIGRATE_CALLBACK: fn(&GcHead, GcPartitionId) = |_, _| {};
     pub const DUMMY_DISPOSE_CALLBACK: fn(&GcHead) = |_| {};
 
@@ -64,7 +63,6 @@ impl GcHeap {
             partition_nodes: HashMap::with_capacity(8),
             partition_root_nodes: HashMap::with_capacity(8),
             weak_slots: Vec::new(),
-            gc_data_types: TypeRegistry::new(),
             opaque: std::ptr::null_mut(),
 
             #[cfg(debug_assertions)]
@@ -128,7 +126,7 @@ impl GcHeap {
             debug_assert!(node.as_ref().scope_id().is_null());
             debug_assert!(node.as_ref().next.is_none());
 
-            node.as_mut().set_partition_id(partition_id);
+            node.as_mut().set_scope_id(partition_id);
 
             let cur_head = self
                 .partition_nodes
@@ -139,49 +137,6 @@ impl GcHeap {
             self.partition_nodes.insert(partition_id, Some(node));
         }
     }
-
-    // /// Remove a node from partition
-    // pub(crate) fn detach(&mut self, node: NonNull<GcHead>) {
-    //     let partition_id = unsafe { node.as_ref().get_partition_id() };
-
-    //     if !partition_id.is_null() {
-    //         let chain = self.partition_nodes.get_mut(&partition_id).unwrap();
-
-    //         let mut current = *chain;
-    //         let mut prev: Option<NonNull<GcHead>> = None;
-
-    //         while let Some(header) = current {
-    //             unsafe {
-    //                 if header == node {
-    //                     // take out from chain
-    //                     if let Some(mut p) = prev {
-    //                         p.as_mut().next = header.as_ref().next;
-    //                     } else {
-    //                         *chain = header.as_ref().next;
-    //                     }
-
-    //                     if node.as_ref().is_root() {
-    //                         if let Some(roots) = self.partition_root_nodes.get_mut(&partition_id) {
-    //                             roots.retain(|p| node != *p);
-    //                         }
-    //                         (*node.as_ptr()).set_root(false);
-    //                     }
-
-    //                     // clear partition id
-    //                     (*node.as_ptr()).partition = GcPartitionId::NONE.0 as _;
-
-    //                     return;
-    //                 }
-
-    //                 prev = Some(header);
-    //                 current = header.as_ref().next;
-    //             }
-    //         }
-
-    //         #[cfg(debug_assertions)]
-    //         unreachable!("node not exist");
-    //     }
-    // }
 
     /// Set/unset a node to be root
     pub fn set_root_node(&mut self, node: NonNull<GcHead>, is_root: bool) {
