@@ -24,7 +24,7 @@ pub struct GcHeap {
     pub(super) gc_data_types: TypeRegistry,
 
     #[cfg(debug_assertions)]
-    pub(crate) debug_living_nodes: std::collections::HashSet<NonNull<GcHead>>,
+    pub(crate) dbg_living_nodes: std::collections::HashSet<NonNull<GcHead>>,
 
     /// User provided opaque raw pointer
     opaque: *mut u8,
@@ -39,19 +39,22 @@ impl Drop for GcHeap {
 
         for (_, link) in kv.drain() {
             if let Some(link) = link {
-                self.dispose_all_nodes(link);
+                self.dispose_all_nodes(link, Self::DUMMY_DISPOSE_CALLBACK);
             }
         }
 
         debug_assert!(
-            self.debug_living_nodes.is_empty(),
+            self.dbg_living_nodes.is_empty(),
             "[O.o] has leaked nodes {:?}",
-            self.debug_living_nodes
+            self.dbg_living_nodes
         );
     }
 }
 
 impl GcHeap {
+    pub const DUMMY_MIGRATE_CALLBACK: fn(&GcHead, GcPartitionId) = |_, _| {};
+    pub const DUMMY_DISPOSE_CALLBACK: fn(&GcHead) = |_| {};
+
     /// Create a new garbage collection heap
     pub fn new() -> Self {
         let partitions = GcPartitionMgr::new();
@@ -65,7 +68,7 @@ impl GcHeap {
             opaque: std::ptr::null_mut(),
 
             #[cfg(debug_assertions)]
-            debug_living_nodes: std::collections::HashSet::with_capacity(1024),
+            dbg_living_nodes: std::collections::HashSet::with_capacity(1024),
         }
     }
 
@@ -122,7 +125,7 @@ impl GcHeap {
         debug_assert!(self.partition_nodes.contains_key(&partition_id));
 
         unsafe {
-            debug_assert!(node.as_ref().get_partition_id().is_null());
+            debug_assert!(node.as_ref().scope_id().is_null());
             debug_assert!(node.as_ref().next.is_none());
 
             node.as_mut().set_partition_id(partition_id);
@@ -183,7 +186,7 @@ impl GcHeap {
     /// Set/unset a node to be root
     pub fn set_root_node(&mut self, node: NonNull<GcHead>, is_root: bool) {
         unsafe {
-            let pid = (*node.as_ptr()).get_partition_id();
+            let pid = (*node.as_ptr()).scope_id();
 
             (*node.as_ptr()).set_root(is_root);
 
@@ -281,7 +284,7 @@ impl GcHeap {
 
     /// Check if `node` was allocated in this heap
     pub fn contains(&self, node: NonNull<GcHead>) -> bool {
-        self.nodes(unsafe { node.as_ref().get_partition_id() })
+        self.nodes(unsafe { node.as_ref().scope_id() })
             .any(|p| p == node)
     }
 
@@ -306,7 +309,7 @@ impl GcHeap {
             return false;
         }
 
-        let partition_id = unsafe { node.as_ref().get_partition_id() };
+        let partition_id = unsafe { node.as_ref().scope_id() };
 
         // 用于记录已访问的节点，避免循环引用导致的无限递归
         let mut visited = HashSet::new();
@@ -321,7 +324,7 @@ impl GcHeap {
                 continue;
             }
 
-            if unsafe { start.as_ref().get_partition_id() } == partition_id {
+            if unsafe { start.as_ref().scope_id() } == partition_id {
                 stack.push(start);
                 visited.insert(start);
             }

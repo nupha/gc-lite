@@ -3,7 +3,7 @@
 
 use std::{cell::Cell, collections::HashMap, ptr::NonNull};
 
-use crate::{GcHead, GcHeap, node::GcHeadFlag, node_iterator::NodeLinkIter};
+use crate::{GcHead, GcHeap, node::GcNodeFlag};
 
 thread_local! {
     /// Thread-local partition ID counter (starts from 1, 0 is invalid/null)
@@ -257,32 +257,6 @@ impl GcPartitionMgr {
         res
     }
 
-    /// Check if any partitions need garbage collection
-    pub fn partitions_needing_gc(&self) -> Vec<GcPartitionId> {
-        self.partitions
-            .iter()
-            .filter(|(_, partition)| partition.should_gc())
-            .map(|(id, _)| *id)
-            .collect()
-    }
-
-    /// Get root partition ID (the topmost ancestor)
-    pub fn root_of(&self, id: GcPartitionId) -> GcPartitionId {
-        let mut current_id = id;
-        let mut root = current_id;
-
-        while current_id != GcPartitionId::NONE {
-            if let Some(partition) = self.partitions.get(&current_id) {
-                root = current_id;
-                current_id = partition.parent;
-            } else {
-                break;
-            }
-        }
-
-        root
-    }
-
     /// Check if the given partition ID is an ancestor of the specified partition
     ///
     /// # Parameters
@@ -374,10 +348,15 @@ impl GcHeap {
 
     /// Remove a partition, and dispose unused nodes.
     /// For non-root partition, migrate xref nodes is optionally performed.
-    pub fn remove_partition(&mut self, partition_id: GcPartitionId) {
+    pub fn remove_partition(
+        &mut self,
+        partition_id: GcPartitionId,
+        on_migrate: impl Fn(&GcHead, GcPartitionId),
+        on_dispose: impl Fn(&GcHead),
+    ) {
         let parent_id = self.partition(partition_id).unwrap().parent();
         if parent_id.is_null() {
-            return self.remove_root_partition(partition_id);
+            return self.remove_root_partition(partition_id, on_dispose);
         }
 
         let mut scopes = Vec::<GcPartitionId>::with_capacity(64);
@@ -385,6 +364,7 @@ impl GcHeap {
         self.load_descendants(partition_id, &mut scopes);
 
         // remove resursivly from leaves to partition
+        let call_on_migrate = !std::ptr::addr_eq(&on_migrate, &GcHeap::DUMMY_MIGRATE_CALLBACK);
         let mut freed_bytes = 0;
 
         while let Some(pid) = scopes.pop() {
@@ -434,10 +414,14 @@ impl GcHeap {
                             link1 = current;
                         }
 
+                        if call_on_migrate {
+                            on_migrate(unsafe { this.as_ref() }, xref);
+                        }
+
                         // clear flags and attach to xref chain
                         unsafe {
                             let mut f = this.as_ref().flags();
-                            f.remove(GcHeadFlag::ROOT | GcHeadFlag::MARKED | GcHeadFlag::TRACED);
+                            f.remove(GcNodeFlag::ROOT | GcNodeFlag::MARKED | GcNodeFlag::TRACED);
                             this.as_mut().set_flags(f);
                             this.as_mut().partition = 0; // clear partition & xref
                             this.as_mut().next.take();
@@ -456,7 +440,7 @@ impl GcHeap {
                 }
 
                 if let Some(first) = link1 {
-                    freed_bytes += self.dispose_all_nodes(first);
+                    freed_bytes += self.dispose_all_nodes(first, &on_dispose);
                 }
 
                 self.mgr.partitions.remove(&pid);
@@ -472,7 +456,11 @@ impl GcHeap {
         }
     }
 
-    pub(crate) fn remove_root_partition(&mut self, partition_id: GcPartitionId) {
+    pub(crate) fn remove_root_partition(
+        &mut self,
+        partition_id: GcPartitionId,
+        on_dispose: impl Fn(&GcHead),
+    ) {
         log::trace!("[remove_root_partition] {partition_id:?}");
         debug_assert!(self.partition(partition_id).unwrap().is_root());
 
@@ -484,7 +472,7 @@ impl GcHeap {
         // from descendants to ancestor - using ::pop() from tail.
         while let Some(pid) = scopes.pop() {
             if let Some(chain) = self.partition_nodes.remove(&pid).unwrap() {
-                self.dispose_all_nodes(chain);
+                self.dispose_all_nodes(chain, &on_dispose);
             }
             self.partition_root_nodes.remove(&pid);
             self.mgr.partitions.remove(&pid);
@@ -699,7 +687,15 @@ mod tests {
         assert_eq!(partition.parent(), GcPartitionId::NONE);
 
         // Clean up partition
-        heap.remove_partition(id);
+        heap.remove_partition(
+            id,
+            |n, p| {
+                println!("migrate {n:?} -> {p:?}");
+            },
+            |n| {
+                println!("dispose: {n:?}");
+            },
+        );
         assert!(heap.partition(id).is_none());
     }
 
@@ -723,7 +719,11 @@ mod tests {
         assert_eq!(root.children()[0], child_id);
 
         // Clean up
-        heap.remove_partition(root_id);
+        heap.remove_partition(
+            root_id,
+            GcHeap::DUMMY_MIGRATE_CALLBACK,
+            GcHeap::DUMMY_DISPOSE_CALLBACK,
+        );
         assert!(heap.partition(root_id).is_none());
         assert!(heap.partition(child_id).is_none());
     }
@@ -749,24 +749,6 @@ mod tests {
         manager.partitions.get_mut(&id).unwrap().set_gc_threshold(0);
         assert!(!manager.partitions.get(&id).unwrap().should_gc());
         assert_eq!(manager.partitions.get(&id).unwrap().gc_threshold(), 0);
-    }
-
-    #[test]
-    fn test_partition_manager() {
-        let mut manager = GcPartitionMgr::new();
-
-        let id1 = manager.create_partition(Some(1024), GcPartitionId::NONE);
-        let id2 = manager.create_partition(None, GcPartitionId::NONE);
-
-        assert!(manager.partitions.get(&id1).is_some());
-        assert!(manager.partitions.get(&id2).is_some());
-
-        manager.remove_partition(id1);
-        assert!(manager.partitions.get(&id1).is_none());
-
-        // Clean up remaining partitions
-        manager.remove_partition(id2);
-        assert!(manager.partitions.get(&id2).is_none());
     }
 
     #[test]
@@ -921,19 +903,6 @@ mod tests {
             60
         ); // 70 - 10
         assert_eq!(manager.partitions.get(&root_id).unwrap().memory_used(), 190); // 200 - 10
-    }
-
-    #[test]
-    fn test_root_of() {
-        let mut manager = GcPartitionMgr::new();
-
-        let root_id = manager.create_partition(Some(2048), GcPartitionId::NONE);
-        let child_id = manager.create_partition(Some(1024), root_id);
-        let grandchild_id = manager.create_partition(Some(512), child_id);
-
-        assert_eq!(manager.root_of(root_id), root_id);
-        assert_eq!(manager.root_of(child_id), root_id);
-        assert_eq!(manager.root_of(grandchild_id), root_id);
     }
 
     #[test]

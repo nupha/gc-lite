@@ -9,20 +9,19 @@ use crate::{
 };
 
 impl GcHeap {
-    const NULL_NOTIFY_FN: Option<fn(&GcHead)> = None;
+    pub const SWEEP_UNMARKED_FUNC: fn(&GcHead) -> bool = |node| !node.is_marked();
 
-    pub const SWEEP_UNMARKED_FUNC: fn(&mut GcHead) -> bool = |node| !node.is_marked();
-
-    /// call optional notify with node *BEFORE* it is disposed.
-    fn do_sweep(
+    /// optionally callback before a node is disposed
+    pub fn sweep(
         &mut self,
         partition_id: GcPartitionId,
-        predicate: impl Fn(&mut GcHead) -> bool,
-        notify: Option<impl Fn(&GcHead)>,
+        predicate: impl Fn(&GcHead) -> bool,
+        on_dispose: impl Fn(&GcHead),
     ) -> usize {
         if let Some(link0) = self.partition_nodes.remove(&partition_id) {
             let mut link1 = link0;
             let mut freed_bytes = 0;
+            let call_on_dispose = !std::ptr::addr_eq(&on_dispose, &Self::DUMMY_DISPOSE_CALLBACK);
 
             for &pass in self.gc_type_drop_passes(&mut [0; 4]) {
                 let mut current = link1;
@@ -39,10 +38,10 @@ impl GcHeap {
                         {
                             #[cfg(debug_assertions)]
                             {
-                                use crate::node::GcHeadFlag;
+                                use crate::node::GcNodeFlag;
 
                                 debug_assert!(
-                                    !this.as_ref().flags().contains(GcHeadFlag::MARKED),
+                                    !this.as_ref().flags().contains(GcNodeFlag::MARKED),
                                     "{:?}",
                                     this.as_ref()
                                 );
@@ -56,10 +55,10 @@ impl GcHeap {
                                 link1 = current;
                             }
 
-                            if let Some(cb) = &notify {
-                                cb(this.as_ref());
-                            }
                             let is_root = this.as_ref().is_root();
+                            if call_on_dispose {
+                                on_dispose(this.as_ref());
+                            }
 
                             freed_bytes += self.dispose(this);
 
@@ -93,64 +92,29 @@ impl GcHeap {
         }
     }
 
-    /// call notify with node *BEFORE* it is disposed.
-    #[inline(always)]
-    pub fn sweep_notify(
-        &mut self,
-        partition_id: GcPartitionId,
-        predicate: impl Fn(&mut GcHead) -> bool,
-        notify: impl Fn(&GcHead),
-    ) -> usize {
-        self.do_sweep(partition_id, predicate, Some(notify))
-    }
-
-    #[inline(always)]
-    pub fn sweep(
-        &mut self,
-        partition_id: GcPartitionId,
-        predicate: impl Fn(&mut GcHead) -> bool,
-    ) -> usize {
-        self.do_sweep(partition_id, predicate, Self::NULL_NOTIFY_FN)
-    }
-
-    /// Collect garbage on given partition, optionally call notify with node *BEFORE* it is disposed.
-    fn do_garbage_collect(
-        &mut self,
-        partition_id: GcPartitionId,
-        notify: Option<impl Fn(&GcHead)>,
-    ) -> usize {
-        debug_assert!(self.partition(partition_id).is_some());
-        let mut tr = GcTracer::new(self, GcTraceRestrict::No, true);
-        tr.trace_roots(partition_id, GcTracer::MARK_FUNC);
-        self.do_sweep(partition_id, Self::SWEEP_UNMARKED_FUNC, notify)
-    }
-
     /// Collect garbage on given partition, call notify with node *BEFORE* it is disposed.
     #[inline]
-    pub fn garbage_collect_notify(
+    pub fn garbage_collect(
         &mut self,
         partition_id: GcPartitionId,
-        notify: impl Fn(&GcHead),
+        on_dispose: impl Fn(&GcHead),
     ) -> usize {
         if self.partition(partition_id).is_some() {
-            self.do_garbage_collect(partition_id, Some(notify))
-        } else {
-            0
-        }
-    }
-
-    /// Collect garbage on given partition
-    #[inline]
-    pub fn garbage_collect(&mut self, partition_id: GcPartitionId) -> usize {
-        if self.partition(partition_id).is_some() {
-            self.do_garbage_collect(partition_id, Self::NULL_NOTIFY_FN)
+            let mut tr = GcTracer::new(self, GcTraceRestrict::No, true);
+            tr.trace_roots(partition_id, GcTracer::MARK_FUNC);
+            self.sweep(partition_id, Self::SWEEP_UNMARKED_FUNC, on_dispose)
         } else {
             0
         }
     }
 
     /// Dispose all nodes along chain
-    pub(crate) fn dispose_all_nodes(&mut self, head: NonNull<GcHead>) -> usize {
+    pub(crate) fn dispose_all_nodes(
+        &mut self,
+        head: NonNull<GcHead>,
+        on_dispose: impl Fn(&GcHead),
+    ) -> usize {
+        let call_on_dispose = !std::ptr::addr_eq(&on_dispose, &Self::DUMMY_DISPOSE_CALLBACK);
         let mut link = Some(head);
         let mut freed_bytes = 0;
 
@@ -175,6 +139,10 @@ impl GcHeap {
                             p.as_mut().next = current;
                         } else {
                             link = current;
+                        }
+
+                        if call_on_dispose {
+                            on_dispose(this.as_ref());
                         }
 
                         freed_bytes += self.dispose(this);
@@ -243,14 +211,20 @@ mod sweep_test {
         assert_eq!(count_nodes_in_partition(&heap, partition_id), 5);
 
         // Create a predicate that removes objects with even values
-        let removed = heap.sweep(partition_id, |node| {
-            unsafe {
-                let payload_ptr =
-                    (node as *mut GcHead as *mut u8).add(std::mem::size_of::<GcHead>());
-                let value = *(payload_ptr as *const i32);
-                value % 2 == 0 // Remove even numbers
-            }
-        });
+        let removed = heap.sweep(
+            partition_id,
+            |node| {
+                unsafe {
+                    let payload_ptr =
+                        (node as *const GcHead as *const u8).add(std::mem::size_of::<GcHead>());
+                    let value = *(payload_ptr as *const i32);
+                    value % 2 == 0 // Remove even numbers
+                }
+            },
+            |n| {
+                println!("dispose node: {n:?}");
+            },
+        );
 
         // Should have removed 3 objects (0, 2, 4 are even)
         assert!(removed > 0, "Should have freed some bytes");
@@ -281,15 +255,15 @@ mod sweep_test {
             .collect();
 
         // Mark first 3 objects (0, 1, 2) for removal
-        let removed = heap.sweep(partition_id, |node| {
-            let payload_ptr = node.payload().cast::<i32>();
-            let value = unsafe { *payload_ptr.as_ptr() };
-            let b = value < 3; // Remove values 0, 1, 2
-            if b {
-                node.set_marked(true);
-            }
-            b
-        });
+        let removed = heap.sweep(
+            partition_id,
+            |node| {
+                let payload_ptr = node.payload().cast::<i32>();
+                let value = unsafe { *payload_ptr.as_ptr() };
+                value < 3 // Remove values 0, 1, 2
+            },
+            GcHeap::DUMMY_DISPOSE_CALLBACK,
+        );
 
         assert!(removed > 0, "Should have freed some bytes");
 
@@ -316,12 +290,12 @@ mod sweep_test {
 
         // Check values are 4 and 3 (in reverse allocation order)
         unsafe {
-            let payload_ptr1 = (nodes[0].as_ptr() as *mut u8).add(std::mem::size_of::<GcHead>());
-            let value1 = *(payload_ptr1 as *const i32);
+            let payload_ptr1 = nodes[0].as_ref().payload().cast::<i32>();
+            let value1 = *(payload_ptr1.as_ptr());
             assert_eq!(value1, 4);
 
-            let payload_ptr2 = (nodes[1].as_ptr() as *mut u8).add(std::mem::size_of::<GcHead>());
-            let value2 = *(payload_ptr2 as *const i32);
+            let payload_ptr2 = nodes[1].as_ref().payload().cast::<i32>();
+            let value2 = *(payload_ptr2.as_ptr());
             assert_eq!(value2, 3);
         }
     }
@@ -338,7 +312,7 @@ mod sweep_test {
             .collect();
 
         // Remove all nodes
-        let removed = heap.sweep(partition_id, |_| true);
+        let removed = heap.sweep(partition_id, |_| true, GcHeap::DUMMY_DISPOSE_CALLBACK);
 
         assert!(removed > 0, "Should have freed some bytes");
 
@@ -365,11 +339,15 @@ mod sweep_test {
             .collect();
 
         // Remove only middle node (value 2)
-        let removed = heap.sweep(partition_id, |node| unsafe {
-            let payload_ptr = (node as *mut GcHead as *mut u8).add(std::mem::size_of::<GcHead>());
-            let value = *(payload_ptr as *const i32);
-            value == 2
-        });
+        let removed = heap.sweep(
+            partition_id,
+            |node| unsafe {
+                let payload_ptr = node.payload().cast::<i32>();
+                let value = *(payload_ptr.as_ptr());
+                value == 2
+            },
+            GcHeap::DUMMY_DISPOSE_CALLBACK,
+        );
 
         assert!(removed > 0, "Should have freed some bytes");
 
@@ -418,14 +396,17 @@ mod sweep_test {
         );
 
         // Remove the root object
-        let removed = heap.sweep(partition_id, |node| {
-            unsafe {
-                let payload_ptr =
-                    (node as *mut GcHead as *mut u8).add(std::mem::size_of::<GcHead>());
-                let value = *(payload_ptr as *const i32);
-                value == 0 // Remove value 0 (the root)
-            }
-        });
+        let removed = heap.sweep(
+            partition_id,
+            |node| {
+                unsafe {
+                    let payload_ptr = node.payload().cast::<i32>();
+                    let value = *(payload_ptr.as_ptr());
+                    value == 0 // Remove value 0 (the root)
+                }
+            },
+            GcHeap::DUMMY_DISPOSE_CALLBACK,
+        );
 
         assert!(removed > 0, "Should have freed some bytes");
 
@@ -449,7 +430,7 @@ mod sweep_test {
         let partition_id = heap.create_root_partition(4096);
 
         // No objects allocated, sweep should return 0
-        let removed = heap.sweep(partition_id, |_| true);
+        let removed = heap.sweep(partition_id, |_| true, GcHeap::DUMMY_DISPOSE_CALLBACK);
         assert_eq!(removed, 0, "Should return 0 for empty partition");
     }
 
@@ -460,7 +441,11 @@ mod sweep_test {
         let non_existent_partition = GcPartitionId(9999);
 
         // Non-existent partition should return 0
-        let removed = heap.sweep(non_existent_partition, |_| true);
+        let removed = heap.sweep(
+            non_existent_partition,
+            |_| true,
+            GcHeap::DUMMY_DISPOSE_CALLBACK,
+        );
         assert_eq!(removed, 0, "Should return 0 for non-existent partition");
     }
 }

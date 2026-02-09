@@ -21,7 +21,7 @@ pub struct GcTypeInfo {
 /// Data type info manager
 pub(crate) struct TypeRegistry {
     /// type_info registry list
-    entries: Vec<GcTypeInfo>,
+    types: Vec<GcTypeInfo>,
     /// type ident to idx lookup table
     type_to_idx: HashMap<std::any::TypeId, u8>,
 
@@ -47,7 +47,7 @@ impl TypeRegistry {
         });
 
         Self {
-            entries,
+            types: entries,
             type_to_idx: HashMap::with_capacity(8),
             drop_passes: [0; 4],
             drop_passes_count: 0,
@@ -57,7 +57,7 @@ impl TypeRegistry {
     pub(crate) fn gc_dtype_info<T: GcTracable + 'static>(&self) -> Option<&GcTypeInfo> {
         self.type_to_idx
             .get(&std::any::TypeId::of::<T>())
-            .and_then(|&i| self.entries.get(i as usize))
+            .and_then(|&i| self.types.get(i as usize))
     }
 
     #[inline(always)]
@@ -76,7 +76,7 @@ impl TypeRegistry {
             idx
         } else {
             // Create type entry
-            let idx = self.entries.len();
+            let idx = self.types.len();
             debug_assert!(idx != 0);
             if idx == u8::MAX as usize {
                 panic!("too may node types: 255 in max");
@@ -87,12 +87,12 @@ impl TypeRegistry {
                 size: std::mem::size_of::<T>() as u32,
                 trace_fn: trace_fn::<T>,
                 drop_fn: {
-                    Some(dispose_fn::<T>)
-                    // if std::mem::needs_drop::<T>() {
-                    //     Some(dispose_fn::<T>)
-                    // } else {
-                    //     None
-                    // }
+                    //Some(drop_fn::<T>)
+                    if std::mem::needs_drop::<T>() {
+                        Some(drop_fn::<T>)
+                    } else {
+                        None
+                    }
                 },
                 drop_pass: if std::mem::needs_drop::<T>() {
                     drop_pass
@@ -105,7 +105,7 @@ impl TypeRegistry {
                 #[cfg(debug_assertions)]
                 type_name,
             };
-            self.entries.push(info);
+            self.types.push(info);
             self.type_to_idx.insert(type_id, gc_type_id);
 
             self.update_drop_passes();
@@ -117,7 +117,7 @@ impl TypeRegistry {
     fn set_drop_pass<T: GcTracable + 'static>(&mut self, pass: u8) {
         debug_assert!(pass < 4);
         if let Some(t) = self.gc_dtype_id::<T>() {
-            self.entries[t as usize].drop_pass = pass;
+            self.types[t as usize].drop_pass = pass;
             self.update_drop_passes();
         } else {
             self.register::<T>(pass);
@@ -126,7 +126,7 @@ impl TypeRegistry {
 
     fn update_drop_passes(&mut self) {
         let mut toggles = [false; 4];
-        for i in self.entries.iter().skip(1).map(|t| t.drop_pass) {
+        for i in self.types.iter().skip(1).map(|t| t.drop_pass) {
             toggles[i as usize] = true;
         }
 
@@ -149,7 +149,7 @@ pub(super) fn trace_fn<T: GcTracable>(node: NonNull<GcHead>, tr: GcTraceOp) {
 
 /// Generic dispose function, used to call drop_in_place of specific type
 #[inline(never)]
-pub(super) unsafe fn dispose_fn<T>(data_ptr: *mut u8) {
+pub(super) unsafe fn drop_fn<T>(data_ptr: *mut u8) {
     unsafe { std::ptr::drop_in_place(data_ptr.cast::<T>()) };
 }
 
@@ -167,7 +167,7 @@ impl GcHeap {
     pub(crate) fn get_node_gc_type(&self, node: NonNull<GcHead>) -> &GcTypeInfo {
         #[cfg(debug_assertions)]
         {
-            &self.gc_data_types.entries[unsafe { node.as_ref().gc_dtype() as usize }]
+            &self.gc_data_types.types[unsafe { node.as_ref().gc_dtype() as usize }]
         }
 
         #[cfg(not(debug_assertions))]

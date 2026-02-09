@@ -81,7 +81,11 @@ fn test_partition_removal() {
     assert!(heap.partition(id).is_some());
     assert_eq!(heap.partition_ids().len(), 1);
 
-    heap.remove_partition(id);
+    heap.remove_partition(
+        id,
+        GcHeap::DUMMY_MIGRATE_CALLBACK,
+        GcHeap::DUMMY_DISPOSE_CALLBACK,
+    );
 
     assert!(heap.partition(id).is_none());
     assert_eq!(heap.partition_ids().len(), 0);
@@ -367,7 +371,7 @@ fn test_memory_usage_increases_with_allocation() {
         )
         .unwrap();
     heap.set_root(root_obj, true);
-    let freed = heap.garbage_collect(id);
+    let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     assert!(freed > 0);
 
     let after_gc_memory = heap.partition(id).unwrap().memory_used();
@@ -499,7 +503,7 @@ fn test_root_objects_preserve_during_gc() {
     heap.set_root(obj, true);
 
     // Trigger GC
-    let freed = heap.garbage_collect(id);
+    let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     assert_eq!(freed, 0);
 
     // Object should still be valid
@@ -536,7 +540,7 @@ fn test_non_root_objects_collected() {
     // non_root_obj is not set as root
 
     // Trigger GC
-    let freed = heap.garbage_collect(id);
+    let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     assert!(freed > 0);
 
     // Root object should still be valid
@@ -570,7 +574,7 @@ fn test_manual_garbage_collection() {
     let before = heap.partition(id).unwrap().memory_used();
 
     // Trigger GC
-    let freed = heap.garbage_collect(id);
+    let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
 
     // Should have freed some memory
     assert!(freed > 0);
@@ -604,14 +608,14 @@ fn test_circular_reference_handling() {
     assert_eq!(node1_val, 1);
     assert_eq!(node2_val, 2);
 
-    let freed = heap.garbage_collect(id);
+    let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     assert_eq!(freed, 0); // Nothing freed because both are roots
 
     // Clear roots - circular reference should be collected
     heap.set_root(node1, false);
     heap.set_root(node2, false);
 
-    let freed = heap.garbage_collect(id);
+    let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     assert!(freed > 0); // Circular reference should be freed
 }
 
@@ -665,7 +669,7 @@ fn test_weak_reference_after_collection() {
 
     // Clear root and collect
     heap.set_root(obj, false);
-    heap.garbage_collect(id);
+    heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
 
     // Upgrade should fail after object is collected
     let upgraded = weak_ref.upgrade(&heap);
@@ -726,7 +730,11 @@ fn test_weak_reference_after_partition_removal() {
     assert!(weak_ref.upgrade(&heap).is_some());
 
     // 删除partition
-    heap.remove_partition(child_id);
+    heap.remove_partition(
+        child_id,
+        GcHeap::DUMMY_MIGRATE_CALLBACK,
+        GcHeap::DUMMY_DISPOSE_CALLBACK,
+    );
 
     // 这时此partition中的对象也会释放
     // 访问这些对象的GcWeak引用，并upgrade()，应该返回None

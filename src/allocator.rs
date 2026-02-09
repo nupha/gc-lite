@@ -22,10 +22,10 @@ impl GcHeap {
                 {
                     let n = NonNull::new_unchecked(ptr).cast::<GcHead>();
                     debug_assert!(
-                        !self.debug_living_nodes.contains(&n),
+                        !self.dbg_living_nodes.contains(&n),
                         "node {ptr:?} already exists"
                     );
-                    self.debug_living_nodes.insert(n);
+                    self.dbg_living_nodes.insert(n);
                 }
 
                 Some(NonNull::new_unchecked(ptr))
@@ -40,7 +40,7 @@ impl GcHeap {
 
         #[cfg(debug_assertions)]
         debug_assert!(
-            self.debug_living_nodes.contains(&ptr.cast()),
+            self.dbg_living_nodes.contains(&ptr.cast()),
             "[O.o] node {ptr:?} has been disposed?"
         );
 
@@ -55,7 +55,7 @@ impl GcHeap {
 
         unsafe {
             #[cfg(debug_assertions)]
-            self.debug_living_nodes.remove(&ptr.cast());
+            self.dbg_living_nodes.remove(&ptr.cast());
 
             std::alloc::dealloc(ptr.as_ptr(), layout);
         }
@@ -103,7 +103,7 @@ impl GcHeap {
                             {
                                 0xFF00_0000
                                     | ((gc_dtype as u32) << 8)
-                                    | (crate::node::GcHeadFlag::MAGIC_NUM.bits() as u32)
+                                    | (crate::node::GcNodeFlag::MAGIC_NUM.bits() as u32)
                             }
                             #[cfg(not(debug_assertions))]
                             {
@@ -116,7 +116,7 @@ impl GcHeap {
                         next: None,
 
                         #[cfg(debug_assertions)]
-                        dbg_type_name: std::any::type_name::<T>(),
+                        dbg_string: std::any::type_name::<T>().into(),
                         #[cfg(debug_assertions)]
                         dbg_heap: NonNull::from_ref(self),
                     };

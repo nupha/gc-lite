@@ -12,7 +12,7 @@ impl GcHead {
 
     /// Set cross reference partition
     pub(crate) fn set_xref_partition(&mut self, pid: GcPartitionId) {
-        if !pid.is_null() && pid != self.get_partition_id() {
+        if !pid.is_null() && pid != self.scope_id() {
             self.partition = (self.partition & 0x0000_FFFF) | ((pid.0 as u32) << 16);
         } else {
             self.partition = self.partition & 0x0000_FFFF;
@@ -37,7 +37,7 @@ impl GcHeap {
 
         let (node_pid, xref0) = unsafe {
             let n = node.as_ref();
-            (n.get_partition_id(), n.xref_partition())
+            (n.scope_id(), n.xref_partition())
         };
         debug_assert!(self.partition(node_pid).is_some(), "{:?}", unsafe {
             node.as_ref()

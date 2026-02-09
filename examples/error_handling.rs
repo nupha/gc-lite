@@ -72,7 +72,7 @@ fn demonstrate_out_of_memory() -> GcResult<()> {
     // Clean up - through garbage collection instead of manual release
     println!("  ✓ Automatic cleanup through GC");
     context.set_root(gc1, false);
-    context.garbage_collect(partition_id);
+    context.garbage_collect(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
 
     Ok(())
 }
@@ -115,7 +115,11 @@ fn demonstrate_partition_management_errors() -> GcResult<()> {
     println!("  ✓ Getting non-existent partition info returns None");
 
     // Test removing non-existent partition (remove_partition doesn't return error, just silently fails)
-    context.remove_partition(invalid_partition);
+    context.remove_partition(
+        invalid_partition,
+        GcHeap::DUMMY_MIGRATE_CALLBACK,
+        GcHeap::DUMMY_DISPOSE_CALLBACK,
+    );
     println!("  ✓ Removing non-existent partition silently fails");
 
     println!("\n2. Test non-empty partition deletion...");
@@ -134,7 +138,11 @@ fn demonstrate_partition_management_errors() -> GcResult<()> {
     context.set_root(obj, true);
 
     // Try to delete non-empty partition (remove_partition will force cleanup)
-    context.remove_partition(partition_id);
+    context.remove_partition(
+        partition_id,
+        GcHeap::DUMMY_MIGRATE_CALLBACK,
+        GcHeap::DUMMY_DISPOSE_CALLBACK,
+    );
     println!("  ✓ Successfully deleted non-empty partition (root objects were force cleaned)");
 
     Ok(())

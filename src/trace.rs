@@ -5,7 +5,7 @@ use std::{collections::VecDeque, marker::PhantomData, ptr::NonNull};
 
 use crate::{
     GcHeap, GcPartitionId, GcRef,
-    node::{GcHead, GcHeadFlag},
+    node::{GcHead, GcNodeFlag},
     node_iterator::NodeLinkIter,
 };
 
@@ -75,14 +75,14 @@ impl<'a> GcTracer<'a> {
         };
 
         if clear_flags {
-            tr.clear_flags(GcHeadFlag::MARKED | GcHeadFlag::TRACED);
+            tr.clear_flags(GcNodeFlag::MARKED | GcNodeFlag::TRACED);
         }
 
         tr
     }
 
     /// clear node flags
-    fn clear_flags(&mut self, mask_off: GcHeadFlag) {
+    fn clear_flags(&mut self, mask_off: GcNodeFlag) {
         if let GcTraceRestrict::TraceCollect(pid) = self.restrict {
             let start = self.heap().partition_nodes.get(&pid).unwrap();
             let nodes = NodeLinkIter::new(*start);
@@ -128,12 +128,12 @@ impl<'a> GcTracer<'a> {
 
     #[inline(always)]
     pub fn clear_marked_flag(&mut self) {
-        self.clear_flags(GcHeadFlag::MARKED);
+        self.clear_flags(GcNodeFlag::MARKED);
     }
 
     #[inline(always)]
     pub fn clear_traced_flag(&mut self) {
-        self.clear_flags(GcHeadFlag::TRACED);
+        self.clear_flags(GcNodeFlag::TRACED);
     }
 
     /// make trace ctx
@@ -166,15 +166,18 @@ impl<'a> GcTracer<'a> {
         ignore_trace_flag: bool,
     ) {
         unsafe {
-            let pid = node.as_ref().get_partition_id();
+            #[cfg(debug_assertions)]
+            node.as_ref().debug_assert_node_valid(self.heap()); // O.o
 
-            if ignore_trace_flag || !node.as_ref().flags().contains(GcHeadFlag::TRACED) {
+            let pid = node.as_ref().scope_id();
+
+            if ignore_trace_flag || !node.as_ref().flags().contains(GcNodeFlag::TRACED) {
                 if self.can_collect(pid) {
                     callback(node, self.heap());
                 }
 
                 if !ignore_trace_flag {
-                    (*node.as_ptr()).set_flags(node.as_ref().flags().union(GcHeadFlag::TRACED));
+                    (*node.as_ptr()).set_flags(node.as_ref().flags().union(GcNodeFlag::TRACED));
                 }
 
                 if self.can_trace(pid) {
@@ -212,14 +215,11 @@ impl<'a> GcTracer<'a> {
         let xref = n.xref_partition();
 
         debug_assert!(!xref.is_null());
-        debug_assert_eq!(
-            self.restrict,
-            GcTraceRestrict::Collect(n.get_partition_id())
-        );
+        debug_assert_eq!(self.restrict, GcTraceRestrict::Collect(n.scope_id()));
         debug_assert!(n.is_root());
 
         let mut flags = n.flags();
-        flags.insert(GcHeadFlag::TRACED);
+        flags.insert(GcNodeFlag::TRACED);
         unsafe {
             root_node.as_mut().set_flags(flags);
         }
@@ -263,10 +263,7 @@ impl<'a> GcTracer<'a> {
         let n = unsafe { node.as_ref() };
 
         debug_assert!(!xref.is_null());
-        debug_assert_eq!(
-            self.restrict,
-            GcTraceRestrict::Collect(n.get_partition_id())
-        );
+        debug_assert_eq!(self.restrict, GcTraceRestrict::Collect(n.scope_id()));
 
         let xref0 = n.xref_partition();
         let fix = if !xref0.is_null() {
@@ -283,7 +280,7 @@ impl<'a> GcTracer<'a> {
             true
         } else {
             let mut flags = n.flags();
-            flags.insert(GcHeadFlag::TRACED);
+            flags.insert(GcNodeFlag::TRACED);
             unsafe {
                 node.as_mut().set_flags(flags);
             }
@@ -293,11 +290,10 @@ impl<'a> GcTracer<'a> {
         if trace_sub {
             (self.heap().get_node_gc_type(node).trace_fn)(node, self.ctx());
 
-            let children = std::mem::replace(&mut self.traced_nodes, VecDeque::new());
-            for ch in children {
+            for ch in self.take_traced_nodes() {
                 unsafe {
-                    if !ch.as_ref().flags().contains(GcHeadFlag::TRACED)
-                        && self.can_collect(ch.as_ref().get_partition_id())
+                    if !ch.as_ref().flags().contains(GcNodeFlag::TRACED)
+                        && self.can_collect(ch.as_ref().scope_id())
                     {
                         self.set_xref_recursive(ch, fix);
                     }
@@ -320,20 +316,14 @@ impl<'a> GcTraceOp<'a> {
         unsafe { &*self.tr.as_ref().heap.as_ptr() }
     }
 
-    /// Submit a GcRef to collected list
-    #[inline(always)]
-    pub fn add<T: GcTracable>(&mut self, gc_ref: GcRef<T>) {
-        self.add_node(gc_ref.head_ptr);
-    }
-
     /// Submit a node to collected list
     #[inline]
     pub fn add_node(&mut self, node: NonNull<GcHead>) {
         unsafe {
-            if self
-                .tr
-                .as_ref()
-                .can_collect(node.as_ref().get_partition_id())
+            #[cfg(debug_assertions)]
+            node.as_ref().debug_assert_node_valid(self.heap()); // O.o
+
+            if self.tr.as_ref().can_collect(node.as_ref().scope_id())
                 && !self.tr.as_ref().traced_nodes.iter().any(|&n| n == node)
             {
                 self.tr.as_mut().traced_nodes.push_back(node);
@@ -346,6 +336,12 @@ impl<'a> GcTraceOp<'a> {
         for n in nodes {
             self.add_node(n);
         }
+    }
+
+    /// Submit a GcRef to collected list
+    #[inline(always)]
+    pub fn add<T: GcTracable>(&mut self, gc_ref: GcRef<T>) {
+        self.add_node(gc_ref.head_ptr);
     }
 }
 

@@ -7,20 +7,17 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::{
-    GcHeap, GcPartitionId, GcTracable, GcTraceRestrict, GcTracer, GcWeak, weak::GcWeakRawId,
-};
+use crate::{GcHeap, GcPartitionId, GcTracable, GcTraceRestrict, GcWeak, weak::GcWeakRawId};
 
 bitflags::bitflags! {
     #[repr(transparent)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct GcHeadFlag :u8 {
+    pub struct GcNodeFlag :u8 {
         /// is marked
         const MARKED = 1 << 0;
         /// is root node
         const ROOT = 1 << 1;
-
-        /// internal use, denotes a node has been traced.
+        /// node has been traced? internal use
         const TRACED = 1 << 2;
 
         #[cfg(debug_assertions)]
@@ -45,17 +42,16 @@ pub struct GcHead {
     pub(super) next: Option<NonNull<GcHead>>,
 
     #[cfg(debug_assertions)]
-    pub(crate) dbg_type_name: &'static str,
+    pub(crate) dbg_string: std::borrow::Cow<'static, str>,
     #[cfg(debug_assertions)]
     pub(crate) dbg_heap: NonNull<GcHeap>,
 }
 
 impl std::fmt::Debug for GcHead {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut s = f.debug_struct("GcHead");
-
+        let mut s = f.debug_struct("GcNode");
         s.field("ptr", &(self as *const Self))
-            .field("scope", &self.get_partition_id().0)
+            .field("scope", &self.scope_id().0)
             //.field("dtype", &self.gc_dtype())
             .field("flags", &self.flags())
             .field("xref", &self.xref_partition().0);
@@ -66,7 +62,7 @@ impl std::fmt::Debug for GcHead {
 
         #[cfg(debug_assertions)]
         {
-            s.field("type_name", &self.dbg_type_name);
+            s.field("dbg_string", &self.dbg_string);
         }
 
         s.finish()
@@ -81,15 +77,15 @@ impl GcHead {
     }
 
     #[inline(always)]
-    pub fn flags(&self) -> GcHeadFlag {
-        GcHeadFlag::from_bits_retain(self.attrs as u8)
+    pub fn flags(&self) -> GcNodeFlag {
+        GcNodeFlag::from_bits_retain(self.attrs as u8)
     }
 
     #[inline(always)]
-    pub(crate) fn set_flags(&mut self, flags: GcHeadFlag) {
+    pub(crate) fn set_flags(&mut self, flags: GcNodeFlag) {
         #[cfg(debug_assertions)]
         debug_assert!(
-            flags.contains(GcHeadFlag::MAGIC_NUM),
+            flags.contains(GcNodeFlag::MAGIC_NUM),
             "MAGIC_NUM flag is missing"
         );
 
@@ -99,16 +95,16 @@ impl GcHead {
     /// Check if marked
     #[inline(always)]
     pub fn is_marked(&self) -> bool {
-        self.flags().contains(GcHeadFlag::MARKED)
+        self.flags().contains(GcNodeFlag::MARKED)
     }
 
     /// Set/clear mark flag
     pub fn set_marked(&mut self, mark: bool) {
         let mut f = self.flags();
         if mark {
-            f.insert(GcHeadFlag::MARKED);
+            f.insert(GcNodeFlag::MARKED);
         } else {
-            f.remove(GcHeadFlag::MARKED);
+            f.remove(GcNodeFlag::MARKED);
         }
         self.set_flags(f);
     }
@@ -116,35 +112,40 @@ impl GcHead {
     /// Check if root node
     #[inline(always)]
     pub fn is_root(&self) -> bool {
-        self.flags().contains(GcHeadFlag::ROOT)
+        self.flags().contains(GcNodeFlag::ROOT)
     }
 
     /// Set/clear root object flag
     pub(super) fn set_root(&mut self, is_root: bool) {
         let mut f = self.flags();
         if is_root {
-            f.insert(GcHeadFlag::ROOT);
+            f.insert(GcNodeFlag::ROOT);
         } else {
-            f.remove(GcHeadFlag::ROOT);
+            f.remove(GcNodeFlag::ROOT);
         }
         self.set_flags(f);
     }
 
     #[inline(always)]
     pub fn is_traced(&self) -> bool {
-        self.flags().contains(GcHeadFlag::TRACED)
+        self.flags().contains(GcNodeFlag::TRACED)
     }
 
-    /// Get partition ID
+    /// Get scope of node
     #[inline(always)]
-    pub fn get_partition_id(&self) -> GcPartitionId {
+    pub fn scope_id(&self) -> GcPartitionId {
         GcPartitionId((self.partition & 0x0000_FFFF) as u16)
+    }
+
+    #[deprecated(note = "alias to ::scope_id()")]
+    pub fn get_partition_id(&self) -> GcPartitionId {
+        self.scope_id()
     }
 
     /// Set partition ID
     #[inline(always)]
     pub(crate) fn set_partition_id(&mut self, id: GcPartitionId) {
-        debug_assert!(self.get_partition_id().is_null() || self.get_partition_id() == id);
+        debug_assert!(self.scope_id().is_null() || self.scope_id() == id);
         self.partition = (self.partition & 0xFFFF_0000) | id.0 as u32;
     }
 
@@ -187,25 +188,24 @@ impl GcHead {
 
 #[cfg(debug_assertions)]
 impl GcHead {
+    pub fn debug_set_dbg_string(&mut self, str: std::borrow::Cow<'static, str>) {
+        self.dbg_string = str;
+    }
+
     pub fn debug_assert_node_valid_simple(&self) {
         debug_assert!(
             self.gc_dtype() != 0
-                && self.flags().contains(GcHeadFlag::MAGIC_NUM)
+                && self.flags().contains(GcNodeFlag::MAGIC_NUM)
                 && self.next.is_none_or(|n| n.is_aligned()),
             "bad node: {self:?}"
         )
     }
 
     pub fn debug_assert_node_valid(&self, heap: &GcHeap) {
-        debug_assert_eq!(self.dbg_heap, NonNull::from_ref(heap));
         debug_assert!(
-            unsafe {
-                self.dbg_heap
-                    .as_ref()
-                    .debug_living_nodes
-                    .contains(&NonNull::from_ref(self))
-            },
-            "unknown node: {self:?}"
+            self.dbg_heap == NonNull::from_ref(heap)
+                && heap.dbg_living_nodes.contains(&NonNull::from_ref(self)),
+            "[O.o] bad node: {self:p}"
         );
         self.debug_assert_node_valid_simple();
     }
