@@ -4,8 +4,8 @@
 use std::{alloc::Layout, marker::PhantomData, ptr::NonNull};
 
 use crate::{
-    GcError, GcHead, GcHeap, GcPartitionId, GcRef, GcTracable, type_registry::TypeRegistry,
-    unlikely, weak::GcWeakRawId,
+    GcError, GcHead, GcHeap, GcPartitionId, GcRef, GcTracable, gctype::TypeRegistry, unlikely,
+    weak::GcWeakRawId,
 };
 
 impl GcHeap {
@@ -85,19 +85,6 @@ impl GcHeap {
                         }
                     };
 
-                    // // trace payload's direct children for possible cross reference
-                    // {
-                    //     for n in payload.gc_children(self) {
-                    //         self.set_xref(scope, n);
-                    //     }
-
-                    //     // let mut tr = crate::GcTracer::new(self, crate::GcTraceRestrict::No, false);
-                    //     // payload.trace(tr.ctx());
-                    //     // while let Some(n) = tr.take_traced_nodes().pop_front() {
-                    //     //     self.set_xref(scope, n);
-                    //     // }
-                    // }
-
                     let head = ptr.cast::<GcHead>();
 
                     // setup node info and data
@@ -130,14 +117,8 @@ impl GcHeap {
                         std::ptr::write(head.add(1).cast::<T>().as_ptr(), payload);
                     }
 
-                    // Add to partition list
+                    // Add to nodes link
                     self.attach(scope, head);
-
-                    // trace payload's children for possible cross reference
-                    for n in unsafe { head.as_ref().gc_children(self) } {
-                        self.set_xref(scope, n);
-                    }
-
                     // Update memory usage with rollup to parent partitions
                     self.mgr.update_mem_use(scope, gross_size as i32);
 

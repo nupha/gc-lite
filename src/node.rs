@@ -8,8 +8,8 @@ use std::{
 };
 
 use crate::{
-    GcHeap, GcPartitionId, GcTracable, GcTraceRestrict, GcTracer, GcWeak,
-    type_registry::TypeRegistry, weak::GcWeakRawId,
+    GcHeap, GcPartitionId, GcTracable, GcTraceRestrict, GcTracer, GcWeak, gctype::TypeRegistry,
+    weak::GcWeakRawId,
 };
 
 bitflags::bitflags! {

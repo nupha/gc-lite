@@ -4,8 +4,8 @@
 use std::ptr::NonNull;
 
 use crate::{
-    GcHeap, GcTraceRestrict, node::GcHead, node_iterator::NodeLinkIter, partition::GcPartitionId,
-    trace::GcTracer, type_registry::TypeRegistry,
+    GcHeap, GcTraceRestrict, gctype::TypeRegistry, node::GcHead, node_iterator::NodeLinkIter,
+    partition::GcPartitionId, trace::GcTracer,
 };
 
 impl GcHeap {

@@ -5,9 +5,9 @@ use std::{collections::VecDeque, marker::PhantomData, ptr::NonNull};
 
 use crate::{
     GcHeap, GcPartitionId, GcRef,
+    gctype::TypeRegistry,
     node::{GcHead, GcNodeFlag},
     node_iterator::NodeLinkIter,
-    type_registry::TypeRegistry,
 };
 
 /// Garbage collection object tracing trait

@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-mod allocator;
+mod gctype;
 mod heap;
-mod mark_sweep;
+mod mem;
 mod node;
 mod node_iterator;
 mod partition;
+mod sweep;
 mod trace;
-mod type_registry;
 mod weak;
 mod xref;
 
