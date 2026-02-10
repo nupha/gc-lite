@@ -12,7 +12,7 @@ impl GcHead {
 
     /// Set cross reference partition
     pub(crate) fn set_xref(&mut self, xref: GcPartitionId) {
-        log::trace!("[xref] {xref:?}: {self:?}");
+        log::trace!("[set_xref] {xref:?} -> {self:?}");
 
         if !xref.is_null() && xref != self.scope_id() {
             self.partition = (self.partition & 0x0000_FFFF) | ((xref.0 as u32) << 16);

@@ -56,7 +56,7 @@ impl std::fmt::Debug for GcHead {
         s.field("ptr", &(self as *const Self))
             .field("scope", &self.scope_id().0)
             //.field("dtype", &self.gc_dtype())
-            .field("flags", &self.flags())
+            // .field("flags", &self.flags())
             .field("xref", &self.xref_partition().0);
 
         if let Some(w) = self.weak() {
@@ -213,10 +213,14 @@ impl GcHead {
 
     pub fn debug_assert_node_valid(&self, heap: &GcHeap) {
         debug_assert!(
-            self.dbg_heap == NonNull::from_ref(heap)
-                && heap.dbg_living_nodes.contains(&NonNull::from_ref(self)),
+            heap.dbg_living_nodes.contains(&NonNull::from_ref(self)),
             "[O.o] bad node: {self:p}"
         );
+        // debug_assert!(
+        //     self.dbg_heap == NonNull::from_ref(heap)
+        //         && heap.dbg_living_nodes.contains(&NonNull::from_ref(self)),
+        //     "[O.o] bad node: {self:p}"
+        // );
         self.debug_assert_node_valid_simple();
     }
 

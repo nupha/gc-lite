@@ -359,7 +359,7 @@ impl GcHeap {
         GcTracer::new(self, restrict, true)
     }
 
-    pub(crate) fn clear_node_flags(&self, clear_mask: GcNodeFlag) {
+    fn clear_node_flags(&self, clear_mask: GcNodeFlag) {
         for pid in self.partition_ids() {
             unsafe {
                 for mut n in self.nodes(pid) {
