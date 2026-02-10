@@ -23,9 +23,14 @@ pub unsafe trait GcTracable: 'static {
         let mut tr = GcTracer::new(heap, GcTraceRestrict::No, false);
         self.trace(tr.ctx());
 
-        let lst = tr.take_traced_nodes();
-        // lst.retain(|&x| x != node); // remove self reference
-        lst.into()
+        tr.take_traced_nodes().into()
+    }
+}
+
+impl GcHead {
+    /// get trace func for node
+    pub(crate) fn trace_fn(&self) -> fn(NonNull<GcHead>, GcTraceOp<'_>) {
+        TypeRegistry::with_node_gc_type(NonNull::from_ref(self), |ty| ty.trace_fn)
     }
 }
 
@@ -260,6 +265,7 @@ impl<'a> GcTracer<'a> {
         std::mem::replace(&mut self.traced_nodes, VecDeque::new())
     }
 
+    #[deprecated]
     pub(crate) fn set_xref_recursive(&mut self, mut node: NonNull<GcHead>, xref: GcPartitionId) {
         let n = unsafe { node.as_ref() };
 
@@ -275,7 +281,7 @@ impl<'a> GcTracer<'a> {
 
         let trace_sub = if fix != xref0 {
             unsafe {
-                node.as_mut().set_xref_partition(fix);
+                node.as_mut().set_xref(fix);
             }
             log::trace!("[fix_xref]: {n:?} -> {fix:?}");
             true
@@ -348,9 +354,63 @@ impl<'a> GcTraceOp<'a> {
 
 impl GcHeap {
     /// A shortcut to GcTracer::new(scope, true)
-    #[inline(always)]
+    #[deprecated]
     pub fn tracer(&self, restrict: GcTraceRestrict) -> GcTracer<'_> {
         GcTracer::new(self, restrict, true)
+    }
+
+    pub(crate) fn clear_node_flags(&self, clear_mask: GcNodeFlag) {
+        for pid in self.partition_ids() {
+            unsafe {
+                for mut n in self.nodes(pid) {
+                    let f0 = n.as_ref().flags();
+                    let mut f = f0;
+                    f.remove(clear_mask);
+                    if f != f0 {
+                        n.as_mut().set_flags(f);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn apply_recursive(
+        &self,
+        node: NonNull<GcHead>,
+        filter: GcPartitionId,
+        callback: impl Fn(NonNull<GcHead>, Option<NonNull<GcHead>>),
+    ) {
+        fn since(
+            parent: Option<NonNull<GcHead>>,
+            mut this: NonNull<GcHead>,
+            tr: &mut GcTracer,
+            filter: GcPartitionId,
+            callback: &impl Fn(NonNull<GcHead>, Option<NonNull<GcHead>>),
+        ) {
+            unsafe {
+                if filter.is_null() || filter == this.as_ref().scope_id() {
+                    callback(this, parent);
+                }
+
+                let f = this.as_ref().flags();
+                this.as_mut().set_flags(f.union(GcNodeFlag::TRACED));
+
+                (this.as_ref().trace_fn())(this, tr.ctx());
+
+                let mut children = tr.take_traced_nodes();
+                while let Some(ch) = children.pop_front() {
+                    if !ch.as_ref().is_traced() {
+                        since(Some(this), ch, tr, filter, callback);
+                    }
+                }
+            }
+        }
+
+        // clear nodes's traced flag for all scopes
+        self.clear_node_flags(GcNodeFlag::TRACED);
+
+        let mut tr = GcTracer::new(self, GcTraceRestrict::No, false);
+        since(None, node, &mut tr, filter, &callback);
     }
 }
 

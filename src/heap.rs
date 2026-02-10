@@ -51,8 +51,8 @@ impl GcHeap {
     //
     // default callbacks
     //
-    pub const DUMMY_MIGRATE_CALLBACK: fn(&GcHead, GcPartitionId) = |_, _| {};
-    pub const DUMMY_DISPOSE_CALLBACK: fn(&GcHead) = |_| {};
+    pub const DUMMY_MIGRATE_CALLBACK: fn(&GcHeap, &GcHead, GcPartitionId) = |_, _, _| {};
+    pub const DUMMY_DISPOSE_CALLBACK: fn(&GcHeap, &GcHead) = |_, _| {};
 
     /// Create a new garbage collection heap
     pub fn new() -> Self {

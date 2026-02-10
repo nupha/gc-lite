@@ -16,7 +16,7 @@ impl GcHeap {
         &mut self,
         partition_id: GcPartitionId,
         predicate: impl Fn(&GcHead) -> bool,
-        on_dispose: impl Fn(&GcHead),
+        on_dispose: impl Fn(&GcHeap, &GcHead),
     ) -> usize {
         if let Some(link0) = self.partition_nodes.remove(&partition_id) {
             let mut link1 = link0;
@@ -58,7 +58,7 @@ impl GcHeap {
 
                             let is_root = this.as_ref().is_root();
                             if call_on_dispose {
-                                on_dispose(this.as_ref());
+                                on_dispose(self, this.as_ref());
                             }
 
                             freed_bytes += self.dispose(this);
@@ -98,7 +98,7 @@ impl GcHeap {
     pub fn garbage_collect(
         &mut self,
         partition_id: GcPartitionId,
-        on_dispose: impl Fn(&GcHead),
+        on_dispose: impl Fn(&GcHeap, &GcHead),
     ) -> usize {
         if self.partition(partition_id).is_some() {
             let mut tr = GcTracer::new(self, GcTraceRestrict::No, true);
@@ -113,7 +113,7 @@ impl GcHeap {
     pub(crate) fn dispose_all_nodes(
         &mut self,
         head: NonNull<GcHead>,
-        on_dispose: impl Fn(&GcHead),
+        on_dispose: impl Fn(&GcHeap, &GcHead),
     ) -> usize {
         let call_on_dispose = !std::ptr::addr_eq(&on_dispose, &Self::DUMMY_DISPOSE_CALLBACK);
         let mut link = Some(head);
@@ -143,7 +143,7 @@ impl GcHeap {
                         }
 
                         if call_on_dispose {
-                            on_dispose(this.as_ref());
+                            on_dispose(self, this.as_ref());
                         }
 
                         freed_bytes += self.dispose(this);
@@ -222,7 +222,7 @@ mod sweep_test {
                     value % 2 == 0 // Remove even numbers
                 }
             },
-            |n| {
+            |_, n| {
                 println!("dispose node: {n:?}");
             },
         );
@@ -316,7 +316,7 @@ mod sweep_test {
         let removed = heap.sweep(
             partition_id,
             |_| true,
-            |n| {
+            |_, n| {
                 println!("dispose {n:?}");
             },
         );

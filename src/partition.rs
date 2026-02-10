@@ -351,8 +351,8 @@ impl GcHeap {
     pub fn remove_partition(
         &mut self,
         partition_id: GcPartitionId,
-        on_migrate: impl Fn(&GcHead, GcPartitionId),
-        on_dispose: impl Fn(&GcHead),
+        on_migrate: impl Fn(&GcHeap, &GcHead, GcPartitionId),
+        on_dispose: impl Fn(&GcHeap, &GcHead),
     ) {
         let parent_id = self.partition(partition_id).unwrap().parent();
         if parent_id.is_null() {
@@ -370,25 +370,19 @@ impl GcHeap {
         while let Some(pid) = scopes.pop() {
             log::trace!("[close_scope] {pid:?}");
 
-            //
-            // trace to fix xref tree for descendants
-            //
-            if let Some(roots) = self.partition_root_nodes.remove(&pid) {
-                let it = roots.iter().filter_map(|n| unsafe {
-                    let xref = n.as_ref().xref_partition();
-                    if !xref.is_null() {
-                        Some((*n, xref, self.depth(xref)))
-                    } else {
-                        None
-                    }
-                });
-
-                for (r, _, _) in it {
-                    // for each root xref, use a new tracer with all node's traced flag cleared
-                    let mut tr = self.tracer(crate::GcTraceRestrict::Collect(pid));
-                    tr.fix_xref_tree(r);
+            // fix xref tree recursively
+            if let Some(roots) = self.partition_root_nodes.get(&pid) {
+                for node in roots
+                    .iter()
+                    .filter(|n| unsafe { !n.as_ref().xref_partition().is_null() })
+                {
+                    let xref = unsafe { node.as_ref().xref_partition() };
+                    self.apply_recursive(*node, pid, |mut n, _| unsafe {
+                        n.as_mut().set_xref(xref);
+                    });
                 }
             }
+            self.partition_root_nodes.remove(&pid);
 
             if let Some(link0) = self.partition_nodes.remove(&pid) {
                 //
@@ -415,7 +409,7 @@ impl GcHeap {
                         }
 
                         if call_on_migrate {
-                            on_migrate(unsafe { this.as_ref() }, xref);
+                            on_migrate(self, unsafe { this.as_ref() }, xref);
                         }
 
                         // clear flags and attach to xref chain
@@ -459,7 +453,7 @@ impl GcHeap {
     pub(crate) fn remove_root_partition(
         &mut self,
         partition_id: GcPartitionId,
-        on_dispose: impl Fn(&GcHead),
+        on_dispose: impl Fn(&GcHeap, &GcHead),
     ) {
         log::trace!("[remove_root_partition] {partition_id:?}");
         debug_assert!(self.partition(partition_id).unwrap().is_root());
@@ -689,10 +683,10 @@ mod tests {
         // Clean up partition
         heap.remove_partition(
             id,
-            |n, p| {
+            |_, n, p| {
                 println!("migrate {n:?} -> {p:?}");
             },
-            |n| {
+            |_, n| {
                 println!("dispose: {n:?}");
             },
         );

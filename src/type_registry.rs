@@ -85,7 +85,7 @@ impl TypeRegistry {
                 size: std::mem::size_of::<T>() as u32,
                 trace_fn: trace_fn::<T>,
                 drop_fn: {
-                    //Some(drop_fn::<T>)
+                    // Some(drop_fn::<T>)
                     if std::mem::needs_drop::<T>() {
                         Some(drop_fn::<T>)
                     } else {

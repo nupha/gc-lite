@@ -11,9 +11,11 @@ impl GcHead {
     }
 
     /// Set cross reference partition
-    pub(crate) fn set_xref_partition(&mut self, pid: GcPartitionId) {
-        if !pid.is_null() && pid != self.scope_id() {
-            self.partition = (self.partition & 0x0000_FFFF) | ((pid.0 as u32) << 16);
+    pub(crate) fn set_xref(&mut self, xref: GcPartitionId) {
+        log::trace!("[xref] {xref:?}: {self:?}");
+
+        if !xref.is_null() && xref != self.scope_id() {
+            self.partition = (self.partition & 0x0000_FFFF) | ((xref.0 as u32) << 16);
         } else {
             self.partition = self.partition & 0x0000_FFFF;
         }
@@ -22,7 +24,7 @@ impl GcHead {
     /// Unset cross reference partition
     #[inline(always)]
     pub fn unset_xref_partition(&mut self) {
-        self.set_xref_partition(GcPartitionId::NONE);
+        self.set_xref(GcPartitionId::NONE);
     }
 }
 
@@ -30,9 +32,6 @@ impl GcHeap {
     /// Updates the node's cross-reference partition to a more general ancestor.
     /// Returns true if node's xref was updated, false if not.
     pub fn set_xref(&mut self, from_partition: GcPartitionId, mut node: NonNull<GcHead>) -> bool {
-        log::trace!("[xref] {:?} -> {from_partition:?}", unsafe {
-            node.as_ref()
-        });
         debug_assert!(self.partition(from_partition).is_some());
 
         let (node_pid, xref0) = unsafe {
@@ -67,7 +66,7 @@ impl GcHeap {
         }
 
         unsafe {
-            node.as_mut().set_xref_partition(up);
+            node.as_mut().set_xref(up);
         }
 
         // // set xref (up) to node and resursively it's descendants
@@ -118,7 +117,7 @@ mod xref_tests {
 
         // 设置xref_partition
         unsafe {
-            head_ptr.as_mut().set_xref_partition(xref_pid);
+            head_ptr.as_mut().set_xref(xref_pid);
         }
 
         head_ptr
