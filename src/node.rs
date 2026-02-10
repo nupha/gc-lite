@@ -8,8 +8,8 @@ use std::{
 };
 
 use crate::{
-    GcHeap, GcPartitionId, GcTracable, GcTraceRestrict, GcWeak, type_registry::TypeRegistry,
-    weak::GcWeakRawId,
+    GcHeap, GcPartitionId, GcTracable, GcTraceRestrict, GcTracer, GcWeak,
+    type_registry::TypeRegistry, weak::GcWeakRawId,
 };
 
 bitflags::bitflags! {
@@ -183,6 +183,13 @@ impl GcHead {
         unsafe { NonNull::from_ref(self).add(1).cast::<u8>() }
     }
 
+    /// Get direct referencing children nodes
+    pub fn gc_children(&self, heap: &GcHeap) -> Vec<NonNull<GcHead>> {
+        let mut tr = GcTracer::new(heap, GcTraceRestrict::No, false);
+        (self.trace_fn())(NonNull::from_ref(self), tr.ctx());
+        tr.take_traced_nodes().into()
+    }
+
     /// Get GcRef<T> from node. if node is not of type T, returns None
     pub fn gc_ref<T: GcTracable>(&self) -> Option<GcRef<T>> {
         if TypeRegistry::type_id_of::<T>().is_some_and(|i| i == self.gc_dtype()) {
@@ -216,11 +223,6 @@ impl GcHead {
             heap.dbg_living_nodes.contains(&NonNull::from_ref(self)),
             "[O.o] bad node: {self:p}"
         );
-        // debug_assert!(
-        //     self.dbg_heap == NonNull::from_ref(heap)
-        //         && heap.dbg_living_nodes.contains(&NonNull::from_ref(self)),
-        //     "[O.o] bad node: {self:p}"
-        // );
         self.debug_assert_node_valid_simple();
     }
 

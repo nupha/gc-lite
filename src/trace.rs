@@ -17,14 +17,6 @@ use crate::{
 pub unsafe trait GcTracable: 'static {
     /// Collect directly referenced children gc nodes
     fn trace(&self, tr: GcTraceOp);
-
-    /// Collect one-depth direct children gc nodes
-    fn gc_children(&self, heap: &GcHeap) -> Vec<NonNull<GcHead>> {
-        let mut tr = GcTracer::new(heap, GcTraceRestrict::No, false);
-        self.trace(tr.ctx());
-
-        tr.take_traced_nodes().into()
-    }
 }
 
 impl GcHead {

@@ -42,7 +42,7 @@ impl GcHeap {
         #[cfg(debug_assertions)]
         debug_assert!(
             self.dbg_living_nodes.contains(&ptr.cast()),
-            "[O.o] node {ptr:?} has been disposed?"
+            "[O.o][dealloc] bad pointer {ptr:?}"
         );
 
         let ly = Layout::from_size_align(gross_size, std::mem::align_of::<usize>());
@@ -62,13 +62,13 @@ impl GcHeap {
         }
     }
 
-    /// Allocate a GcRef with payload data in given partition
+    /// Allocate a GcRef with payload data in given scope
     pub fn alloc<T: GcTracable>(
         &mut self,
-        partition_id: GcPartitionId,
+        scope: GcPartitionId,
         payload: T,
     ) -> Result<GcRef<T>, (GcError, T)> {
-        match self.partition_mut(partition_id) {
+        match self.partition_mut(scope) {
             Some(par) => {
                 let size = std::mem::size_of::<T>();
                 let gross_size = std::mem::size_of::<GcHead>() + size;
@@ -78,8 +78,6 @@ impl GcHeap {
                     return Err((GcError::PartitionFull, payload));
                 } else {
                     let gc_dtype = TypeRegistry::with_gc_data_types_mut(|tt| tt.register::<T>(0));
-                    // let gc_dtype = self.gc_data_types_mut().register::<T>(0);
-
                     let ptr = match self.mem_alloc(gross_size) {
                         Some(p) => p,
                         None => {
@@ -87,14 +85,18 @@ impl GcHeap {
                         }
                     };
 
-                    // trace payload's descendants for possible cross reference
-                    {
-                        let mut tr = crate::GcTracer::new(self, crate::GcTraceRestrict::No, false);
-                        payload.trace(tr.ctx());
-                        while let Some(n) = tr.take_traced_nodes().pop_front() {
-                            self.set_xref(partition_id, n);
-                        }
-                    }
+                    // // trace payload's direct children for possible cross reference
+                    // {
+                    //     for n in payload.gc_children(self) {
+                    //         self.set_xref(scope, n);
+                    //     }
+
+                    //     // let mut tr = crate::GcTracer::new(self, crate::GcTraceRestrict::No, false);
+                    //     // payload.trace(tr.ctx());
+                    //     // while let Some(n) = tr.take_traced_nodes().pop_front() {
+                    //     //     self.set_xref(scope, n);
+                    //     // }
+                    // }
 
                     let head = ptr.cast::<GcHead>();
 
@@ -129,9 +131,15 @@ impl GcHeap {
                     }
 
                     // Add to partition list
-                    self.attach(partition_id, head);
+                    self.attach(scope, head);
+
+                    // trace payload's children for possible cross reference
+                    for n in unsafe { head.as_ref().gc_children(self) } {
+                        self.set_xref(scope, n);
+                    }
+
                     // Update memory usage with rollup to parent partitions
-                    self.mgr.update_mem_use(partition_id, gross_size as i32);
+                    self.mgr.update_mem_use(scope, gross_size as i32);
 
                     log::trace!("[alloc] {:?}", unsafe { head.as_ref() });
 
@@ -154,8 +162,9 @@ impl GcHeap {
 
         #[cfg(debug_assertions)]
         {
-            assert_eq!(hd.ref_count(), 0);
+            debug_assert_eq!(hd.ref_count(), 0, "{hd:?}");
             hd.debug_assert_node_valid(self);
+            debug_assert!(hd.xref_partition().is_null(), "{hd:?}");
         }
 
         if !hd.weak_id.is_null() {

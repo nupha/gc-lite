@@ -41,7 +41,7 @@ impl Drop for GcHeap {
 
         debug_assert!(
             self.dbg_living_nodes.is_empty(),
-            "[O.o] has leaked nodes {:?}",
+            "[O.o][heap drop] leaked nodes {:?}",
             self.dbg_living_nodes
         );
     }

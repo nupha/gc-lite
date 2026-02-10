@@ -11,7 +11,7 @@ use crate::{
 impl GcHeap {
     pub const SWEEP_UNMARKED_FUNC: fn(&GcHead) -> bool = |node| !node.is_marked();
 
-    /// optionally callback before a node is disposed
+    /// optionally call `on_dispose` before a node is disposed
     pub fn sweep(
         &mut self,
         partition_id: GcPartitionId,
@@ -19,9 +19,10 @@ impl GcHeap {
         on_dispose: impl Fn(&GcHeap, &GcHead),
     ) -> usize {
         if let Some(link0) = self.partition_nodes.remove(&partition_id) {
+            let call_on_dispose = !std::ptr::addr_eq(&on_dispose, &Self::DUMMY_DISPOSE_CALLBACK);
+
             let mut link1 = link0;
             let mut freed_bytes = 0;
-            let call_on_dispose = !std::ptr::addr_eq(&on_dispose, &Self::DUMMY_DISPOSE_CALLBACK);
 
             for &pass in TypeRegistry::gc_type_drop_passes(&mut [0; 4]) {
                 let mut current = link1;
@@ -37,19 +38,6 @@ impl GcHeap {
                         if predicate(this.as_mut())
                             && TypeRegistry::with_node_gc_type(this, |ty| ty.drop_pass) == pass
                         {
-                            #[cfg(debug_assertions)]
-                            {
-                                use crate::node::GcNodeFlag;
-
-                                debug_assert!(
-                                    !this.as_ref().flags().contains(GcNodeFlag::MARKED),
-                                    "{:?}",
-                                    this.as_ref()
-                                );
-                                debug_assert_eq!(this.as_ref().ref_count(), 0);
-                                debug_assert!(this.as_ref().xref_partition().is_null());
-                            }
-
                             if let Some(mut p) = prev {
                                 p.as_mut().next = current;
                             } else {

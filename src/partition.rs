@@ -371,44 +371,41 @@ impl GcHeap {
             log::trace!("[close_scope] {pid:?}");
 
             // fix xref tree recursively
-            if let Some(roots) = self.partition_root_nodes.get(&pid) {
+            if let Some(roots) = self.partition_root_nodes.remove(&pid) {
                 for xn in roots
                     .iter()
                     .filter(|n| unsafe { !n.as_ref().xref_partition().is_null() })
                 {
-                    let xref = unsafe { xn.as_ref().xref_partition() };
-
                     unsafe {
-                        debug_assert_eq!(xn.as_ref().scope_id(), pid);
-
-                        if pid.0 == 40 && xref.0 == 2 {
-                            println!("[O.o] !!! fix_xref {:?}", xn.as_ref());
-                        }
+                        debug_assert_eq!(xn.as_ref().scope_id(), pid); // O.o
                     }
 
-                    let h = NonNull::from_ref(self);
-                    self.apply_recursive(*xn, GcPartitionId::NONE, move |mut n, _| unsafe {
-                        let xref0 = n.as_ref().xref_partition();
+                    let xref = unsafe { xn.as_ref().xref_partition() };
 
-                        let xref = if xref0.is_null() {
-                            h.as_ref().common_parent2(xref, n.as_ref().scope_id())
-                        } else {
-                            h.as_ref()
-                                .common_parent3(xref, n.as_ref().scope_id(), xref0)
-                        };
-                        if !xref.is_null() {
-                            log::debug!("[fix_xref_sub] *** : {xref:?} -> {:?}", n.as_ref()); // O.o
-                            n.as_mut().set_xref(xref);
+                    self.apply_recursive(*xn, GcPartitionId::NONE, {
+                        let hp = NonNull::from_ref(self);
+                        move |mut n, _| unsafe {
+                            let xref0 = n.as_ref().xref_partition();
+
+                            let xref = if xref0.is_null() {
+                                hp.as_ref().common_parent2(xref, n.as_ref().scope_id())
+                            } else {
+                                hp.as_ref()
+                                    .common_parent3(xref, n.as_ref().scope_id(), xref0)
+                            };
+                            debug_assert!(!xref.is_null());
+
+                            if n.as_mut().set_xref(xref) && n.as_ref().scope_id() != pid {
+                                // xref was set. if node not in removing scope, mark the node as root node.
+                                (*hp.as_ptr()).set_root_node(n, true);
+                            }
                         }
                     });
                 }
             }
-            self.partition_root_nodes.remove(&pid);
 
             if let Some(link0) = self.partition_nodes.remove(&pid) {
-                //
                 // migrate xref nodes
-                //
                 let mut link1 = link0;
                 let mut current = link0;
                 let mut prev: Option<NonNull<GcHead>> = None;
@@ -454,6 +451,7 @@ impl GcHeap {
                     }
                 }
 
+                // free rest nodes
                 if let Some(first) = link1 {
                     freed_bytes += self.dispose_all_nodes(first, &on_dispose);
                 }
