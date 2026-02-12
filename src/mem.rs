@@ -101,7 +101,6 @@ impl GcHeap {
                                 0xFF00_0000 | ((gc_dtype as u32) << 8)
                             }
                         },
-                        ref_count: 0,
                         partition: 0,
                         weak_id: GcWeakRawId::NULL,
                         next: None,
@@ -136,16 +135,17 @@ impl GcHeap {
         }
     }
 
-    /// Dispose one node
+    /// Dispose a node
     pub(crate) fn dispose(&mut self, node: NonNull<GcHead>) -> usize {
         let hd = unsafe { node.as_ref() };
         log::trace!("[dispose] {hd:?}");
 
         #[cfg(debug_assertions)]
         {
-            debug_assert_eq!(hd.ref_count(), 0, "{hd:?}");
             hd.debug_assert_node_valid(self);
-            debug_assert!(hd.xref_partition().is_null(), "{hd:?}");
+            if self.dbg_dropping_root_partition.is_none() {
+                debug_assert!(hd.xref_partition().is_null(), "{hd:?}");
+            }
         }
 
         if !hd.weak_id.is_null() {

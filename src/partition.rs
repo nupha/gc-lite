@@ -354,10 +354,16 @@ impl GcHeap {
         on_migrate: impl Fn(&GcHeap, &GcHead, GcPartitionId),
         on_dispose: impl Fn(&GcHeap, &GcHead),
     ) {
-        let parent_id = self.partition(partition_id).unwrap().parent();
-        if parent_id.is_null() {
-            return self.remove_root_partition(partition_id, on_dispose);
-        }
+        let parent_id = if let Some(par) = self.partition(partition_id) {
+            par.parent()
+        } else {
+            return;
+        };
+
+        // if parent_id.is_null() {
+        //     // drop root partition - fast mode
+        //     return self.remove_root_partition_fast(partition_id, on_dispose);
+        // }
 
         let mut scopes = Vec::<GcPartitionId>::with_capacity(64);
         scopes.push(partition_id);
@@ -459,9 +465,11 @@ impl GcHeap {
                 self.mgr.partitions.remove(&pid);
             }
 
-            let parent = self.partition_mut(parent_id).unwrap();
-            // Remove from parent's children list
-            parent.children.retain(|&c| c != partition_id);
+            if let Some(parent) = self.partition_mut(parent_id) {
+                // Remove from parent's children list
+                parent.children.retain(|&c| c != partition_id);
+            }
+
             // Decrease parent's memory usage
             self.mgr.update_mem_use(parent_id, -(freed_bytes as i32));
 
@@ -469,13 +477,20 @@ impl GcHeap {
         }
     }
 
-    pub(crate) fn remove_root_partition(
+    /// drop root partition and all its descendants without check and fixes - the fast path.
+    pub(crate) fn remove_root_partition_fast(
         &mut self,
         partition_id: GcPartitionId,
         on_dispose: impl Fn(&GcHeap, &GcHead),
     ) {
         log::trace!("[remove_root_partition] {partition_id:?}");
         debug_assert!(self.partition(partition_id).unwrap().is_root());
+
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(self.dbg_dropping_root_partition.is_none());
+            self.dbg_dropping_root_partition = Some(partition_id);
+        }
 
         let mut scopes = Vec::with_capacity(64);
         scopes.push(partition_id);
@@ -484,11 +499,16 @@ impl GcHeap {
 
         // from descendants to ancestor - using ::pop() from tail.
         while let Some(pid) = scopes.pop() {
-            if let Some(chain) = self.partition_nodes.remove(&pid).unwrap() {
-                self.dispose_all_nodes(chain, &on_dispose);
+            if let Some(link) = self.partition_nodes.remove(&pid).unwrap() {
+                self.dispose_all_nodes(link, &on_dispose);
             }
             self.partition_root_nodes.remove(&pid);
             self.mgr.partitions.remove(&pid);
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            self.dbg_dropping_root_partition = None;
         }
     }
 

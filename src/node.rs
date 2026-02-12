@@ -34,7 +34,6 @@ pub struct GcHead {
     /// * bit 8-15:  gc datatype id
     /// * bit 0-7:   flags
     pub(super) attrs: u32,
-    pub(super) ref_count: u32,
 
     /// XRef partition id (16bit) + Partition id (16bit)
     pub(super) partition: u32,
@@ -54,11 +53,11 @@ impl std::fmt::Debug for GcHead {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("GcNode");
         s.field("ptr", &(self as *const Self))
-            .field("scope", &self.scope_id().0)
-            //.field("dtype", &self.gc_dtype())
-            // .field("flags", &self.flags())
-            .field("xref", &self.xref_partition().0);
+            .field("scope", &self.scope_id().0);
 
+        if !self.xref_partition().is_null() {
+            s.field("xref", &self.xref_partition().0);
+        }
         if let Some(w) = self.weak() {
             s.field("weak", &format!("{}#{}", w.index(), w.version()));
         }
@@ -145,24 +144,6 @@ impl GcHead {
     pub(crate) fn set_scope_id(&mut self, id: GcPartitionId) {
         debug_assert!(self.scope_id().is_null() || self.scope_id() == id);
         self.partition = (self.partition & 0xFFFF_0000) | id.0 as u32;
-    }
-
-    #[inline(always)]
-    pub fn inc_ref(&mut self) -> u32 {
-        self.ref_count += 1;
-        self.ref_count
-    }
-
-    #[inline(always)]
-    pub fn dec_ref(&mut self) -> u32 {
-        debug_assert!(self.ref_count > 0);
-        self.ref_count -= 1;
-        self.ref_count
-    }
-
-    #[inline(always)]
-    pub fn ref_count(&self) -> u32 {
-        self.ref_count
     }
 
     /// get node weakref info

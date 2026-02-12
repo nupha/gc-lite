@@ -23,6 +23,8 @@ pub struct GcHeap {
     opaque: *mut u8,
 
     #[cfg(debug_assertions)]
+    pub(crate) dbg_dropping_root_partition: Option<GcPartitionId>,
+    #[cfg(debug_assertions)]
     pub(crate) dbg_living_nodes: std::collections::HashSet<NonNull<GcHead>>,
 }
 
@@ -66,7 +68,9 @@ impl GcHeap {
             opaque: std::ptr::null_mut(),
 
             #[cfg(debug_assertions)]
-            dbg_living_nodes: std::collections::HashSet::with_capacity(1024),
+            dbg_dropping_root_partition: None,
+            #[cfg(debug_assertions)]
+            dbg_living_nodes: std::collections::HashSet::with_capacity(128),
         }
     }
 
