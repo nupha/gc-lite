@@ -195,7 +195,7 @@ impl GcHead {
             self.gc_dtype() != 0
                 && self.flags().contains(GcNodeFlag::MAGIC_NUM)
                 && self.next.is_none_or(|n| n.is_aligned()),
-            "bad node: {self:?}"
+            "bad node: {self:p}"
         )
     }
 
