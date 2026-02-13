@@ -17,6 +17,15 @@ use crate::{
 pub unsafe trait GcTracable: 'static {
     /// Collect directly referenced children gc nodes
     fn trace(&self, tr: GcTraceOp);
+
+    /// set cross scope ref for children nodes
+    fn set_xref(&self, heap: &mut GcHeap, xref: GcPartitionId) {
+        let mut tr = GcTracer::new(heap, GcTraceRestrict::No, false);
+        self.trace(tr.ctx());
+        for ch in tr.take_traced_nodes() {
+            heap.set_xref(xref, ch);
+        }
+    }
 }
 
 impl GcHead {

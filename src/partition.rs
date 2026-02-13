@@ -389,6 +389,7 @@ impl GcHeap {
 
                     self.apply_recursive(*xn, GcPartitionId::NONE, {
                         let hp = NonNull::from_ref(self);
+
                         move |mut n, _| unsafe {
                             let xref0 = n.as_ref().xref_partition();
 
