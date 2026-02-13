@@ -382,11 +382,10 @@ impl GcHeap {
                     .iter()
                     .filter(|n| unsafe { !n.as_ref().xref_partition().is_null() })
                 {
-                    unsafe {
+                    let xref = unsafe {
                         debug_assert_eq!(xn.as_ref().scope_id(), pid); // O.o
-                    }
-
-                    let xref = unsafe { xn.as_ref().xref_partition() };
+                        xn.as_ref().xref_partition()
+                    };
 
                     self.apply_recursive(*xn, GcPartitionId::NONE, {
                         let hp = NonNull::from_ref(self);
