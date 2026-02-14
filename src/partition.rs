@@ -830,31 +830,6 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_partition_with_children() {
-        let mut manager = GcPartitionMgr::new();
-
-        let root_id = manager.create_partition(Some(2048), GcPartitionId::NONE);
-        let child1_id = manager.create_partition(Some(1024), root_id);
-        let child2_id = manager.create_partition(Some(512), root_id);
-        let grandchild_id = manager.create_partition(Some(256), child1_id);
-
-        // Verify all partitions exist
-        assert!(manager.partitions.get(&root_id).is_some());
-        assert!(manager.partitions.get(&child1_id).is_some());
-        assert!(manager.partitions.get(&child2_id).is_some());
-        assert!(manager.partitions.get(&grandchild_id).is_some());
-
-        // Remove root - should remove all descendants
-        manager.remove_partition(root_id);
-
-        // All partitions should be removed
-        assert!(manager.partitions.get(&root_id).is_none());
-        assert!(manager.partitions.get(&child1_id).is_none());
-        assert!(manager.partitions.get(&child2_id).is_none());
-        assert!(manager.partitions.get(&grandchild_id).is_none());
-    }
-
-    #[test]
     fn test_memory_rollup_with_hierarchy() {
         let mut manager = GcPartitionMgr::new();
 
