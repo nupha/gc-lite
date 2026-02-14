@@ -195,36 +195,6 @@ impl GcPartitionMgr {
         id
     }
 
-    /// Remove partition and all its descendants
-    ///
-    /// # Returns
-    /// The removed partition if it existed
-    #[deprecated]
-    pub fn remove_partition(&mut self, id: GcPartitionId) -> Option<GcPartition> {
-        // Get parent ID before removing
-        let parent_id = self.partitions.get(&id).map(|p| p.parent);
-
-        // First, recursively remove all children
-        if let Some(partition) = self.partitions.get(&id) {
-            let children: Vec<GcPartitionId> = partition.children.clone();
-            for child_id in children {
-                self.remove_partition(child_id);
-            }
-        }
-
-        // Remove from parent's children list
-        if parent_id == Some(GcPartitionId::NONE) {
-            // This partition has no parent, nothing to remove from
-        } else if let Some(pid) = parent_id {
-            if let Some(parent_partition) = self.partitions.get_mut(&pid) {
-                parent_partition.children.retain(|&child_id| child_id != id);
-            }
-        }
-
-        let removed = self.partitions.remove(&id);
-        removed
-    }
-
     /// Update memory usage with rollup to parent partitions
     ///
     /// # Parameters
@@ -298,6 +268,7 @@ impl<'a> Iterator for GcPartitionParentIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         if !self.current.is_null() {
             let p = self.current;
+            debug_assert!(self.heap.partition(p).is_some(), "{p:?}");
             self.current = self.heap.partition(p).unwrap().parent;
             Some(p)
         } else {

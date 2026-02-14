@@ -6,8 +6,7 @@ use std::ptr::NonNull;
 use crate::{GcHead, GcHeap, GcPartitionId};
 
 impl GcHead {
-    /// Get cross reference partition
-    #[cfg(debug_assertions)]
+    /// Get cross reference scope
     pub fn xref_partition(&self) -> GcPartitionId {
         let p = (self.partition >> 16) as u16;
         GcPartitionId(p)
@@ -20,9 +19,8 @@ impl GcHead {
     /// * true if node has xref set
     /// * false if node has xref unset
     pub(crate) fn set_xref(&mut self, xref: GcPartitionId) -> bool {
-        log::trace!("[set_xref] {xref:?} -> {self:?}");
-
         if !xref.is_null() && xref != self.scope_id() {
+            log::trace!("[set_xref] {xref:?} -> {self:?}");
             self.partition = (self.partition & 0x0000_FFFF) | ((xref.0 as u32) << 16);
             true
         } else {
