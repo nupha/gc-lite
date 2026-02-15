@@ -77,7 +77,7 @@ impl GcHeap {
                 {
                     return Err((GcError::PartitionFull, payload));
                 } else {
-                    let gc_dtype = TypeRegistry::with_gc_data_types_mut(|tt| tt.register::<T>(0));
+                    let gc_dtype = TypeRegistry::with_mut(|tt| tt.register::<T>(0));
                     let ptr = match self.mem_alloc(gross_size) {
                         Some(p) => p,
                         None => {

@@ -89,240 +89,226 @@ impl GcHeap {
 
 #[cfg(test)]
 mod xref_tests {
-    use std::ptr::NonNull;
+    use std::ops::DerefMut;
 
     use super::*;
+    use crate::{
+        GcRef,
+        trace::{GcTracable, GcTraceOp},
+    };
 
-    /// 创建测试节点：使用heap.alloc创建真实节点，然后设置xref_partition
-    fn create_test_node_with_xref(
-        heap: &mut GcHeap,
-        node_pid: GcPartitionId,
-        xref_pid: GcPartitionId,
-    ) -> NonNull<GcHead> {
-        // 创建一个简单的i32节点
-        let gc_ref = heap.alloc(node_pid, 42i32).unwrap();
-        let mut head_ptr = gc_ref.head_ptr;
-
-        // 设置xref_partition
-        unsafe {
-            head_ptr.as_mut().set_xref(xref_pid);
-        }
-
-        head_ptr
+    #[derive(Debug)]
+    struct TestNode {
+        children: Vec<GcRef<TestNode>>,
     }
 
-    /// 测试场景1: from_partition 比 node_partition 更上级, xref0 不存在
-    /// 预期: 返回 true, xref 更新
-    #[test]
-    fn test_set_xref_no_existing_xref() {
-        let mut heap = GcHeap::new();
-
-        // 创建分区层次结构: Root -> NodePartition
-        let root_id = heap.create_root_partition(4096);
-        let node_pid = heap.create_sub_partition(root_id);
-
-        // 创建 from_partition
-        let from_pid = root_id;
-
-        // 创建节点 (xref = NONE)
-        let node = create_test_node_with_xref(&mut heap, node_pid, GcPartitionId::NONE);
-
-        // 初始 xref 为 NONE
-        unsafe {
-            assert_eq!(node.as_ref().xref_partition(), GcPartitionId::NONE);
-        }
-
-        let result = heap.set_xref(from_pid, node);
-        assert!(
-            result,
-            "set_xref should return true when xref does not exist"
-        );
-
-        unsafe {
-            assert_eq!(node.as_ref().xref_partition(), from_pid);
+    unsafe impl GcTracable for TestNode {
+        fn trace(&self, mut tr: GcTraceOp) {
+            for ch in &self.children {
+                tr.add(*ch);
+            }
         }
     }
 
-    /// 测试场景2: from_partition 与 node_partition 是兄弟节点, xref0 是更上级
-    /// 预期: 不更新 (common_parent(xref0, up) == xref0)
-    #[test]
-    fn test_set_xref_xref0_is_higher() {
-        let mut heap = GcHeap::new();
-
-        // 创建分区层次结构: Root -> NodePartition 和 Root -> FromPartition
-        let root_id = heap.create_root_partition(4096);
-        let node_pid = heap.create_sub_partition(root_id);
-        let from_pid = heap.create_sub_partition(root_id);
-
-        // 创建节点, xref = root_id
-        let node = create_test_node_with_xref(&mut heap, node_pid, root_id);
-
-        // 初始 xref 为 Root
-        unsafe {
-            assert_eq!(node.as_ref().xref_partition(), root_id);
-        }
-
-        // 调用 set_xref
-        heap.set_xref(from_pid, node);
-
-        // 预期: 不更新, xref 仍为 Root (common_parent(Root, Root) = Root = xref0)
-        unsafe {
-            assert_eq!(node.as_ref().xref_partition(), root_id);
-        }
+    fn alloc_node(heap: &mut GcHeap, pid: GcPartitionId) -> GcRef<TestNode> {
+        heap.alloc(
+            pid,
+            TestNode {
+                children: Vec::new(),
+            },
+        )
+        .unwrap()
     }
 
-    /// 测试场景3: from_partition 与 node_partition 是兄弟节点, xref0 是更下级
-    /// 预期: 更新为 up (from_pid)
     #[test]
-    fn test_set_xref_xref0_is_lower() {
-        let mut heap = GcHeap::new();
-
-        // 创建分区层次结构: Root -> FromPartition -> XrefChild
-        let root_id = heap.create_root_partition(4096);
-        let from_pid = heap.create_sub_partition(root_id);
-        let xref0 = heap.create_sub_partition(from_pid);
-
-        let node_pid = heap.create_sub_partition(root_id); // 兄弟节点
-
-        // 创建节点, xref0 为 From 的子节点
-        let node = create_test_node_with_xref(&mut heap, node_pid, xref0);
-
-        // 初始 xref 为 xref0
-        unsafe {
-            assert_eq!(node.as_ref().xref_partition(), xref0);
-        }
-
-        // 调用 set_xref(from_partition=from_pid)
-        // common_parent(node_pid, from_pid) = Root
-        // common_parent(xref0, Root) = from_pid (因为 xref0 的父节点是 from_pid)
-        // up = from_pid != xref0, 所以应该更新
-        heap.set_xref(from_pid, node);
-
-        // 预期: xref 更新为 from_pid
-        unsafe {
-            assert_eq!(node.as_ref().xref_partition(), from_pid);
-        }
-    }
-
-    /// 测试场景4: xref0 是 node_partition 的祖先
-    /// 预期: 更新为 up (Root)
-    #[test]
-    fn test_set_xref_xref0_is_ancestor_of_node() {
-        let mut heap = GcHeap::new();
-
-        // 创建分区层次结构: Root -> Xref0 -> NodeChild
-        let root_id = heap.create_root_partition(4096);
-        let xref0 = heap.create_sub_partition(root_id);
-        let node_pid = heap.create_sub_partition(xref0); // node 是 xref0 的子节点
-
-        let from_pid = heap.create_sub_partition(root_id); // 另一个分支
-
-        // 创建节点, xref0 为 xref0
-        let node = create_test_node_with_xref(&mut heap, node_pid, xref0);
-
-        // 初始 xref 为 xref0
-        unsafe {
-            assert_eq!(node.as_ref().xref_partition(), xref0);
-        }
-
-        // 调用 set_xref(from_partition=from_pid)
-        // common_parent(node_pid, from_pid) = Root
-        // common_parent(xref0, Root) = Root (因为 xref0 的父节点是 Root)
-        // up = Root != xref0, 所以应该更新
-        heap.set_xref(from_pid, node);
-
-        // 预期: xref 更新为 Root
-        unsafe {
-            assert_eq!(node.as_ref().xref_partition(), root_id);
-        }
-    }
-
-    /// 测试场景5: from_partition 与 node_partition 相同
-    /// 预期: 不更新 (up == node_pid)
-    #[test]
-    fn test_set_xref_same_partition() {
+    fn test_bind_sets_xref_to_common_parent_no_existing_xref() {
         let mut heap = GcHeap::new();
 
         let root_id = heap.create_root_partition(4096);
-        let node_pid = heap.create_sub_partition(root_id);
+        let a_id = heap.create_sub_partition(root_id);
+        let b_id = heap.create_sub_partition(root_id);
 
-        // 创建节点, xref 为 Root
-        let node = create_test_node_with_xref(&mut heap, node_pid, root_id);
+        let master = alloc_node(&mut heap, a_id);
+        let slave = alloc_node(&mut heap, b_id);
+
+        unsafe { (*slave.head_ptr.as_ptr()).unset_xref() };
 
         unsafe {
-            assert_eq!(node.as_ref().xref_partition(), root_id);
+            assert_eq!(
+                slave.head_ptr.as_ref().xref_partition(),
+                GcPartitionId::NONE
+            );
         }
 
-        // 调用 set_xref(from_partition=node_pid), 相同分区
-        heap.set_xref(node_pid, node);
+        heap.bind(master.head_ptr, slave.head_ptr);
 
-        // 预期: 不更新
         unsafe {
-            assert_eq!(node.as_ref().xref_partition(), root_id);
+            assert_eq!(slave.head_ptr.as_ref().xref_partition(), root_id);
+            assert!(slave.head_ptr.as_ref().is_root());
         }
+        heap.remove_root_partition_fast(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     }
 
-    /// 测试场景6: from_partition 是 node_partition 的下级
-    /// 预期: 不更新 (up == node_pid)
     #[test]
-    fn test_set_xref_from_is_lower() {
+    fn test_bind_no_change_same_partition() {
+        let mut heap = GcHeap::new();
+
+        let root_id = heap.create_root_partition(4096);
+        let a_id = heap.create_sub_partition(root_id);
+
+        let master = alloc_node(&mut heap, a_id);
+        let slave = alloc_node(&mut heap, a_id);
+
+        unsafe {
+            assert_eq!(
+                slave.head_ptr.as_ref().xref_partition(),
+                GcPartitionId::NONE
+            );
+        }
+
+        heap.bind(master.head_ptr, slave.head_ptr);
+
+        unsafe {
+            assert_eq!(
+                slave.head_ptr.as_ref().xref_partition(),
+                GcPartitionId::NONE
+            );
+            assert!(!slave.head_ptr.as_ref().is_root());
+        }
+        heap.remove_root_partition_fast(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    }
+
+    #[test]
+    fn test_set_xref_elevates_lower_existing_xref() {
+        let mut heap = GcHeap::new();
+
+        let root_id = heap.create_root_partition(4096);
+        let a_id = heap.create_sub_partition(root_id);
+        let a_child = heap.create_sub_partition(a_id);
+        let b_id = heap.create_sub_partition(root_id);
+
+        let master = alloc_node(&mut heap, a_id);
+        let slave = alloc_node(&mut heap, b_id);
+
+        unsafe { (*slave.head_ptr.as_ptr()).set_xref(a_child) };
+
+        unsafe {
+            assert_eq!(slave.head_ptr.as_ref().xref_partition(), a_child);
+        }
+
+        heap.bind(master.head_ptr, slave.head_ptr);
+
+        unsafe {
+            assert_eq!(slave.head_ptr.as_ref().xref_partition(), a_id);
+            assert!(slave.head_ptr.as_ref().is_root());
+        }
+        heap.remove_root_partition_fast(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    }
+
+    #[test]
+    fn test_set_xref_no_regression_when_existing_xref_higher() {
+        let mut heap = GcHeap::new();
+
+        let root_id = heap.create_root_partition(4096);
+        let a_id = heap.create_sub_partition(root_id);
+        let b_id = heap.create_sub_partition(root_id);
+
+        let master = alloc_node(&mut heap, a_id);
+        let slave = alloc_node(&mut heap, b_id);
+
+        unsafe { (*slave.head_ptr.as_ptr()).set_xref(root_id) };
+
+        unsafe {
+            assert_eq!(slave.head_ptr.as_ref().xref_partition(), root_id);
+        }
+
+        heap.bind(master.head_ptr, slave.head_ptr);
+
+        unsafe {
+            assert_eq!(slave.head_ptr.as_ref().xref_partition(), root_id);
+            assert!(!slave.head_ptr.as_ref().is_root());
+        }
+        heap.remove_root_partition_fast(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    }
+
+    #[test]
+    fn test_set_xref_same_partition_no_update() {
+        let mut heap = GcHeap::new();
+
+        let root_id = heap.create_root_partition(4096);
+        let a_id = heap.create_sub_partition(root_id);
+
+        let mut node = alloc_node(&mut heap, a_id);
+
+        unsafe {
+            (*node.head_ptr.as_ptr()).set_xref(root_id);
+            assert_eq!(node.head_ptr.as_ref().xref_partition(), root_id);
+        }
+
+        let updated = heap.set_xref(a_id, node.head_ptr);
+        assert!(!updated);
+
+        unsafe {
+            assert_eq!(node.head_ptr.as_ref().xref_partition(), root_id);
+            assert!(!node.head_ptr.as_ref().is_root());
+        }
+        heap.remove_root_partition_fast(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    }
+
+    #[test]
+    fn test_set_xref_from_is_lower_no_update() {
         let mut heap = GcHeap::new();
 
         let root_id = heap.create_root_partition(4096);
         let node_pid = heap.create_sub_partition(root_id);
-        let from_pid = heap.create_sub_partition(node_pid); // from 是 node 的下级
+        let from_pid = heap.create_sub_partition(node_pid);
 
-        // 创建节点, xref 为 Root
-        let node = create_test_node_with_xref(&mut heap, node_pid, root_id);
+        let node = alloc_node(&mut heap, node_pid);
+
+        unsafe { (*node.head_ptr.as_ptr()).set_xref(root_id) };
 
         unsafe {
-            assert_eq!(node.as_ref().xref_partition(), root_id);
+            assert_eq!(node.head_ptr.as_ref().xref_partition(), root_id);
         }
 
-        // 调用 set_xref(from_partition=from_pid)
-        // common_parent(node_pid, from_pid) = node_pid
-        // up == node_pid, 所以直接返回, 不更新
-        heap.set_xref(from_pid, node);
+        let updated = heap.set_xref(from_pid, node.head_ptr);
+        assert!(!updated);
 
-        // 预期: 不更新
         unsafe {
-            assert_eq!(node.as_ref().xref_partition(), root_id);
+            assert_eq!(node.head_ptr.as_ref().xref_partition(), root_id);
+            assert!(!node.head_ptr.as_ref().is_root());
         }
+        heap.remove_root_partition_fast(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     }
 
-    /// 测试场景7: 复杂层次结构, 三个分区有共同祖先
     #[test]
-    fn test_set_xref_complex_hierarchy() {
+    fn test_multiple_bind_converges_to_common_parent() {
         let mut heap = GcHeap::new();
 
-        // 创建分区层次结构:
-        //       Root
-        //      /    \
-        //    A       B
-        //   / \      \\
-        //  A1  A2    B1
         let root_id = heap.create_root_partition(4096);
         let a_id = heap.create_sub_partition(root_id);
         let b_id = heap.create_sub_partition(root_id);
         let a1_id = heap.create_sub_partition(a_id);
-        let _a2_id = heap.create_sub_partition(a_id);
+        let a2_id = heap.create_sub_partition(a_id);
         let b1_id = heap.create_sub_partition(b_id);
 
-        // 场景: node 在 A1, xref 是 A, from 是 B1
-        // common_parent(A1, B1) = Root
-        // common_parent(A, Root) = Root
-        // up = Root != A, 所以应该更新为 Root
+        let master_a2 = alloc_node(&mut heap, a2_id);
+        let master_b1 = alloc_node(&mut heap, b1_id);
+        let mut node = alloc_node(&mut heap, a1_id);
 
-        let node = create_test_node_with_xref(&mut heap, a1_id, a_id);
-
-        unsafe {
-            assert_eq!(node.as_ref().xref_partition(), a_id);
-        }
-
-        heap.set_xref(b1_id, node);
+        node.deref_mut().children.push(master_a2);
 
         unsafe {
-            assert_eq!(node.as_ref().xref_partition(), root_id);
+            (*node.head_ptr.as_ptr()).set_xref(a_id);
+            assert_eq!(node.head_ptr.as_ref().xref_partition(), a_id);
         }
+
+        heap.bind(master_b1.head_ptr, node.head_ptr);
+
+        unsafe {
+            assert_eq!(node.head_ptr.as_ref().xref_partition(), root_id);
+            assert!(node.head_ptr.as_ref().is_root());
+        }
+        heap.remove_root_partition_fast(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     }
 }

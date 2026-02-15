@@ -3,6 +3,8 @@
 
 use std::{collections::VecDeque, marker::PhantomData, ptr::NonNull};
 
+use smallvec::SmallVec;
+
 use crate::{
     GcHeap, GcPartitionId, GcRef,
     gctype::TypeRegistry,
@@ -44,6 +46,15 @@ pub enum GcTraceRestrict {
     Collect(GcPartitionId),
     /// trace restrict, collect restrict
     TraceCollect(GcPartitionId),
+}
+
+pub struct GcTraceCtx<'a> {
+    pub(super) heap: NonNull<GcHeap>,
+    pub(super) restrict: GcTraceRestrict,
+
+    pub(super) traced_nodes: SmallVec<[NonNull<GcHead>; 16]>,
+
+    _mark: PhantomData<&'a ()>,
 }
 
 pub struct GcTracer<'a> {

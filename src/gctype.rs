@@ -136,22 +136,22 @@ impl TypeRegistry {
     }
 
     #[inline(always)]
-    pub(crate) fn with_gc_data_types<R>(f: impl FnOnce(&TypeRegistry) -> R) -> R {
+    pub(crate) fn with<R>(f: impl FnOnce(&TypeRegistry) -> R) -> R {
         GC_TYPES.with(|s| f(s.borrow().deref()))
     }
 
     #[inline(always)]
-    pub(crate) fn with_gc_data_types_mut<R>(f: impl FnOnce(&mut TypeRegistry) -> R) -> R {
+    pub(crate) fn with_mut<R>(f: impl FnOnce(&mut TypeRegistry) -> R) -> R {
         GC_TYPES.with(|s| f(s.borrow_mut().deref_mut()))
     }
 
     #[inline(always)]
     pub fn type_id_of<T: GcTracable + 'static>() -> Option<u8> {
-        Self::with_gc_data_types(|tt| tt.gc_dtype_id::<T>())
+        Self::with(|tt| tt.gc_dtype_id::<T>())
     }
 
     pub fn set_gc_type_drop_pass<T: GcTracable + 'static>(pass: u8) {
-        Self::with_gc_data_types_mut(|tt| {
+        Self::with_mut(|tt| {
             tt.set_drop_pass::<T>(pass);
         })
     }
@@ -162,15 +162,15 @@ impl TypeRegistry {
         f: impl FnOnce(&GcTypeInfo) -> R,
     ) -> R {
         let id = unsafe { node.as_ref().gc_dtype() } as usize;
-        Self::with_gc_data_types(|tt| unsafe {
+        Self::with(|tt| unsafe {
             debug_assert!(id < tt.types.len());
             f(tt.types.get_unchecked(id))
         })
     }
 
     #[inline]
-    pub(crate) fn gc_type_drop_passes<'a>(passes: &'a mut [u8; 4]) -> &'a [u8] {
-        let cnt = Self::with_gc_data_types(|tt| {
+    pub(crate) fn drop_passes<'a>(passes: &'a mut [u8; 4]) -> &'a [u8] {
+        let cnt = Self::with(|tt| {
             for i in 0..tt.drop_passes_count as usize {
                 passes[i] = tt.drop_passes[i];
             }
@@ -217,10 +217,5 @@ impl GcHeap {
         f: impl FnOnce(&GcTypeInfo) -> R,
     ) -> R {
         TypeRegistry::with_node_gc_type(node, f)
-    }
-
-    #[inline(always)]
-    pub(crate) fn gc_type_drop_passes<'a>(passes: &'a mut [u8; 4]) -> &'a [u8] {
-        TypeRegistry::gc_type_drop_passes(passes)
     }
 }

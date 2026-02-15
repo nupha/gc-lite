@@ -24,7 +24,7 @@ impl GcHeap {
             let mut link1 = link0;
             let mut freed_bytes = 0;
 
-            for &pass in TypeRegistry::gc_type_drop_passes(&mut [0; 4]) {
+            for &pass in TypeRegistry::drop_passes(&mut [0; 4]) {
                 let mut current = link1;
                 let mut prev: Option<NonNull<GcHead>> = None;
 
@@ -107,7 +107,7 @@ impl GcHeap {
         let mut link = Some(head);
         let mut freed_bytes = 0;
 
-        for &pass in TypeRegistry::gc_type_drop_passes(&mut [0; 4]) {
+        for &pass in TypeRegistry::drop_passes(&mut [0; 4]) {
             log::trace!(
                 "[dipose_all] pass {pass}, count={}",
                 NodeLinkIter::new(link).count()
