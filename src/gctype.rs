@@ -8,12 +8,12 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::{GcHead, GcHeap, GcTracable, trace::GcTraceOp};
+use crate::{GcHead, GcHeap, GcTracable, trace::GcTraceCtx};
 
 #[derive(Debug)]
 pub struct GcTypeInfo {
     pub size: u32,
-    pub(super) trace_fn: fn(NonNull<GcHead>, GcTraceOp),
+    pub(super) trace_fn: fn(NonNull<GcHead>, &mut GcTraceCtx),
     pub(super) drop_fn: Option<unsafe fn(*mut u8)>,
     pub(super) drop_pass: u8,
 
@@ -181,10 +181,10 @@ impl TypeRegistry {
     }
 }
 
-fn noop_trace_fn(_: NonNull<GcHead>, _: GcTraceOp) {}
+fn noop_trace_fn(_: NonNull<GcHead>, _: &mut GcTraceCtx) {}
 
 #[inline(never)]
-pub(super) fn trace_fn<T: GcTracable>(node: NonNull<GcHead>, tr: GcTraceOp) {
+pub(super) fn trace_fn<T: GcTracable>(node: NonNull<GcHead>, tr: &mut GcTraceCtx) {
     unsafe {
         node.as_ref().payload().cast::<T>().as_ref().trace(tr);
     }

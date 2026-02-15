@@ -11,7 +11,7 @@
 //! - Weak references
 //! - Error handling
 
-use gc_lite::{GcError, GcHeap, GcPartitionId, GcRef, GcTracable, GcTraceOp};
+use gc_lite::{GcError, GcHeap, GcPartitionId, GcRef, GcTracable, GcTraceCtx};
 
 /// Test data structure for integration tests
 #[derive(Debug, PartialEq, Clone)]
@@ -21,7 +21,7 @@ struct TestData {
 }
 
 unsafe impl GcTracable for TestData {
-    fn trace(&self, _: GcTraceOp) {
+    fn trace(&self, _: &mut GcTraceCtx) {
         // No GC references in this type
     }
 }
@@ -47,7 +47,7 @@ impl GcNode {
 }
 
 unsafe impl GcTracable for GcNode {
-    fn trace(&self, mut tr: GcTraceOp) {
+    fn trace(&self, tr: &mut GcTraceCtx) {
         for child in &self.children {
             tr.add(*child);
         }

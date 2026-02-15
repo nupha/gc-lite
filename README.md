@@ -19,7 +19,7 @@ A Partitioned Garbage Collector.
 - **GcRef<T>**: Underlying GC reference for internal operations
 - **GcWeak<T>**: Weak reference that doesn't prevent object collection
 - **GcTracable** trait: Defines behavior that objects to be garbage collected must implement
-- **GcTracer**: Tracer for marking reachable objects during GC
+- **GcTraceCtx**: Unified trace context for traversal and marking reachable objects
 
 ## Basic Usage
 
@@ -128,7 +128,7 @@ match weak_ref.upgrade(&heap) {
 To use custom types, implement the `GcTracable` trait:
 
 ```rust
-use gc_lite::GcTracable;
+use gc_lite::{GcTracable, GcTraceCtx, GcPartitionId};
 
 #[derive(Debug)]
 struct MyNode {
@@ -146,13 +146,18 @@ impl MyNode {
 }
 
 unsafe impl GcTracable for MyNode {
-    fn trace(&self, tracer: &mut gc_lite::GcTracer) {
-        // Trace all child nodes
+    fn trace(&self, ctx: &mut GcTraceCtx) {
         for child in &self.children {
-            tracer.add(*child);
+            ctx.add(*child);
         }
     }
 }
+
+// Traverse and collect the whole subtree starting from a node:
+// let mut heap = GcHeap::new();
+// let partition_id = heap.create_partition("p".to_string(), Some(1024));
+// let root = heap.alloc(partition_id, MyNode::new("root")).unwrap();
+// let (nodes, edges) = heap.collect_subtree(root.node_ptr(), GcPartitionId::NONE);
 ```
 
 ## Running Examples
@@ -211,7 +216,7 @@ struct Data {
 }
 
 unsafe impl GcTracable for Data {
-    fn trace(&self, _tracer: &mut gc_lite::GcTracer) {}
+    fn trace(&self, _ctx: &mut gc_lite::GcTraceCtx) {}
 }
 
 let mut heap = GcHeap::new();

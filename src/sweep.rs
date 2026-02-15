@@ -5,7 +5,7 @@ use std::ptr::NonNull;
 
 use crate::{
     GcHeap, GcTraceRestrict, gctype::TypeRegistry, node::GcHead, node_iterator::NodeLinkIter,
-    partition::GcPartitionId, trace::GcTracer,
+    partition::GcPartitionId, trace::GcTraceCtx,
 };
 
 impl GcHeap {
@@ -89,8 +89,8 @@ impl GcHeap {
         on_dispose: impl Fn(&GcHeap, &GcHead),
     ) -> usize {
         if self.partition(partition_id).is_some() {
-            let mut tr = GcTracer::new(self, GcTraceRestrict::No, true);
-            tr.trace_roots(partition_id, GcTracer::MARK_FUNC);
+            let mut ctx = GcTraceCtx::new(self, GcTraceRestrict::No, true);
+            ctx.trace_roots(partition_id, GcTraceCtx::MARK_FUNC);
             self.sweep(partition_id, Self::SWEEP_UNMARKED_FUNC, on_dispose)
         } else {
             0

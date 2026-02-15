@@ -11,7 +11,7 @@
 
 use std::ops::Deref;
 
-use gc_lite::{GcHeap, GcRef, GcResult, GcTracable, GcTraceOp};
+use gc_lite::{GcHeap, GcRef, GcResult, GcTracable, GcTraceCtx};
 
 fn main() -> GcResult<()> {
     println!("=== Advanced features example of partitioned garbage collection system ===");
@@ -340,7 +340,7 @@ impl CyclicNode {
 }
 
 unsafe impl GcTracable for CyclicNode {
-    fn trace(&self, mut tr: GcTraceOp) {
+    fn trace(&self, tr: &mut GcTraceCtx) {
         if let Some(partner) = self.partner {
             tr.add(partner);
         }
@@ -374,7 +374,7 @@ impl TreeNode {
 }
 
 unsafe impl GcTracable for TreeNode {
-    fn trace(&self, mut tr: GcTraceOp) {
+    fn trace(&self, tr: &mut GcTraceCtx) {
         for child in &self.children {
             tr.add(*child);
         }
@@ -401,7 +401,7 @@ struct DataContainer {
 }
 
 unsafe impl GcTracable for DataContainer {
-    fn trace(&self, mut tr: GcTraceOp) {
+    fn trace(&self, tr: &mut GcTraceCtx) {
         tr.add(self.root);
         if let Some(data) = self.optional_data {
             tr.add(data);
@@ -417,7 +417,7 @@ struct TestData {
 }
 
 unsafe impl GcTracable for TestData {
-    fn trace(&self, _: GcTraceOp) {
+    fn trace(&self, _: &mut GcTraceCtx) {
         // No references to trace
     }
 }

@@ -94,7 +94,7 @@ mod xref_tests {
     use super::*;
     use crate::{
         GcRef,
-        trace::{GcTracable, GcTraceOp},
+        trace::{GcTracable, GcTraceCtx},
     };
 
     #[derive(Debug)]
@@ -103,7 +103,7 @@ mod xref_tests {
     }
 
     unsafe impl GcTracable for TestNode {
-        fn trace(&self, mut tr: GcTraceOp) {
+        fn trace(&self, tr: &mut GcTraceCtx) {
             for ch in &self.children {
                 tr.add(*ch);
             }
@@ -238,7 +238,7 @@ mod xref_tests {
         let root_id = heap.create_root_partition(4096);
         let a_id = heap.create_sub_partition(root_id);
 
-        let mut node = alloc_node(&mut heap, a_id);
+        let node = alloc_node(&mut heap, a_id);
 
         unsafe {
             (*node.head_ptr.as_ptr()).set_xref(root_id);

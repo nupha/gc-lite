@@ -3,8 +3,6 @@
 
 use std::{collections::VecDeque, marker::PhantomData, ptr::NonNull};
 
-use smallvec::SmallVec;
-
 use crate::{
     GcHeap, GcPartitionId, GcRef,
     gctype::TypeRegistry,
@@ -18,21 +16,22 @@ use crate::{
 /// This ensures that only types that explicitly support garbage collection can be allocated.
 pub unsafe trait GcTracable: 'static {
     /// Collect directly referenced children gc nodes
-    fn trace(&self, tr: GcTraceOp);
+    fn trace(&self, gcx: &mut GcTraceCtx);
 
-    /// set cross scope ref for children nodes
-    fn set_xref(&self, heap: &mut GcHeap, xref: GcPartitionId) {
-        let mut tr = GcTracer::new(heap, GcTraceRestrict::No, false);
-        self.trace(tr.ctx());
-        for ch in tr.take_traced_nodes() {
-            heap.set_xref(xref, ch);
+    /// Set cross scope for `self` node and its direct children nodes
+    fn set_xref(&self, heap: &mut GcHeap, scope: GcPartitionId) {
+        let mut gcx = GcTraceCtx::new(heap, GcTraceRestrict::No, false);
+        self.trace(&mut gcx);
+
+        for ch in gcx.take_traced_nodes() {
+            heap.set_xref(scope, ch);
         }
     }
 }
 
 impl GcHead {
-    /// get trace func for node
-    pub(crate) fn trace_fn(&self) -> fn(NonNull<GcHead>, GcTraceOp<'_>) {
+    /// get trace func of node
+    pub(crate) fn trace_fn(&self) -> fn(NonNull<GcHead>, &mut GcTraceCtx<'_>) {
         TypeRegistry::with_node_gc_type(NonNull::from_ref(self), |ty| ty.trace_fn)
     }
 }
@@ -51,24 +50,11 @@ pub enum GcTraceRestrict {
 pub struct GcTraceCtx<'a> {
     pub(super) heap: NonNull<GcHeap>,
     pub(super) restrict: GcTraceRestrict,
-
-    pub(super) traced_nodes: SmallVec<[NonNull<GcHead>; 16]>,
-
+    pub(super) traced_nodes: VecDeque<NonNull<GcHead>>, // SmallVec<[NonNull<GcHead>; 16]>,
     _mark: PhantomData<&'a ()>,
 }
 
-pub struct GcTracer<'a> {
-    pub(super) heap: NonNull<GcHeap>,
-    pub(super) restrict: GcTraceRestrict,
-
-    /// collected nodes during tracing
-    /// TODO: use HashSet to uniquify?
-    pub(super) traced_nodes: VecDeque<NonNull<GcHead>>,
-
-    _mark: PhantomData<&'a ()>,
-}
-
-impl<'a> GcTracer<'a> {
+impl<'a> GcTraceCtx<'a> {
     #[allow(non_snake_case)]
     pub fn MARK_FUNC(mut h: NonNull<GcHead>, _: &GcHeap) {
         unsafe {
@@ -78,28 +64,32 @@ impl<'a> GcTracer<'a> {
         }
     }
 
-    /// create new tracer, optionally clear all nodes' visit and mark flags.
+    /// create new trace ctx, optionally clear all nodes' visit and mark flags.
     pub fn new(heap: &GcHeap, restrict: GcTraceRestrict, clear_flags: bool) -> Self {
         #[cfg(debug_assertions)]
         if let GcTraceRestrict::Collect(pid) | GcTraceRestrict::TraceCollect(pid) = restrict {
             debug_assert!(heap.partition(pid).is_some());
         }
 
-        let mut tr = GcTracer {
+        if clear_flags {
+            heap.clear_node_flags(GcNodeFlag::MARKED | GcNodeFlag::TRACED);
+        }
+
+        let ctx = GcTraceCtx {
             heap: NonNull::from_ref(heap),
             restrict,
             traced_nodes: VecDeque::new(),
             _mark: PhantomData,
         };
 
-        if clear_flags {
-            tr.clear_flags(GcNodeFlag::MARKED | GcNodeFlag::TRACED);
-        }
+        // if clear_flags {
+        //     ctx.clear_flags(GcNodeFlag::MARKED | GcNodeFlag::TRACED);
+        // }
 
-        tr
+        ctx
     }
 
-    /// clear node flags
+    #[deprecated(note = "use GcHeap::clear_node_flags() instead")]
     fn clear_flags(&mut self, mask_off: GcNodeFlag) {
         if let GcTraceRestrict::TraceCollect(pid) = self.restrict {
             let start = self.heap().partition_nodes.get(&pid).unwrap();
@@ -144,24 +134,19 @@ impl<'a> GcTracer<'a> {
         unsafe { self.heap.as_mut() }
     }
 
+    #[deprecated(note = "use GcHeap::clear_node_flags() instead")]
     #[inline(always)]
     pub fn clear_marked_flag(&mut self) {
         self.clear_flags(GcNodeFlag::MARKED);
     }
 
+    #[deprecated(note = "use GcHeap::clear_node_flags() instead")]
     #[inline(always)]
     pub fn clear_traced_flag(&mut self) {
         self.clear_flags(GcNodeFlag::TRACED);
     }
 
-    /// make trace ctx
     #[inline(always)]
-    pub const fn ctx(&mut self) -> GcTraceOp<'_> {
-        GcTraceOp {
-            tr: NonNull::from_ref(self),
-        }
-    }
-
     fn can_trace(&self, partition_id: GcPartitionId) -> bool {
         match self.restrict {
             GcTraceRestrict::TraceCollect(p) => p == partition_id,
@@ -200,7 +185,7 @@ impl<'a> GcTracer<'a> {
 
                 if self.can_trace(pid) {
                     // collect direct children nodes of `node`
-                    (TypeRegistry::with_node_gc_type(node, |ty| ty.trace_fn))(node, self.ctx());
+                    (TypeRegistry::with_node_gc_type(node, |ty| ty.trace_fn))(node, self);
                 }
             }
         }
@@ -228,27 +213,6 @@ impl<'a> GcTracer<'a> {
         }
     }
 
-    pub(crate) fn fix_xref_tree(&mut self, mut root_node: NonNull<GcHead>) {
-        let n = unsafe { root_node.as_ref() };
-        let xref = n.xref_partition();
-
-        debug_assert!(!xref.is_null());
-        debug_assert_eq!(self.restrict, GcTraceRestrict::Collect(n.scope_id()));
-        debug_assert!(n.is_root());
-
-        let mut flags = n.flags();
-        flags.insert(GcNodeFlag::TRACED);
-        unsafe {
-            root_node.as_mut().set_flags(flags);
-        }
-
-        (TypeRegistry::with_node_gc_type(root_node, |ty| ty.trace_fn))(root_node, self.ctx());
-
-        for sub in self.take_traced_nodes() {
-            self.set_xref_recursive(sub, xref);
-        }
-    }
-
     pub fn trace_roots(
         &mut self,
         partition_id: GcPartitionId,
@@ -273,66 +237,8 @@ impl<'a> GcTracer<'a> {
     }
 
     /// take out collected nodes
-    pub fn take_traced_nodes(&mut self) -> VecDeque<NonNull<GcHead>> {
-        std::mem::replace(&mut self.traced_nodes, VecDeque::new())
-    }
-
-    #[deprecated]
-    pub(crate) fn set_xref_recursive(&mut self, mut node: NonNull<GcHead>, xref: GcPartitionId) {
-        let n = unsafe { node.as_ref() };
-
-        debug_assert!(!xref.is_null());
-        debug_assert_eq!(self.restrict, GcTraceRestrict::Collect(n.scope_id()));
-
-        let xref0 = n.xref_partition();
-        let fix = if !xref0.is_null() {
-            self.heap().common_parent2(xref, xref0)
-        } else {
-            xref
-        };
-
-        let trace_sub = if fix != xref0 {
-            unsafe {
-                node.as_mut().set_xref(fix);
-            }
-            log::trace!("[fix_xref]: {n:?} -> {fix:?}");
-            true
-        } else {
-            let mut flags = n.flags();
-            flags.insert(GcNodeFlag::TRACED);
-            unsafe {
-                node.as_mut().set_flags(flags);
-            }
-            false
-        };
-
-        if trace_sub {
-            (TypeRegistry::with_node_gc_type(node, |ty| ty.trace_fn))(node, self.ctx());
-
-            for ch in self.take_traced_nodes() {
-                unsafe {
-                    if !ch.as_ref().flags().contains(GcNodeFlag::TRACED)
-                        && self.can_collect(ch.as_ref().scope_id())
-                    {
-                        self.set_xref_recursive(ch, fix);
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// tracer operation
-#[derive(Clone, Copy)]
-pub struct GcTraceOp<'a> {
-    tr: NonNull<GcTracer<'a>>,
-}
-
-impl<'a> GcTraceOp<'a> {
-    /// reference to heap
-    #[inline(always)]
-    pub const fn heap(&self) -> &GcHeap {
-        unsafe { &*self.tr.as_ref().heap.as_ptr() }
+    pub fn take_traced_nodes(&mut self) -> Vec<NonNull<GcHead>> {
+        std::mem::take(&mut self.traced_nodes).into()
     }
 
     /// Submit a node to collected list
@@ -342,10 +248,10 @@ impl<'a> GcTraceOp<'a> {
             #[cfg(debug_assertions)]
             node.as_ref().debug_assert_node_valid(self.heap()); // O.o
 
-            if self.tr.as_ref().can_collect(node.as_ref().scope_id())
-                && !self.tr.as_ref().traced_nodes.iter().any(|&n| n == node)
+            if self.can_collect(node.as_ref().scope_id())
+                && !self.traced_nodes.iter().any(|&n| n == node)
             {
-                self.tr.as_mut().traced_nodes.push_back(node);
+                self.traced_nodes.push_back(node);
             }
         }
     }
@@ -365,12 +271,6 @@ impl<'a> GcTraceOp<'a> {
 }
 
 impl GcHeap {
-    /// A shortcut to GcTracer::new(scope, true)
-    #[deprecated]
-    pub fn tracer(&self, restrict: GcTraceRestrict) -> GcTracer<'_> {
-        GcTracer::new(self, restrict, true)
-    }
-
     fn clear_node_flags(&self, clear_mask: GcNodeFlag) {
         for pid in self.partition_ids() {
             unsafe {
@@ -386,43 +286,97 @@ impl GcHeap {
         }
     }
 
-    pub fn apply_recursive(
-        &self,
-        node: NonNull<GcHead>,
+    fn traverse_internal(
+        parent: Option<NonNull<GcHead>>,
+        mut this: NonNull<GcHead>,
+        ctx: &mut GcTraceCtx,
         filter: GcPartitionId,
-        callback: impl Fn(NonNull<GcHead>, Option<NonNull<GcHead>>),
+        callback: &mut impl FnMut(NonNull<GcHead>, Option<NonNull<GcHead>>),
     ) {
-        fn since(
-            parent: Option<NonNull<GcHead>>,
-            mut this: NonNull<GcHead>,
-            tr: &mut GcTracer,
-            filter: GcPartitionId,
-            callback: &impl Fn(NonNull<GcHead>, Option<NonNull<GcHead>>),
-        ) {
-            unsafe {
-                if filter.is_null() || filter == this.as_ref().scope_id() {
-                    callback(this, parent);
-                }
+        unsafe {
+            if filter.is_null() || filter == this.as_ref().scope_id() {
+                callback(this, parent);
+            }
 
-                let f = this.as_ref().flags();
-                this.as_mut().set_flags(f.union(GcNodeFlag::TRACED));
+            let f = this.as_ref().flags();
+            this.as_mut().set_flags(f.union(GcNodeFlag::TRACED));
 
-                (this.as_ref().trace_fn())(this, tr.ctx());
+            (this.as_ref().trace_fn())(this, ctx);
 
-                let mut children = tr.take_traced_nodes();
-                while let Some(ch) = children.pop_front() {
-                    if !ch.as_ref().is_traced() {
-                        since(Some(this), ch, tr, filter, callback);
-                    }
+            let mut children = ctx.take_traced_nodes();
+            while let Some(ch) = children.pop() {
+                if !ch.as_ref().is_traced() {
+                    Self::traverse_internal(Some(this), ch, ctx, filter, callback);
                 }
             }
         }
+    }
 
+    /// Traverses the subtree starting at `node` in depth-first order,
+    /// invoking `callback` on each visited node with its optional parent.
+    /// If `filter` is non-null, only nodes in the specified partition are visited.
+    pub fn traverse_subtree(
+        &self,
+        node: NonNull<GcHead>,
+        filter: GcPartitionId,
+        mut callback: impl FnMut(NonNull<GcHead>, Option<NonNull<GcHead>>),
+    ) {
         // clear nodes's traced flag for all scopes
         self.clear_node_flags(GcNodeFlag::TRACED);
+        let mut ctx = GcTraceCtx::new(self, GcTraceRestrict::No, false);
+        Self::traverse_internal(None, node, &mut ctx, filter, &mut callback);
+    }
 
-        let mut tr = GcTracer::new(self, GcTraceRestrict::No, false);
-        since(None, node, &mut tr, filter, &callback);
+    /// Collects all nodes in the subtree starting at `node`.
+    /// If `filter` is non-null, only nodes in the specified partition are returned.
+    pub fn collect_subtree_nodes(
+        &self,
+        node: NonNull<GcHead>,
+        filter: GcPartitionId,
+    ) -> Vec<NonNull<GcHead>> {
+        let mut nodes = Vec::new();
+        self.traverse_subtree(node, filter, |n, _p| {
+            nodes.push(n);
+        });
+        nodes
+    }
+
+    /// Collects all edges (parent, child) pairs in the subtree starting at `node`.
+    /// If `filter` is non-null, only edges within the specified partition are returned.
+    pub fn collect_subtree_edges(
+        &self,
+        node: NonNull<GcHead>,
+        filter: GcPartitionId,
+    ) -> Vec<(NonNull<GcHead>, NonNull<GcHead>)> {
+        let mut edges = Vec::new();
+        self.traverse_subtree(node, filter, |n, p| {
+            if let Some(parent) = p {
+                edges.push((parent, n));
+            }
+        });
+        edges
+    }
+
+    /// Collects both nodes and edges of the subtree starting at `node`.
+    /// Returns `(nodes, edges)`; `edges` are (parent, child) pairs.
+    /// If `filter` is non-null, only data in the specified partition are collected.
+    pub fn collect_subtree(
+        &self,
+        node: NonNull<GcHead>,
+        filter: GcPartitionId,
+    ) -> (
+        Vec<NonNull<GcHead>>,
+        Vec<(NonNull<GcHead>, NonNull<GcHead>)>,
+    ) {
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        self.traverse_subtree(node, filter, |n, p| {
+            nodes.push(n);
+            if let Some(parent) = p {
+                edges.push((parent, n));
+            }
+        });
+        (nodes, edges)
     }
 }
 
@@ -431,19 +385,19 @@ macro_rules! impl_dummy_trace_for_primitive {
         $(
             unsafe impl GcTracable for $ty {
                 #[inline(always)]
-                fn trace(&self, _: GcTraceOp) { }
+                fn trace(&self, _: &mut GcTraceCtx) { }
             }
             unsafe impl GcTracable for [$ty] {
                 #[inline(always)]
-                fn trace(&self, _: GcTraceOp) { }
+                fn trace(&self, _: &mut GcTraceCtx) { }
             }
             unsafe impl GcTracable for Vec<$ty> {
                 #[inline(always)]
-                fn trace(&self, _: GcTraceOp) { }
+                fn trace(&self, _: &mut GcTraceCtx) { }
             }
             unsafe impl GcTracable for Box<[$ty]> {
                 #[inline(always)]
-                fn trace(&self, _: GcTraceOp) { }
+                fn trace(&self, _: &mut GcTraceCtx) { }
             }
         )*
     };
@@ -456,67 +410,20 @@ impl_dummy_trace_for_primitive!(
 
 unsafe impl GcTracable for str {
     #[inline(always)]
-    fn trace(&self, _: GcTraceOp) {}
+    fn trace(&self, _: &mut GcTraceCtx) {}
 }
 unsafe impl GcTracable for &'static str {
     #[inline(always)]
-    fn trace(&self, _: GcTraceOp) {}
+    fn trace(&self, _: &mut GcTraceCtx) {}
 }
 unsafe impl GcTracable for String {
     #[inline(always)]
-    fn trace(&self, _: GcTraceOp) {}
+    fn trace(&self, _: &mut GcTraceCtx) {}
 }
 unsafe impl GcTracable for &'static String {
     #[inline(always)]
-    fn trace(&self, _: GcTraceOp) {}
+    fn trace(&self, _: &mut GcTraceCtx) {}
 }
-
-// unsafe impl<T: GcTracable> GcTracable for Option<T> {
-//     #[inline(always)]
-//     fn trace(&self, tr: GcTraceOp) {
-//         if let Some(v) = self {
-//             v.trace(tr);
-//         }
-//     }
-// }
-
-//
-// BUGGY! could cause panic
-//
-
-// unsafe impl<T: GcTracable> GcTracable for Box<T> {
-//     #[inline(always)]
-//     fn trace(&self, tr: GcTraceOp) {
-//         self.as_ref().trace(tr);
-//     }
-// }
-
-// unsafe impl<T: GcTracable> GcTracable for [T] {
-//     #[inline]
-//     fn trace(&self, tr: GcTraceOp) {
-//         for n in self {
-//             n.trace(tr);
-//         }
-//     }
-// }
-
-// unsafe impl<T: GcTracable> GcTracable for Vec<T> {
-//     #[inline]
-//     fn trace(&self, tr: GcTraceOp) {
-//         for n in self {
-//             n.trace(tr);
-//         }
-//     }
-// }
-
-// unsafe impl<T: GcTracable> GcTracable for Box<[T]> {
-//     #[inline(always)]
-//     fn trace(&self, tr: GcTraceOp) {
-//         for n in self {
-//             n.trace(tr);
-//         }
-//     }
-// }
 
 #[cfg(test)]
 mod tests {
@@ -546,7 +453,7 @@ mod tests {
     }
 
     unsafe impl GcTracable for TestNode {
-        fn trace(&self, mut tr: GcTraceOp) {
+        fn trace(&self, tr: &mut GcTraceCtx) {
             println!(
                 "TestNode::trace({self:p}), {} children",
                 self.children.len()
@@ -617,10 +524,9 @@ mod tests {
         println!("Child1: {:?}", child1.node_ptr());
         println!("Child2: {:?}", child2.node_ptr());
 
-        // Create tracer and trace with Propagate (using MARK_FUNC)
-        let mut tracer = heap.tracer(GcTraceRestrict::Collect(partition_id));
-
-        tracer.trace(root_ref.node_ptr(), GcTracer::MARK_FUNC);
+        // Create trace ctx and trace (using MARK_FUNC)
+        let mut ctx = GcTraceCtx::new(&heap, GcTraceRestrict::Collect(partition_id), true);
+        ctx.trace(root_ref.node_ptr(), GcTraceCtx::MARK_FUNC);
 
         // check marks after tracing
         println!(
@@ -654,14 +560,14 @@ mod tests {
         let root_ref = heap.alloc(partition_id, root).unwrap();
 
         // Create tracer and trace with Continue
-        let mut tracer = heap.tracer(GcTraceRestrict::Collect(partition_id));
-        tracer.trace(root_ref.node_ptr(), GcTracer::MARK_FUNC);
+        let mut ctx = GcTraceCtx::new(&heap, GcTraceRestrict::Collect(partition_id), true);
+        ctx.trace(root_ref.node_ptr(), GcTraceCtx::MARK_FUNC);
 
         // Verify all nodes are marked
-        assert_eq!(count_marked_nodes(tracer.heap(), partition_id), 3);
+        assert_eq!(count_marked_nodes(&heap, partition_id), 3);
 
         // Verify pendings is empty after processing
-        assert!(tracer.traced_nodes.is_empty());
+        assert!(ctx.traced_nodes.is_empty());
     }
 
     /// Test 3: Deep nested tree with both algorithms
@@ -686,14 +592,13 @@ mod tests {
         let level0_ref = heap.alloc(partition_id, level0).unwrap();
 
         // Test with Propagate
-        let mut tracer1 = heap.tracer(GcTraceRestrict::Collect(partition_id));
-        tracer1.trace(level0_ref.node_ptr(), GcTracer::MARK_FUNC);
+        let mut ctx1 = GcTraceCtx::new(&heap, GcTraceRestrict::Collect(partition_id), true);
+        ctx1.trace(level0_ref.node_ptr(), GcTraceCtx::MARK_FUNC);
         assert_eq!(count_marked_nodes(&heap, partition_id), 4);
 
         // Test with Continue
-        let mut tracer2 = heap.tracer(GcTraceRestrict::Collect(partition_id));
-
-        tracer2.trace(level0_ref.node_ptr(), GcTracer::MARK_FUNC);
+        let mut ctx2 = GcTraceCtx::new(&heap, GcTraceRestrict::Collect(partition_id), true);
+        ctx2.trace(level0_ref.node_ptr(), GcTraceCtx::MARK_FUNC);
         assert_eq!(count_marked_nodes(&heap, partition_id), 4);
     }
 
@@ -731,14 +636,13 @@ mod tests {
         let root_ref = heap.alloc(partition_id, root).unwrap();
 
         // Test with Propagate
-        let mut tracer1 = heap.tracer(GcTraceRestrict::Collect(partition_id));
-        tracer1.trace(root_ref.node_ptr(), GcTracer::MARK_FUNC);
+        let mut ctx1 = GcTraceCtx::new(&heap, GcTraceRestrict::Collect(partition_id), true);
+        ctx1.trace(root_ref.node_ptr(), GcTraceCtx::MARK_FUNC);
         assert_eq!(count_marked_nodes(&heap, partition_id), 7);
 
         // Test with Continue
-        let mut tracer2 = heap.tracer(GcTraceRestrict::Collect(partition_id));
-
-        tracer2.trace(root_ref.node_ptr(), GcTracer::MARK_FUNC);
+        let mut ctx2 = GcTraceCtx::new(&heap, GcTraceRestrict::Collect(partition_id), true);
+        ctx2.trace(root_ref.node_ptr(), GcTraceCtx::MARK_FUNC);
         assert_eq!(count_marked_nodes(&heap, partition_id), 7);
     }
 
@@ -785,14 +689,13 @@ mod tests {
         }
 
         // Test with Propagate
-        let mut tracer1 = heap.tracer(GcTraceRestrict::Collect(partition_id));
-        tracer1.trace(nodes[0].node_ptr(), GcTracer::MARK_FUNC);
+        let mut ctx1 = GcTraceCtx::new(&heap, GcTraceRestrict::Collect(partition_id), true);
+        ctx1.trace(nodes[0].node_ptr(), GcTraceCtx::MARK_FUNC);
         let propagate_marked = count_marked_nodes(&heap, partition_id);
 
         // Test with Continue
-        let mut tracer2 = heap.tracer(GcTraceRestrict::Collect(partition_id));
-
-        tracer2.trace(nodes[0].node_ptr(), GcTracer::MARK_FUNC);
+        let mut ctx2 = GcTraceCtx::new(&heap, GcTraceRestrict::Collect(partition_id), true);
+        ctx2.trace(nodes[0].node_ptr(), GcTraceCtx::MARK_FUNC);
         let continue_marked = count_marked_nodes(&heap, partition_id);
 
         // Both algorithms should mark the same number of nodes
@@ -816,27 +719,15 @@ mod tests {
         }
 
         // Test with Propagate - should handle circular reference without infinite loop
-        let mut tracer1 = heap.tracer(GcTraceRestrict::Collect(partition_id));
-        tracer1.trace(node1.node_ptr(), GcTracer::MARK_FUNC);
+        let mut ctx1 = GcTraceCtx::new(&heap, GcTraceRestrict::Collect(partition_id), true);
+        ctx1.trace(node1.node_ptr(), GcTraceCtx::MARK_FUNC);
 
         // Both nodes should be marked
         assert_eq!(count_marked_nodes(&heap, partition_id), 2);
 
         // Test with Continue
-        let mut tracer2 = heap.tracer(GcTraceRestrict::Collect(partition_id));
-
-        fn continue_and_mark_handle(mut node: NonNull<GcHead>, _: &GcHeap) -> bool {
-            unsafe {
-                if !node.as_ref().is_marked() {
-                    node.as_mut().set_marked(true);
-                    true
-                } else {
-                    false
-                }
-            }
-        }
-
-        tracer2.trace(node1.node_ptr(), GcTracer::MARK_FUNC);
+        let mut ctx2 = GcTraceCtx::new(&heap, GcTraceRestrict::Collect(partition_id), true);
+        ctx2.trace(node1.node_ptr(), GcTraceCtx::MARK_FUNC);
         assert_eq!(count_marked_nodes(&heap, partition_id), 2);
     }
 }

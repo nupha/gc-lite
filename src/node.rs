@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    GcHeap, GcPartitionId, GcTracable, GcTraceRestrict, GcTracer, GcWeak, gctype::TypeRegistry,
+    GcHeap, GcPartitionId, GcTracable, GcTraceCtx, GcTraceRestrict, GcWeak, gctype::TypeRegistry,
     weak::GcWeakRawId,
 };
 
@@ -166,9 +166,9 @@ impl GcHead {
 
     /// Get direct referencing children nodes
     pub fn gc_children(&self, heap: &GcHeap) -> Vec<NonNull<GcHead>> {
-        let mut tr = GcTracer::new(heap, GcTraceRestrict::No, false);
-        (self.trace_fn())(NonNull::from_ref(self), tr.ctx());
-        tr.take_traced_nodes().into()
+        let mut ctx = GcTraceCtx::new(heap, GcTraceRestrict::No, false);
+        (self.trace_fn())(NonNull::from_ref(self), &mut ctx);
+        ctx.take_traced_nodes().into()
     }
 
     /// Get GcRef<T> from node. if node is not of type T, returns None
@@ -209,8 +209,8 @@ impl GcHead {
 
     pub fn debug_assert_node_tree_valid(&self, heap: &GcHeap) {
         debug_assert_eq!(self.dbg_heap, NonNull::from_ref(heap));
-        let mut tr = heap.tracer(GcTraceRestrict::No);
-        tr.trace(NonNull::from_ref(self), |n, _| unsafe {
+        let mut ctx = GcTraceCtx::new(heap, GcTraceRestrict::No, false);
+        ctx.trace(NonNull::from_ref(self), |n, _| unsafe {
             n.as_ref().debug_assert_node_valid(heap);
         });
     }
