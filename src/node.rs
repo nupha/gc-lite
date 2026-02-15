@@ -28,6 +28,11 @@ bitflags::bitflags! {
     }
 }
 
+pub trait GcNode: GcTracable {
+    /// Get gc node info
+    fn gc_node(&self) -> &GcHead;
+}
+
 /// GC node info
 pub struct GcHead {
     /// Attributes of node:
@@ -374,72 +379,8 @@ impl<T: GcTracable> GcRef<T> {
     }
 }
 
-/// Garbage collection pointer wrapper (lifetime bound to GcContext)
-pub struct Gc<'heap, T: GcTracable> {
-    inner: GcRef<T>,
-    _marker: std::marker::PhantomData<&'heap ()>,
-}
-
-impl<'heap, T: GcTracable> Deref for Gc<'heap, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.inner.deref()
-    }
-}
-
-impl<'heap, T: GcTracable> DerefMut for Gc<'heap, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.inner.deref_mut()
-    }
-}
-
-impl<'heap, T: GcTracable> Clone for Gc<'heap, T> {
-    #[inline]
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            _marker: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<'heap, T: GcTracable> std::fmt::Debug for Gc<'heap, T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Gc({:p}:{:p})", self.inner.head_ptr, self.deref())
-    }
-}
-
-impl<'heap, T: GcTracable> Gc<'heap, T> {
-    /// Create new GC object (specify partition)
-    pub fn new_in_partition(
-        heap: &'heap mut crate::GcHeap,
-        partition_id: crate::partition::GcPartitionId,
-        value: T,
-    ) -> crate::GcResult<Self> {
-        match heap.alloc(partition_id, value) {
-            Ok(inner) => Ok(Self {
-                inner,
-                _marker: std::marker::PhantomData,
-            }),
-            Err((err, _)) => Err(err),
-        }
-    }
-
-    /// Get internal GC reference
-    #[inline(always)]
-    pub fn gc_ref(&self) -> GcRef<T> {
-        self.inner
-    }
-
-    /// Set/unset root object status
-    #[inline(always)]
-    pub fn set_root(&self, heap: &mut crate::GcHeap, is_root: bool) {
-        heap.set_root(self.inner, is_root);
-    }
-
-    #[inline(always)]
-    pub fn is_root(&self) -> bool {
-        self.inner.is_root()
-    }
-}
+// /// Garbage collection pointer wrapper (lifetime bound to GcContext)
+// pub struct Gc<'heap, T: GcTracable> {
+//     inner: GcRef<T>,
+//     _marker: std::marker::PhantomData<&'heap ()>,
+// }
