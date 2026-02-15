@@ -73,7 +73,7 @@ impl GcHeap {
             // update node link for partition
             self.partition_nodes.insert(partition_id, link1);
             // Decrease partitions memory usage
-            self.mgr.update_mem_use(partition_id, -(freed_bytes as i32));
+            self.update_mem_use(partition_id, -(freed_bytes as i32));
 
             freed_bytes
         } else {

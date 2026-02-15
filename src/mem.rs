@@ -119,7 +119,7 @@ impl GcHeap {
                     // Add to nodes link
                     self.attach(scope, head);
                     // Update memory usage with rollup to parent partitions
-                    self.mgr.update_mem_use(scope, gross_size as i32);
+                    self.update_mem_use(scope, gross_size as i32);
 
                     log::trace!("[alloc] {:?}", unsafe { head.as_ref() });
 

@@ -6,13 +6,13 @@ use std::{collections::HashMap, ptr::NonNull};
 use crate::{
     GcTraceCtx, GcTraceRestrict,
     node::{GcHead, GcRef},
-    partition::{GcPartitionId, GcPartitionMgr},
+    partition::{GcPartition, GcPartitionId},
     trace::GcTracable,
 };
 
 pub struct GcHeap {
     /// Partition management
-    pub(super) mgr: GcPartitionMgr,
+    pub(super) partitions: HashMap<GcPartitionId, GcPartition>,
     /// LUT: Object list heads for each partition
     pub(super) partition_nodes: HashMap<GcPartitionId, Option<NonNull<GcHead>>>,
     /// LUT: Root object lists for each partition
@@ -59,10 +59,8 @@ impl GcHeap {
 
     /// Create a new garbage collection heap
     pub fn new() -> Self {
-        let partitions = GcPartitionMgr::new();
-
         Self {
-            mgr: partitions,
+            partitions: HashMap::new(),
             partition_nodes: HashMap::with_capacity(8),
             partition_root_nodes: HashMap::with_capacity(8),
             weak_slots: Vec::new(),
@@ -115,6 +113,35 @@ impl GcHeap {
                 threshold
             });
         }
+    }
+
+    /// Check if the given partition ID is an ancestor of the specified partition
+    ///
+    /// # Parameters
+    /// - `this`: The target partition to check
+    /// - `ancestor`: The potential ancestor partition ID
+    ///
+    /// # Returns
+    /// `true` if `ancestor` is an ancestor of `this`, `false` otherwise
+    pub fn is_ancestor_of(&self, this: GcPartitionId, ancestor: GcPartitionId) -> bool {
+        debug_assert_ne!(this, GcPartitionId::NONE);
+        debug_assert_ne!(ancestor, GcPartitionId::NONE);
+
+        let mut current_id = this;
+        while current_id != GcPartitionId::NONE {
+            if current_id == ancestor {
+                return true;
+            } else if let Some(p) = self.partitions.get(&current_id) {
+                current_id = p.parent;
+            } else {
+                #[cfg(debug_assertions)]
+                unreachable!();
+                #[cfg(not(debug_assertions))]
+                break;
+            }
+        }
+
+        false
     }
 
     /// Attach a node to partition's nodes chain.
@@ -176,72 +203,6 @@ impl GcHeap {
         self.set_root_node(gc_ref.head_ptr, is_root);
     }
 
-    // /// Safely manually release an object
-    // ///
-    // /// This method performs GC mark verification before release to ensure the object is not referenced by other objects.
-    // /// If the object is referenced, it returns an error to prevent dangling pointer issues.
-    // ///
-    // /// # 参数
-    // /// - `gc_ref`: 要释放的垃圾回收引用
-    // ///
-    // /// # Return Value
-    // /// - `Ok(())`: Release successful
-    // /// - `Err(GcError::InvalidReference)`: Object is not allocated from this context or is referenced by other objects
-    // /// - `Err(GcError::PartitionNotFound)`: The partition where the object is located does not exist
-    // ///
-    // /// # 注意
-    // /// - 如果对象是根对象，会先将其从根对象列表中移除
-    // /// - 释放后，该引用将变为无效，不应再使用
-    // pub fn free<T>(&mut self, gc_ref: GcRef<T>) -> GcResult<usize> {
-    //     // Perform GC mark verification to check if object is referenced
-    //     if self.is_node_referenced(gc_ref)? {
-    //         Err(GcError::InvalidReference)
-    //     } else {
-    //         // Object is not referenced, safe to release
-    //         unsafe { self.free_unchecked(gc_ref) }
-    //     }
-    // }
-
-    // /// Unsafe quick release of an object
-    // ///
-    // /// This method does not check if the object is referenced by other objects, it releases directly.
-    // /// If the object is being referenced, it will cause dangling pointer and memory safety issues.
-    // ///
-    // /// # Safety
-    // /// The caller must ensure that no other objects reference this object, otherwise it will cause undefined behavior.
-    // ///
-    // /// # 参数
-    // /// - `gc_ref`: 要释放的垃圾回收引用
-    // ///
-    // /// # Return Value
-    // /// - `Ok(())`: Release successful
-    // /// - `Err(GcError::InvalidReference)`: Object is not allocated from this context
-    // /// - `Err(GcError::PartitionNotFound)`: The partition where the object is located does not exist
-    // ///
-    // /// # 注意
-    // /// - 如果对象是根对象，会先将其从根对象列表中移除
-    // /// - 释放后，该引用将变为无效，不应再使用
-    // pub unsafe fn free_unchecked<T>(&mut self, gc_ref: GcRef<T>) -> GcResult<usize> {
-    //     let header = gc_ref.head_ptr();
-    //     let partition_id = unsafe { header.as_ref().get_partition_id() };
-    //     debug_assert_ne!(partition_id, GcPartitionId::NONE);
-
-    //     if !self.contains(header) {
-    //         // not allocated in this heap
-    //         return Err(GcError::InvalidReference);
-    //     }
-
-    //     // If object is a root object, unset root
-    //     if let Some(roots) = self.partition_roots.get_mut(&partition_id) {
-    //         if let Some(i) = roots.iter().position(|&r| r == header) {
-    //             roots.swap_remove(i);
-    //         }
-    //     }
-
-    //     self.detach(header);
-    //     unsafe { Ok(self.dispose(header)) }
-    // }
-
     /// Check if `node` was allocated in this heap
     pub fn contains(&self, node: NonNull<GcHead>) -> bool {
         self.nodes(unsafe { node.as_ref().scope_id() })
@@ -297,6 +258,38 @@ impl GcHeap {
         ctx.clear_marked_flag();
 
         b
+    }
+
+    /// Update memory usage with rollup to parent partitions
+    ///
+    /// # Parameters
+    /// - `id`: Partition ID
+    /// - `delta`: Size change (positive to add, negative to subtract)
+    ///
+    /// # Returns
+    /// Updated memory usage of the specified partition
+    pub(crate) fn update_mem_use(&mut self, id: GcPartitionId, delta: i32) -> usize {
+        let mut cur_id = id;
+        let mut res = 0;
+
+        while cur_id != GcPartitionId::NONE {
+            if let Some(par) = self.partitions.get_mut(&cur_id) {
+                if delta >= 0 {
+                    par.memory_used += delta as usize;
+                } else {
+                    debug_assert!(par.memory_used >= (-delta) as usize);
+                    par.memory_used -= (-delta) as usize;
+                }
+                if cur_id == id {
+                    res = par.memory_used;
+                }
+                cur_id = par.parent;
+            } else {
+                break;
+            }
+        }
+
+        res
     }
 }
 

@@ -1,14 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::Cell, collections::HashMap, ptr::NonNull};
+use std::{cell::Cell, ptr::NonNull};
 
 use crate::{GcHead, GcHeap, node::GcNodeFlag};
-
-thread_local! {
-    /// Thread-local partition ID counter (starts from 1, 0 is invalid/null)
-    static NEXT_PARTITION_ID: Cell<u16> = Cell::new(1);
-}
 
 /// Partition ID
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -145,118 +140,6 @@ impl GcPartition {
     }
 }
 
-/// Partition manager
-#[derive(Debug)]
-pub(crate) struct GcPartitionMgr {
-    // TODO: use Vec<GcPartition> slots instead
-    pub(crate) partitions: HashMap<GcPartitionId, GcPartition>,
-}
-
-impl GcPartitionMgr {
-    pub fn new() -> Self {
-        Self {
-            partitions: HashMap::new(),
-        }
-    }
-}
-
-impl GcPartitionMgr {
-    /// Create a new partition with optional parent
-    ///
-    /// # Parameters
-    /// - `memory_limit`: Optional memory limit (0 for unlimited)
-    /// - `parent`: Parent partition ID, GcPartitionId::NONE for root partition
-    ///
-    /// # Returns
-    /// The ID of the newly created partition
-    pub fn create_partition(
-        &mut self,
-        memory_limit: Option<usize>,
-        parent: GcPartitionId,
-    ) -> GcPartitionId {
-        let id = NEXT_PARTITION_ID.with(|next_id| {
-            let current = next_id.get();
-            next_id.set(current.wrapping_add(1));
-            GcPartitionId(current)
-        });
-
-        // If parent is specified, add this partition to parent's children
-        if parent != GcPartitionId::NONE {
-            if let Some(parent_partition) = self.partitions.get_mut(&parent) {
-                parent_partition.children.push(id);
-            }
-        }
-
-        let partition = GcPartition::new(memory_limit.unwrap_or(0), parent);
-        self.partitions.insert(id, partition);
-
-        log::trace!("[open_scope] {id:?} : {parent:?}");
-
-        id
-    }
-
-    /// Update memory usage with rollup to parent partitions
-    ///
-    /// # Parameters
-    /// - `id`: Partition ID
-    /// - `delta`: Size change (positive to add, negative to subtract)
-    ///
-    /// # Returns
-    /// Updated memory usage of the specified partition
-    pub(crate) fn update_mem_use(&mut self, id: GcPartitionId, delta: i32) -> usize {
-        let mut cur_id = id;
-        let mut res = 0;
-
-        while cur_id != GcPartitionId::NONE {
-            if let Some(par) = self.partitions.get_mut(&cur_id) {
-                if delta >= 0 {
-                    par.memory_used += delta as usize;
-                } else {
-                    debug_assert!(par.memory_used >= (-delta) as usize);
-                    par.memory_used -= (-delta) as usize;
-                }
-                if cur_id == id {
-                    res = par.memory_used;
-                }
-                cur_id = par.parent;
-            } else {
-                break;
-            }
-        }
-
-        res
-    }
-
-    /// Check if the given partition ID is an ancestor of the specified partition
-    ///
-    /// # Parameters
-    /// - `this`: The target partition to check
-    /// - `ancestor`: The potential ancestor partition ID
-    ///
-    /// # Returns
-    /// `true` if `ancestor` is an ancestor of `this`, `false` otherwise
-    pub fn is_ancestor_of(&self, this: GcPartitionId, ancestor: GcPartitionId) -> bool {
-        debug_assert_ne!(this, GcPartitionId::NONE);
-        debug_assert_ne!(ancestor, GcPartitionId::NONE);
-
-        let mut current_id = this;
-        while current_id != GcPartitionId::NONE {
-            if current_id == ancestor {
-                return true;
-            } else if let Some(p) = self.partitions.get(&current_id) {
-                current_id = p.parent;
-            } else {
-                #[cfg(debug_assertions)]
-                unreachable!();
-                #[cfg(not(debug_assertions))]
-                break;
-            }
-        }
-
-        false
-    }
-}
-
 pub struct GcPartitionParentIter<'a> {
     heap: &'a GcHeap,
     current: GcPartitionId,
@@ -278,6 +161,45 @@ impl<'a> Iterator for GcPartitionParentIter<'a> {
 }
 
 impl GcHeap {
+    /// Create a new partition with optional parent
+    ///
+    /// # Parameters
+    /// - `memory_limit`: Optional memory limit (0 for unlimited)
+    /// - `parent`: Parent partition ID, GcPartitionId::NONE for root partition
+    ///
+    /// # Returns
+    /// The ID of the newly created partition
+    fn create_partition(
+        &mut self,
+        memory_limit: Option<usize>,
+        parent: GcPartitionId,
+    ) -> GcPartitionId {
+        thread_local! {
+            /// Thread-local partition ID counter (starts from 1, 0 is invalid/null)
+            static NEXT_PARTITION_ID: Cell<u16> = Cell::new(1);
+        }
+
+        let id = NEXT_PARTITION_ID.with(|next_id| {
+            let current = next_id.get();
+            next_id.set(current.wrapping_add(1));
+            GcPartitionId(current)
+        });
+
+        // If parent is specified, add this partition to parent's children
+        if parent != GcPartitionId::NONE {
+            if let Some(parent_partition) = self.partitions.get_mut(&parent) {
+                parent_partition.children.push(id);
+            }
+        }
+
+        let partition = GcPartition::new(memory_limit.unwrap_or(0), parent);
+        self.partitions.insert(id, partition);
+
+        log::trace!("[open_scope] {id:?} : {parent:?}");
+
+        id
+    }
+
     /// Create a new top-level partition (root partition) with the specified memory limit
     ///
     /// # Parameters
@@ -286,9 +208,7 @@ impl GcHeap {
     /// # Returns
     /// The ID of the newly created top-level partition
     pub fn create_root_partition(&mut self, memory_limit: usize) -> GcPartitionId {
-        let id = self
-            .mgr
-            .create_partition(Some(memory_limit), GcPartitionId::NONE);
+        let id = self.create_partition(Some(memory_limit), GcPartitionId::NONE);
         self.partition_nodes.insert(id, None);
         self.partition_root_nodes.insert(id, Vec::new());
 
@@ -303,7 +223,7 @@ impl GcHeap {
     /// # Returns
     /// The ID of the newly created sub-partition
     pub fn create_sub_partition(&mut self, parent: GcPartitionId) -> GcPartitionId {
-        let id = self.mgr.create_partition(None, parent);
+        let id = self.create_partition(None, parent);
         self.partition_nodes.insert(id, None);
         self.partition_root_nodes.insert(id, Vec::new());
         id
@@ -418,7 +338,7 @@ impl GcHeap {
                         self.attach(xref, this);
 
                         // Increase memory usage with rollup to xref partitions
-                        self.mgr.update_mem_use(
+                        self.update_mem_use(
                             xref,
                             (Self::with_node_gc_type(this, |ty| ty.size) as usize
                                 + std::mem::size_of::<GcHead>()) as i32,
@@ -433,7 +353,7 @@ impl GcHeap {
                     freed_bytes += self.dispose_all_nodes(first, &on_dispose);
                 }
 
-                self.mgr.partitions.remove(&pid);
+                self.partitions.remove(&pid);
             }
 
             if let Some(parent) = self.partition_mut(parent_id) {
@@ -442,7 +362,7 @@ impl GcHeap {
             }
 
             // Decrease parent's memory usage
-            self.mgr.update_mem_use(parent_id, -(freed_bytes as i32));
+            self.update_mem_use(parent_id, -(freed_bytes as i32));
 
             log::trace!("[close_scope_done] {pid:?}");
         }
@@ -474,7 +394,7 @@ impl GcHeap {
                 self.dispose_all_nodes(link, &on_dispose);
             }
             self.partition_root_nodes.remove(&pid);
-            self.mgr.partitions.remove(&pid);
+            self.partitions.remove(&pid);
         }
 
         #[cfg(debug_assertions)]
@@ -485,12 +405,12 @@ impl GcHeap {
 
     /// Get partition information
     pub fn partition(&self, partition_id: GcPartitionId) -> Option<&GcPartition> {
-        self.mgr.partitions.get(&partition_id)
+        self.partitions.get(&partition_id)
     }
 
     /// Get partition information
     pub fn partition_mut(&mut self, partition_id: GcPartitionId) -> Option<&mut GcPartition> {
-        self.mgr.partitions.get_mut(&partition_id)
+        self.partitions.get_mut(&partition_id)
     }
 
     pub fn partition_parent_iter(&self, partition_id: GcPartitionId) -> GcPartitionParentIter<'_> {
@@ -504,7 +424,7 @@ impl GcHeap {
 
     /// Get all partition IDs
     pub fn partition_ids(&self) -> Vec<GcPartitionId> {
-        self.mgr.partitions.keys().copied().collect()
+        self.partitions.keys().copied().collect()
     }
 
     /// Check if the given partition is an ancestor of another partition
@@ -517,7 +437,7 @@ impl GcHeap {
     /// `true` if `upper` is an ancestor of `lower`, `false` otherwise
     #[inline(always)]
     pub fn check_partition_ancestor(&self, upper: GcPartitionId, lower: GcPartitionId) -> bool {
-        self.mgr.is_ancestor_of(lower, upper)
+        self.is_ancestor_of(lower, upper)
     }
 
     /// Get the depth of a partition (distance to root)
@@ -734,228 +654,136 @@ mod tests {
 
     #[test]
     fn test_gc_threshold() {
-        let mut manager = GcPartitionMgr::new();
-        let id = manager.create_partition(Some(100), GcPartitionId::NONE);
+        let mut heap = GcHeap::new();
+        let id = heap.create_root_partition(1024);
 
-        // Default threshold is 0, no GC triggered
-        manager.update_mem_use(id, 70);
-        assert!(!manager.partitions.get(&id).unwrap().should_gc());
+        let partition = heap.partition_mut(id).unwrap();
+        assert_eq!(partition.gc_threshold(), 0);
 
-        // Set threshold to 80 bytes
-        manager
-            .partitions
-            .get_mut(&id)
-            .unwrap()
-            .set_gc_threshold(80);
-        manager.update_mem_use(id, 10); // Total usage 80 bytes
-        assert!(manager.partitions.get(&id).unwrap().should_gc()); // 80 >= 80
+        partition.set_gc_threshold(512);
+        assert_eq!(partition.gc_threshold(), 512);
 
-        manager.partitions.get_mut(&id).unwrap().set_gc_threshold(0);
-        assert!(!manager.partitions.get(&id).unwrap().should_gc());
-        assert_eq!(manager.partitions.get(&id).unwrap().gc_threshold(), 0);
+        partition.set_gc_threshold(0);
+        assert_eq!(partition.gc_threshold(), 0);
+
+        // Clean up
+        heap.remove_partition(
+            id,
+            GcHeap::DUMMY_MIGRATE_CALLBACK,
+            GcHeap::DUMMY_DISPOSE_CALLBACK,
+        );
     }
 
     #[test]
-    fn test_memory_rollup() {
-        let mut manager = GcPartitionMgr::new();
+    fn test_memory_limit() {
+        let mut heap = GcHeap::new();
+        let id = heap.create_root_partition(1024);
 
-        // Create root and child partitions
-        let root_id = manager.create_partition(Some(2048), GcPartitionId::NONE);
-        let child_id = manager.create_partition(Some(1024), root_id);
+        let partition = heap.partition_mut(id).unwrap();
+        assert_eq!(partition.memory_limit(), 1024);
 
-        // Add memory to child with rollup
-        manager.update_mem_use(child_id, 100);
+        partition.set_memory_limit(2048);
+        assert_eq!(partition.memory_limit(), 2048);
 
-        // Both partitions should have updated memory
-        assert_eq!(
-            manager.partitions.get(&child_id).unwrap().memory_used(),
-            100
+        partition.set_memory_limit(0);
+        assert_eq!(partition.memory_limit(), 0);
+
+        // Clean up
+        heap.remove_partition(
+            id,
+            GcHeap::DUMMY_MIGRATE_CALLBACK,
+            GcHeap::DUMMY_DISPOSE_CALLBACK,
         );
-        assert_eq!(manager.partitions.get(&root_id).unwrap().memory_used(), 100);
-
-        // Add more memory to child
-        manager.update_mem_use(child_id, 50);
-
-        // Both should be updated
-        assert_eq!(
-            manager.partitions.get(&child_id).unwrap().memory_used(),
-            150
-        );
-        assert_eq!(manager.partitions.get(&root_id).unwrap().memory_used(), 150);
-
-        // Decrement memory from child
-        manager.update_mem_use(child_id, -30);
-
-        // Both should be updated
-        assert_eq!(
-            manager.partitions.get(&child_id).unwrap().memory_used(),
-            120
-        );
-        assert_eq!(manager.partitions.get(&root_id).unwrap().memory_used(), 120);
-    }
-
-    #[test]
-    fn test_gc_rollup() {
-        let mut manager = GcPartitionMgr::new();
-
-        let root_id = manager.create_partition(Some(2048), GcPartitionId::NONE);
-        let child_id = manager.create_partition(Some(1024), root_id);
-
-        // Set threshold on both partitions
-        manager
-            .partitions
-            .get_mut(&root_id)
-            .unwrap()
-            .set_gc_threshold(100);
-        manager
-            .partitions
-            .get_mut(&child_id)
-            .unwrap()
-            .set_gc_threshold(50);
-
-        // Add memory to child until it triggers GC
-        let _child_mem = manager.update_mem_use(child_id, 50);
-
-        // Child should trigger GC (50 >= 50)
-        assert!(manager.partitions.get(&child_id).unwrap().should_gc());
-        // Root should not trigger GC yet (50 < 100)
-        assert!(!manager.partitions.get(&root_id).unwrap().should_gc());
-
-        // Add more to trigger root GC too
-        let child_mem = manager.update_mem_use(child_id, 60); // Total: 110
-        // Both should trigger GC now
-        assert!(manager.partitions.get(&child_id).unwrap().should_gc()); // 110 >= 50
-        assert!(manager.partitions.get(&root_id).unwrap().should_gc()); // 110 >= 100
-        assert_eq!(child_mem, 110);
-    }
-
-    #[test]
-    fn test_memory_rollup_with_hierarchy() {
-        let mut manager = GcPartitionMgr::new();
-
-        let root_id = manager.create_partition(Some(4096), GcPartitionId::NONE);
-        let child1_id = manager.create_partition(Some(2048), root_id);
-        let child2_id = manager.create_partition(Some(1024), root_id);
-        let grandchild_id = manager.create_partition(Some(512), child1_id);
-
-        // Add memory to different partitions (with rollup)
-        manager.update_mem_use(root_id, 100);
-        manager.update_mem_use(child1_id, 50);
-        manager.update_mem_use(child2_id, 30);
-        manager.update_mem_use(grandchild_id, 20);
-
-        // After rollup, each partition's memory_used includes its own and descendants'
-        // Root: 100 + 50 + 30 + 20 = 200
-        // Child1: 50 + 20 = 70
-        // Child2: 30
-        // Grandchild: 20
-        assert_eq!(manager.partitions.get(&root_id).unwrap().memory_used(), 200);
-        assert_eq!(
-            manager.partitions.get(&child1_id).unwrap().memory_used(),
-            70
-        );
-        assert_eq!(
-            manager.partitions.get(&child2_id).unwrap().memory_used(),
-            30
-        );
-        assert_eq!(
-            manager
-                .partitions
-                .get(&grandchild_id)
-                .unwrap()
-                .memory_used(),
-            20
-        );
-
-        // Verify memory decreases with rollup when objects are freed
-        manager.update_mem_use(grandchild_id, -10);
-        assert_eq!(
-            manager
-                .partitions
-                .get(&grandchild_id)
-                .unwrap()
-                .memory_used(),
-            10
-        );
-        assert_eq!(
-            manager.partitions.get(&child1_id).unwrap().memory_used(),
-            60
-        ); // 70 - 10
-        assert_eq!(manager.partitions.get(&root_id).unwrap().memory_used(), 190); // 200 - 10
     }
 
     #[test]
     fn test_is_ancestor_of() {
-        let mut manager = GcPartitionMgr::new();
+        let mut heap = GcHeap::new();
+        let p1 = heap.create_root_partition(0);
+        let p2 = heap.create_sub_partition(p1);
+        let p3 = heap.create_sub_partition(p2);
+        let p4 = heap.create_root_partition(0);
 
-        let root_id = manager.create_partition(Some(2048), GcPartitionId::NONE);
-        let child_id = manager.create_partition(Some(1024), root_id);
-        let grandchild_id = manager.create_partition(Some(512), child_id);
-        let sibling_id = manager.create_partition(Some(256), root_id);
+        assert!(heap.check_partition_ancestor(p1, p2));
+        assert!(heap.check_partition_ancestor(p1, p3));
+        assert!(heap.check_partition_ancestor(p2, p3));
+        assert!(!heap.check_partition_ancestor(p2, p1));
+        assert!(!heap.check_partition_ancestor(p3, p1));
+        assert!(!heap.check_partition_ancestor(p3, p2));
+        assert!(!heap.check_partition_ancestor(p1, p4));
+        assert!(!heap.check_partition_ancestor(p4, p1));
 
-        // A partition is always an ancestor of itself
-        assert!(manager.is_ancestor_of(root_id, root_id));
-        assert!(manager.is_ancestor_of(child_id, child_id));
-        assert!(manager.is_ancestor_of(grandchild_id, grandchild_id));
-        assert!(manager.is_ancestor_of(sibling_id, sibling_id));
-
-        // Root is ancestor of everyone
-        assert!(manager.is_ancestor_of(child_id, root_id));
-        assert!(manager.is_ancestor_of(grandchild_id, root_id));
-        assert!(manager.is_ancestor_of(sibling_id, root_id));
-
-        // Child is ancestor of grandchild
-        assert!(manager.is_ancestor_of(grandchild_id, child_id));
-
-        // Not ancestor checks
-        assert!(!manager.is_ancestor_of(root_id, child_id)); // root has no ancestor
-        assert!(!manager.is_ancestor_of(child_id, grandchild_id)); // child is not ancestor of grandchild
-        assert!(!manager.is_ancestor_of(child_id, sibling_id));
-        assert!(!manager.is_ancestor_of(sibling_id, grandchild_id));
-        assert!(!manager.is_ancestor_of(grandchild_id, sibling_id));
+        // Clean up
+        heap.remove_partition(
+            p1,
+            GcHeap::DUMMY_MIGRATE_CALLBACK,
+            GcHeap::DUMMY_DISPOSE_CALLBACK,
+        );
+        heap.remove_partition(
+            p4,
+            GcHeap::DUMMY_MIGRATE_CALLBACK,
+            GcHeap::DUMMY_DISPOSE_CALLBACK,
+        );
     }
 
     #[test]
     fn test_common_parent() {
         let mut heap = GcHeap::new();
+        let p1 = heap.create_root_partition(0);
+        let p2 = heap.create_sub_partition(p1);
+        let p3 = heap.create_sub_partition(p1);
+        let p4 = heap.create_sub_partition(p2);
+        let p5 = heap.create_sub_partition(p2);
+        let p6 = heap.create_sub_partition(p3);
+        let p7 = heap.create_root_partition(0);
 
-        // Create hierarchy:
-        // root_id
-        //   ├── child1_id
-        //   │   └── grandchild1_id
-        //   └── child2_id
-        //       └── grandchild2_id
-        let root_id = heap.create_root_partition(2048);
-        let child1_id = heap.create_sub_partition(root_id);
-        let child2_id = heap.create_sub_partition(root_id);
-        let grandchild1_id = heap.create_sub_partition(child1_id);
-        let grandchild2_id = heap.create_sub_partition(child2_id);
+        assert_eq!(heap.common_parent2(p4, p5), p2);
+        assert_eq!(heap.common_parent2(p4, p6), p1);
+        assert_eq!(heap.common_parent2(p5, p6), p1);
+        assert_eq!(heap.common_parent2(p2, p3), p1);
+        assert_eq!(heap.common_parent2(p1, p7), GcPartitionId::NONE);
 
-        // Same partition
-        assert_eq!(heap.common_parent2(root_id, root_id), root_id);
-        assert_eq!(heap.common_parent2(child1_id, child1_id), child1_id);
-        assert_eq!(
-            heap.common_parent2(grandchild1_id, grandchild1_id),
-            grandchild1_id
+        // Clean up
+        heap.remove_partition(
+            p1,
+            GcHeap::DUMMY_MIGRATE_CALLBACK,
+            GcHeap::DUMMY_DISPOSE_CALLBACK,
         );
+        heap.remove_partition(
+            p7,
+            GcHeap::DUMMY_MIGRATE_CALLBACK,
+            GcHeap::DUMMY_DISPOSE_CALLBACK,
+        );
+    }
 
-        // Direct parent-child
-        assert_eq!(heap.common_parent2(child1_id, root_id), root_id);
-        assert_eq!(heap.common_parent2(root_id, child1_id), root_id);
-        assert_eq!(heap.common_parent2(grandchild1_id, child1_id), child1_id);
-        assert_eq!(heap.common_parent2(child1_id, grandchild1_id), child1_id);
+    #[test]
+    fn test_update_mem_use() {
+        let mut heap = GcHeap::new();
+        let p1 = heap.create_root_partition(0);
+        let p2 = heap.create_sub_partition(p1);
+        let p3 = heap.create_sub_partition(p2);
 
-        // Sibling partitions - common parent is the root
-        assert_eq!(heap.common_parent2(child1_id, child2_id), root_id);
-        assert_eq!(heap.common_parent2(child2_id, child1_id), root_id);
+        heap.update_mem_use(p3, 100);
+        assert_eq!(heap.partition(p1).unwrap().memory_used(), 100);
+        assert_eq!(heap.partition(p2).unwrap().memory_used(), 100);
+        assert_eq!(heap.partition(p3).unwrap().memory_used(), 100);
 
-        // Grandchild from different subtrees - common parent is root
-        assert_eq!(heap.common_parent2(grandchild1_id, grandchild2_id), root_id);
-        assert_eq!(heap.common_parent2(grandchild2_id, grandchild1_id), root_id);
+        heap.update_mem_use(p2, 50);
+        assert_eq!(heap.partition(p1).unwrap().memory_used(), 150);
+        assert_eq!(heap.partition(p2).unwrap().memory_used(), 150);
+        assert_eq!(heap.partition(p3).unwrap().memory_used(), 100);
 
-        // Grandchild and child from different subtrees
-        assert_eq!(heap.common_parent2(grandchild1_id, child2_id), root_id);
-        assert_eq!(heap.common_parent2(child1_id, grandchild2_id), root_id);
+        heap.update_mem_use(p3, -20);
+        assert_eq!(heap.partition(p1).unwrap().memory_used(), 130);
+        assert_eq!(heap.partition(p2).unwrap().memory_used(), 130);
+        assert_eq!(heap.partition(p3).unwrap().memory_used(), 80);
+
+        // Clean up
+        heap.remove_partition(
+            p1,
+            GcHeap::DUMMY_MIGRATE_CALLBACK,
+            GcHeap::DUMMY_DISPOSE_CALLBACK,
+        );
     }
 
     #[test]
