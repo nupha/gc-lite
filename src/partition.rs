@@ -3,6 +3,8 @@
 
 use std::{cell::Cell, ptr::NonNull};
 
+use smallvec::SmallVec;
+
 use crate::{GcHead, GcHeap, node::GcNodeFlag};
 
 /// Partition ID
@@ -24,6 +26,10 @@ impl GcPartitionId {
 /// Partition information
 #[derive(Debug, Clone)]
 pub struct GcPartition {
+    /// Parent partition ID, GcPartitionId::NONE (0) means no parent (root partition)
+    pub(crate) parent: GcPartitionId,
+    /// Child partition IDs
+    pub(crate) children: SmallVec<[GcPartitionId; 4]>,
     /// Current memory usage
     pub(crate) memory_used: usize,
     /// Memory usage limit, 0 for unlimited
@@ -31,20 +37,16 @@ pub struct GcPartition {
     /// Garbage collection threshold (triggers automatic GC when memory usage reaches this byte count)
     /// A value of 0 means automatic GC is disabled
     pub(crate) gc_threshold: usize,
-    /// Parent partition ID, GcPartitionId::NONE (0) means no parent (root partition)
-    pub(crate) parent: GcPartitionId,
-    /// Child partition IDs
-    pub(crate) children: Vec<GcPartitionId>,
 }
 
 impl GcPartition {
-    pub fn new(memory_limit: usize, parent: GcPartitionId) -> Self {
+    fn new(memory_limit: usize, parent: GcPartitionId) -> Self {
         Self {
+            parent,
+            children: SmallVec::new(),
             memory_used: 0,
             memory_limit,
             gc_threshold: 0, // Default threshold is 0 bytes (disable automatic GC)
-            parent,
-            children: Vec::new(),
         }
     }
 
@@ -358,7 +360,7 @@ impl GcHeap {
 
             if let Some(parent) = self.partition_mut(parent_id) {
                 // Remove from parent's children list
-                parent.children.retain(|&c| c != partition_id);
+                parent.children.retain(|c| *c != partition_id);
             }
 
             // Decrease parent's memory usage
