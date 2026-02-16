@@ -12,12 +12,33 @@ use crate::{GcHead, GcHeap, node::GcNodeFlag};
 pub struct GcPartitionId(pub u16);
 
 impl GcPartitionId {
+    const DEPTH_SHIFT: u16 = 10;
+    const DEPTH_MASK: u16 = 0b11_1111;
+    const SERIAL_MASK: u16 = 0x03FF;
+
     /// Special partition ID representing no parent (null value)
     pub const NONE: Self = Self(0);
 
     #[inline(always)]
     pub const fn is_null(&self) -> bool {
         self.0 == 0
+    }
+
+    #[inline(always)]
+    pub const fn depth(self) -> u8 {
+        ((self.0 >> Self::DEPTH_SHIFT) & Self::DEPTH_MASK) as u8
+    }
+
+    #[inline(always)]
+    pub const fn serial(self) -> u16 {
+        self.0 & Self::SERIAL_MASK
+    }
+
+    #[inline(always)]
+    pub(crate) const fn from_depth_serial(depth: u8, serial: u16) -> Self {
+        let d = (depth as u16) & Self::DEPTH_MASK;
+        let s = serial & Self::SERIAL_MASK;
+        Self((d << Self::DEPTH_SHIFT) | s)
     }
 }
 
@@ -179,15 +200,41 @@ impl GcHeap {
         memory_limit: Option<usize>,
         parent: GcPartitionId,
     ) -> GcPartitionId {
+        const MAX_DEPTH: u8 = 63;
+        const MAX_SERIAL: u16 = 1023;
+
         thread_local! {
-            /// Thread-local partition ID counter (starts from 1, 0 is invalid/null)
-            static NEXT_PARTITION_ID: Cell<u16> = Cell::new(1);
+            static NEXT_PARTITION_SERIAL: Cell<u16> = Cell::new(1);
         }
 
-        let id = NEXT_PARTITION_ID.with(|next_id| {
-            let current = next_id.get();
-            next_id.set(current.wrapping_add(1));
-            GcPartitionId(current)
+        let depth = if parent.is_null() {
+            0
+        } else {
+            let d = parent.depth().saturating_add(1);
+            debug_assert!(d <= MAX_DEPTH);
+            d
+        };
+
+        let id = NEXT_PARTITION_SERIAL.with(|next_serial| {
+            let mut serial = next_serial.get();
+            if serial == 0 || serial > MAX_SERIAL {
+                serial = 1;
+            }
+            let start = serial;
+
+            loop {
+                let conflict = self.partitions.keys().any(|pid| pid.serial() == serial);
+                if !conflict {
+                    let next = if serial >= MAX_SERIAL { 1 } else { serial + 1 };
+                    next_serial.set(next);
+                    return GcPartitionId::from_depth_serial(depth, serial);
+                }
+
+                serial = if serial >= MAX_SERIAL { 1 } else { serial + 1 };
+                if serial == start {
+                    panic!("too many active partitions");
+                }
+            }
         });
 
         // If parent is specified, add this partition to parent's children
@@ -919,5 +966,27 @@ mod tests {
         // 4. One is ancestor of others
         assert_eq!(heap.common_parent3(a1a, a1, a1), a1); // two same
         assert_eq!(heap.common_parent3(a, a1, a1a), a);
+    }
+
+    #[test]
+    fn test_partition_id_depth_and_serial_encoding() {
+        let id = GcPartitionId::from_depth_serial(3, 10);
+        assert_eq!(id.depth(), 3);
+        assert_eq!(id.serial(), 10);
+    }
+
+    #[test]
+    fn test_partition_depth_bits_on_creation() {
+        let mut heap = GcHeap::new();
+        let root = heap.create_root_partition(0);
+        let child = heap.create_sub_partition(root);
+        let grandchild = heap.create_sub_partition(child);
+
+        assert_eq!(root.depth(), 0);
+        assert_eq!(child.depth(), 1);
+        assert_eq!(grandchild.depth(), 2);
+        assert_ne!(root.serial(), 0);
+        assert_ne!(child.serial(), 0);
+        assert_ne!(grandchild.serial(), 0);
     }
 }
