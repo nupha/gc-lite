@@ -93,7 +93,7 @@ mod xref_tests {
 
     use super::*;
     use crate::{
-        GcRef,
+        GcNode, GcRef,
         trace::{GcTracable, GcTraceCtx},
     };
 
@@ -109,6 +109,7 @@ mod xref_tests {
             }
         }
     }
+    impl GcNode for TestNode {}
 
     fn alloc_node(heap: &mut GcHeap, pid: GcPartitionId) -> GcRef<TestNode> {
         heap.alloc(

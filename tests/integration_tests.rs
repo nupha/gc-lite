@@ -11,7 +11,7 @@
 //! - Weak references
 //! - Error handling
 
-use gc_lite::{GcError, GcHeap, GcPartitionId, GcRef, GcTracable, GcTraceCtx};
+use gc_lite::{GcError, GcHeap, GcNode, GcPartitionId, GcRef, GcTracable, GcTraceCtx};
 
 /// Test data structure for integration tests
 #[derive(Debug, PartialEq, Clone)]
@@ -21,19 +21,37 @@ struct TestData {
 }
 
 unsafe impl GcTracable for TestData {
-    fn trace(&self, _: &mut GcTraceCtx) {
-        // No GC references in this type
+    fn trace(&self, _: &mut GcTraceCtx) {}
+}
+
+impl GcNode for TestData {}
+
+/// Test node structure with GC references
+struct TestNode {
+    value: i32,
+    children: Vec<GcRef<TestNode>>,
+}
+
+unsafe impl GcTracable for TestNode {
+    fn trace(&self, tr: &mut GcTraceCtx) {
+        for child in &self.children {
+            tr.add(*child);
+        }
     }
 }
 
-/// Test node structure with GC references
-#[derive(Debug)]
-struct GcNode {
-    value: i32,
-    children: Vec<GcRef<GcNode>>,
+impl GcNode for TestNode {}
+
+impl core::fmt::Debug for TestNode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TestNode")
+            .field("value", &self.value)
+            .field("children_count", &self.children.len())
+            .finish()
+    }
 }
 
-impl GcNode {
+impl TestNode {
     fn new(value: i32) -> Self {
         Self {
             value,
@@ -41,16 +59,8 @@ impl GcNode {
         }
     }
 
-    fn add_child(&mut self, child: GcRef<GcNode>) {
+    fn add_child(&mut self, child: GcRef<TestNode>) {
         self.children.push(child);
-    }
-}
-
-unsafe impl GcTracable for GcNode {
-    fn trace(&self, tr: &mut GcTraceCtx) {
-        for child in &self.children {
-            tr.add(*child);
-        }
     }
 }
 
@@ -591,8 +601,8 @@ fn test_circular_reference_handling() {
     let id = heap.create_root_partition(2048);
 
     // Create two nodes that reference each other
-    let mut node1 = heap.alloc(id, GcNode::new(1)).unwrap();
-    let mut node2 = heap.alloc(id, GcNode::new(2)).unwrap();
+    let mut node1 = heap.alloc(id, TestNode::new(1)).unwrap();
+    let mut node2 = heap.alloc(id, TestNode::new(2)).unwrap();
 
     // Create circular reference
     node1.add_child(node2);

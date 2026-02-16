@@ -4,7 +4,7 @@
 use std::{collections::HashMap, ptr::NonNull};
 
 use crate::{
-    GcTraceCtx, GcTraceRestrict,
+    GcNode, GcTraceCtx, GcTraceRestrict,
     node::{GcHead, GcRef},
     partition::{GcPartition, GcPartitionId},
     trace::GcTracable,
@@ -199,7 +199,7 @@ impl GcHeap {
 
     /// Set/unset a gc_ref to be root
     #[inline(always)]
-    pub fn set_root<T: GcTracable>(&mut self, gc_ref: GcRef<T>, is_root: bool) {
+    pub fn set_root<T: GcNode>(&mut self, gc_ref: GcRef<T>, is_root: bool) {
         self.set_root_node(gc_ref.head_ptr, is_root);
     }
 
@@ -295,7 +295,7 @@ impl GcHeap {
 
 #[cfg(test)]
 mod heap_tests {
-    use crate::trace::GcTraceCtx;
+    use crate::{GcNode, trace::GcTraceCtx};
 
     use super::*;
 
@@ -317,6 +317,8 @@ mod heap_tests {
                 }
             }
         }
+
+        impl GcNode for Node {}
 
         let mut heap = GcHeap::new();
         let partition_id = heap.create_root_partition(4096);

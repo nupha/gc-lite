@@ -14,7 +14,7 @@ mod xref;
 
 pub use {
     heap::GcHeap,
-    node::{GcHead, GcRef},
+    node::{GcHead, GcNode, GcRef},
     partition::{GcPartition, GcPartitionId},
     trace::{GcTracable, GcTraceCtx, GcTraceRestrict},
     weak::GcWeak,

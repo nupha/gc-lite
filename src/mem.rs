@@ -4,8 +4,8 @@
 use std::{alloc::Layout, marker::PhantomData, ptr::NonNull};
 
 use crate::{
-    GcError, GcHead, GcHeap, GcPartitionId, GcRef, GcTracable, gctype::TypeRegistry, unlikely,
-    weak::GcWeakRawId,
+    GcError, GcHead, GcHeap, GcNode, GcPartitionId, GcRef, GcTracable, gctype::TypeRegistry,
+    unlikely, weak::GcWeakRawId,
 };
 
 impl GcHeap {
@@ -63,7 +63,7 @@ impl GcHeap {
     }
 
     /// Allocate a GcRef with payload data in given scope
-    pub fn alloc<T: GcTracable>(
+    pub fn alloc<T: GcNode>(
         &mut self,
         scope: GcPartitionId,
         payload: T,

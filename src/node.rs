@@ -28,11 +28,6 @@ bitflags::bitflags! {
     }
 }
 
-pub trait GcNode: GcTracable {
-    /// Get gc node info
-    fn gc_node(&self) -> &GcHead;
-}
-
 /// GC node info
 pub struct GcHead {
     /// Attributes of node:
@@ -177,7 +172,7 @@ impl GcHead {
     }
 
     /// Get GcRef<T> from node. if node is not of type T, returns None
-    pub fn gc_ref<T: GcTracable>(&self) -> Option<GcRef<T>> {
+    pub fn gc_ref<T: GcNode>(&self) -> Option<GcRef<T>> {
         if TypeRegistry::type_id_of::<T>().is_some_and(|i| i == self.gc_dtype()) {
             Some(GcRef::<T> {
                 head_ptr: NonNull::from_ref(self),
@@ -221,14 +216,16 @@ impl GcHead {
     }
 }
 
+pub trait GcNode: GcTracable {}
+
 /// Garbage collection reference
 #[repr(transparent)]
-pub struct GcRef<T: GcTracable> {
+pub struct GcRef<T: GcNode> {
     pub(super) head_ptr: NonNull<GcHead>,
     pub(super) _marker: PhantomData<T>,
 }
 
-impl<T: GcTracable> Deref for GcRef<T> {
+impl<T: GcNode> Deref for GcRef<T> {
     type Target = T;
 
     #[inline(always)]
@@ -237,14 +234,14 @@ impl<T: GcTracable> Deref for GcRef<T> {
     }
 }
 
-impl<T: GcTracable> DerefMut for GcRef<T> {
+impl<T: GcNode> DerefMut for GcRef<T> {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { self.head_ptr.as_ref().payload().cast::<T>().as_mut() }
     }
 }
 
-impl<T: GcTracable> Clone for GcRef<T> {
+impl<T: GcNode> Clone for GcRef<T> {
     fn clone(&self) -> Self {
         Self {
             head_ptr: self.head_ptr,
@@ -253,38 +250,38 @@ impl<T: GcTracable> Clone for GcRef<T> {
     }
 }
 
-impl<T: GcTracable> Copy for GcRef<T> {}
+impl<T: GcNode> Copy for GcRef<T> {}
 
-impl<T: GcTracable> PartialEq for GcRef<T> {
+impl<T: GcNode> PartialEq for GcRef<T> {
     #[inline(always)]
     fn eq(&self, other: &Self) -> bool {
         self.head_ptr == other.head_ptr
     }
 }
 
-impl<T: GcTracable> Eq for GcRef<T> {}
+impl<T: GcNode> Eq for GcRef<T> {}
 
-impl<T: GcTracable> From<GcRef<T>> for NonNull<GcHead> {
+impl<T: GcNode> From<GcRef<T>> for NonNull<GcHead> {
     #[inline(always)]
     fn from(r: GcRef<T>) -> Self {
         r.head_ptr
     }
 }
 
-impl<T: GcTracable> From<&GcRef<T>> for NonNull<GcHead> {
+impl<T: GcNode> From<&GcRef<T>> for NonNull<GcHead> {
     #[inline(always)]
     fn from(r: &GcRef<T>) -> Self {
         r.head_ptr
     }
 }
 
-impl<T: GcTracable> std::fmt::Debug for GcRef<T> {
+impl<T: GcNode> std::fmt::Debug for GcRef<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         unsafe { write!(f, "GcRef<{:?}>", self.head_ptr.as_ref()) }
     }
 }
 
-impl<T: GcTracable> GcRef<T> {
+impl<T: GcNode> GcRef<T> {
     /// Create GcRef<T> from &T reference
     ///
     /// This method verifies that the passed reference comes from a valid GC object.
@@ -378,9 +375,3 @@ impl<T: GcTracable> GcRef<T> {
         unsafe { self.head_ptr.as_mut() }
     }
 }
-
-// /// Garbage collection pointer wrapper (lifetime bound to GcContext)
-// pub struct Gc<'heap, T: GcTracable> {
-//     inner: GcRef<T>,
-//     _marker: std::marker::PhantomData<&'heap ()>,
-// }

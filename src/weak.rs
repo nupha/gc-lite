@@ -3,7 +3,7 @@
 
 use std::marker::PhantomData;
 
-use crate::{GcRef, GcTracable, heap::GcHeap};
+use crate::{GcNode, GcRef, heap::GcHeap};
 
 /// bit 16-31: slot index in weak_list
 /// bit 0-15:  version
@@ -30,7 +30,7 @@ impl GcWeakRawId {
 /// Weak reference
 #[derive(PartialEq)]
 #[repr(transparent)]
-pub struct GcWeak<T: GcTracable> {
+pub struct GcWeak<T: GcNode> {
     /// bit 16-31: slot index in weak_list
     /// bit 0-15:  version
     pub(crate) weak_id: GcWeakRawId,
@@ -38,7 +38,7 @@ pub struct GcWeak<T: GcTracable> {
     pub(crate) _marker: PhantomData<T>,
 }
 
-impl<T: GcTracable> Clone for GcWeak<T> {
+impl<T: GcNode> Clone for GcWeak<T> {
     fn clone(&self) -> Self {
         Self {
             weak_id: self.weak_id,
@@ -47,9 +47,9 @@ impl<T: GcTracable> Clone for GcWeak<T> {
     }
 }
 
-impl<T: GcTracable> Copy for GcWeak<T> {}
+impl<T: GcNode> Copy for GcWeak<T> {}
 
-impl<T: GcTracable> Default for GcWeak<T> {
+impl<T: GcNode> Default for GcWeak<T> {
     fn default() -> Self {
         Self {
             weak_id: GcWeakRawId::NULL,
@@ -58,13 +58,13 @@ impl<T: GcTracable> Default for GcWeak<T> {
     }
 }
 
-impl<T: GcTracable> std::fmt::Debug for GcWeak<T> {
+impl<T: GcNode> std::fmt::Debug for GcWeak<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "GcWeak({}#{})", self.index(), self.version())
     }
 }
 
-impl<T: GcTracable> GcWeak<T> {
+impl<T: GcNode> GcWeak<T> {
     pub(crate) fn new(index: u16, version: u16) -> Self {
         debug_assert!(version > 0);
         Self {
@@ -100,7 +100,7 @@ impl<T: GcTracable> GcWeak<T> {
 
 impl GcHeap {
     /// Create weak reference.
-    pub fn downgrade<T: GcTracable>(&mut self, gc_ref: &GcRef<T>) -> GcWeak<T> {
+    pub fn downgrade<T: GcNode>(&mut self, gc_ref: &GcRef<T>) -> GcWeak<T> {
         let node = unsafe {
             let mut h = gc_ref.head_ptr;
             h.as_mut()
@@ -152,7 +152,7 @@ impl GcHeap {
     }
 
     /// Upgrade weak reference
-    pub fn upgrade<T: GcTracable>(&self, weak_ref: &GcWeak<T>) -> Option<GcRef<T>> {
+    pub fn upgrade<T: GcNode>(&self, weak_ref: &GcWeak<T>) -> Option<GcRef<T>> {
         if !weak_ref.weak_id.is_null() {
             self.weak_slots
                 .get(weak_ref.index() as usize)

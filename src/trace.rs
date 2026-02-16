@@ -4,16 +4,12 @@
 use std::{collections::VecDeque, marker::PhantomData, ptr::NonNull};
 
 use crate::{
-    GcHeap, GcPartitionId, GcRef,
+    GcHeap, GcNode, GcPartitionId, GcRef,
     gctype::TypeRegistry,
     node::{GcHead, GcNodeFlag},
     node_iterator::NodeLinkIter,
 };
 
-/// Garbage collection object tracing trait
-///
-/// Any type that wants to be managed by the garbage collection system must implement this trait.
-/// This ensures that only types that explicitly support garbage collection can be allocated.
 pub unsafe trait GcTracable: 'static {
     /// Collect directly referenced children gc nodes
     fn trace(&self, gcx: &mut GcTraceCtx);
@@ -265,7 +261,7 @@ impl<'a> GcTraceCtx<'a> {
 
     /// Submit a GcRef to collected list
     #[inline(always)]
-    pub fn add<T: GcTracable>(&mut self, gc_ref: GcRef<T>) {
+    pub fn add<T: GcNode>(&mut self, gc_ref: GcRef<T>) {
         self.add_node(gc_ref.head_ptr);
     }
 }
@@ -387,18 +383,25 @@ macro_rules! impl_dummy_trace_for_primitive {
                 #[inline(always)]
                 fn trace(&self, _: &mut GcTraceCtx) { }
             }
+            impl GcNode for $ty {}
+
             unsafe impl GcTracable for [$ty] {
                 #[inline(always)]
                 fn trace(&self, _: &mut GcTraceCtx) { }
             }
+            impl GcNode for [$ty] {}
+
             unsafe impl GcTracable for Vec<$ty> {
                 #[inline(always)]
                 fn trace(&self, _: &mut GcTraceCtx) { }
             }
+            impl GcNode for Vec<$ty> {}
+
             unsafe impl GcTracable for Box<[$ty]> {
                 #[inline(always)]
                 fn trace(&self, _: &mut GcTraceCtx) { }
             }
+            impl GcNode for Box<[$ty]> {}
         )*
     };
 }
@@ -412,18 +415,25 @@ unsafe impl GcTracable for str {
     #[inline(always)]
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
+impl GcNode for str {}
+
 unsafe impl GcTracable for &'static str {
     #[inline(always)]
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
+impl GcNode for &'static str {}
+
 unsafe impl GcTracable for String {
     #[inline(always)]
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
+impl GcNode for String {}
+
 unsafe impl GcTracable for &'static String {
     #[inline(always)]
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
+impl GcNode for &'static String {}
 
 #[cfg(test)]
 mod tests {
@@ -465,6 +475,7 @@ mod tests {
             }
         }
     }
+    impl GcNode for TestNode {}
 
     /// Helper function to count marked nodes in a partition
     fn count_marked_nodes(heap: &GcHeap, partition_id: GcPartitionId) -> usize {
