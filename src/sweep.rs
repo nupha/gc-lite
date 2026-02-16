@@ -18,10 +18,14 @@ impl GcHeap {
         predicate: impl Fn(&GcHead) -> bool,
         on_dispose: impl Fn(&GcHeap, &GcHead),
     ) -> usize {
-        if let Some(link0) = self.partition_nodes.remove(&partition_id) {
+        if let Some(link0) = self
+            .partitions
+            .get_mut(&partition_id)
+            .and_then(|p| p.nodes.take())
+        {
             let call_on_dispose = !std::ptr::addr_eq(&on_dispose, &Self::DUMMY_DISPOSE_CALLBACK);
 
-            let mut link1 = link0;
+            let mut link1 = Some(link0);
             let mut freed_bytes = 0;
 
             for &pass in TypeRegistry::drop_passes(&mut [0; 4]) {
@@ -52,11 +56,11 @@ impl GcHeap {
                             freed_bytes += self.dispose(this);
 
                             // If root node: remove from root list
-                            if is_root
-                                && let Some(lst) = self.partition_root_nodes.get_mut(&partition_id)
-                            {
-                                if let Some(i) = lst.iter().position(|&x| x == this) {
-                                    lst.swap_remove(i);
+                            if is_root {
+                                if let Some(p) = self.partitions.get_mut(&partition_id) {
+                                    if let Some(i) = p.root_nodes.iter().position(|&x| x == this) {
+                                        p.root_nodes.swap_remove(i);
+                                    }
                                 }
                             }
                         } else {
@@ -71,7 +75,9 @@ impl GcHeap {
             }
 
             // update node link for partition
-            self.partition_nodes.insert(partition_id, link1);
+            if let Some(p) = self.partitions.get_mut(&partition_id) {
+                p.nodes = link1;
+            }
             // Decrease partitions memory usage
             self.update_mem_use(partition_id, -(freed_bytes as i32));
 
@@ -161,7 +167,7 @@ mod sweep_test {
     /// Helper function to count nodes in a partition
     fn count_nodes_in_partition(heap: &GcHeap, partition_id: GcPartitionId) -> usize {
         let mut count = 0;
-        if let Some(head) = heap.partition_nodes.get(&partition_id).copied().flatten() {
+        if let Some(head) = heap.partitions.get(&partition_id).unwrap().nodes {
             count = NodeLinkIter::new(Some(head)).count();
         }
         count
@@ -172,13 +178,15 @@ mod sweep_test {
         heap: &GcHeap,
         partition_id: GcPartitionId,
     ) -> Vec<NonNull<GcHead>> {
-        let mut nodes = Vec::new();
-        if let Some(head) = heap.partition_nodes.get(&partition_id).copied().flatten() {
-            let mut current = Some(head);
-            while let Some(node) = current {
-                unsafe {
-                    nodes.push(node);
-                    current = node.as_ref().next;
+        let mut nodes: Vec<NonNull<GcHead>> = Vec::new();
+        if let Some(partition) = heap.partitions.get(&partition_id) {
+            if let Some(head) = partition.nodes {
+                let mut current = Some(head);
+                while let Some(node) = current {
+                    unsafe {
+                        nodes.push(node);
+                        current = node.as_ref().next;
+                    }
                 }
             }
         }
@@ -260,7 +268,7 @@ mod sweep_test {
         assert_eq!(count_nodes_in_partition(&heap, partition_id), 2);
 
         // Verify chain head is now the node with value 4
-        let head = heap.partition_nodes.get(&partition_id).copied().flatten();
+        let head = heap.partitions.get(&partition_id).and_then(|p| p.nodes);
         assert!(head.is_some(), "Chain head should exist");
 
         unsafe {
@@ -315,7 +323,7 @@ mod sweep_test {
         assert_eq!(count_nodes_in_partition(&heap, partition_id), 0);
 
         // Chain head should be None
-        let head = heap.partition_nodes.get(&partition_id).copied().flatten();
+        let head = heap.partitions.get(&partition_id).and_then(|p| p.nodes);
         assert!(
             head.is_none(),
             "Chain head should be None after removing all nodes"
@@ -384,9 +392,10 @@ mod sweep_test {
 
         // Verify root list contains the object
         assert!(
-            heap.partition_root_nodes
+            heap.partitions
                 .get(&partition_id)
                 .unwrap()
+                .root_nodes
                 .contains(&objects[0].head_ptr)
         );
 
@@ -411,9 +420,10 @@ mod sweep_test {
         // Root should be removed from root list
         assert!(
             !heap
-                .partition_root_nodes
+                .partitions
                 .get(&partition_id)
                 .unwrap()
+                .root_nodes
                 .contains(&objects[0].head_ptr)
         );
     }

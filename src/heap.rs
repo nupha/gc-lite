@@ -4,18 +4,15 @@
 use std::{collections::HashMap, ptr::NonNull};
 
 use crate::{
-    GcNode, GcTraceCtx, GcTraceRestrict,
-    node::{GcHead, GcRef},
+    GcNode, GcRef,
+    node::{GcHead, GcNodeFlag},
     partition::{GcPartition, GcPartitionId},
+    trace::{GcTraceCtx, GcTraceRestrict},
 };
 
 pub struct GcHeap {
     /// Partition management
     pub(super) partitions: HashMap<GcPartitionId, GcPartition>,
-    /// LUT: Object list heads for each partition
-    pub(super) partition_nodes: HashMap<GcPartitionId, Option<NonNull<GcHead>>>,
-    /// LUT: Root object lists for each partition
-    pub(super) partition_root_nodes: HashMap<GcPartitionId, Vec<NonNull<GcHead>>>,
     /// Weak reference list, each slot stores (version, GcHeader)
     pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
     /// User provided opaque raw pointer
@@ -32,10 +29,10 @@ impl Drop for GcHeap {
         // heap world is gone, dealloc all nodes live in it, regardless their status.
         log::trace!("[heap::drop]");
 
-        let mut kv = std::mem::take(&mut self.partition_nodes);
+        let mut kv = std::mem::take(&mut self.partitions);
 
-        for (_, link) in kv.drain() {
-            if let Some(link) = link {
+        for (_, mut partition) in kv.drain() {
+            if let Some(link) = partition.nodes.take() {
                 self.dispose_all_nodes(link, Self::DUMMY_DISPOSE_CALLBACK);
             }
         }
@@ -60,8 +57,6 @@ impl GcHeap {
     pub fn new() -> Self {
         Self {
             partitions: HashMap::new(),
-            partition_nodes: HashMap::with_capacity(8),
-            partition_root_nodes: HashMap::with_capacity(8),
             weak_slots: Vec::new(),
             opaque: std::ptr::null_mut(),
 
@@ -143,6 +138,60 @@ impl GcHeap {
         false
     }
 
+    pub fn drop_partition(
+        &mut self,
+        partition_id: GcPartitionId,
+        on_dispose: impl Fn(&GcHeap, &GcHead),
+    ) -> usize {
+        if partition_id.is_null() {
+            return 0;
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            self.dbg_dropping_root_partition = Some(partition_id);
+        }
+
+        let mut freed_bytes = 0;
+        let mut to_drop = vec![partition_id];
+        let mut i = 0;
+
+        while i < to_drop.len() {
+            let current_id = to_drop[i];
+            i += 1;
+
+            if let Some(mut partition) = self.partitions.remove(&current_id) {
+                // Add children to the drop list
+                to_drop.extend_from_slice(&partition.children);
+
+                // Dispose all nodes in the current partition
+                if let Some(head) = partition.nodes.take() {
+                    freed_bytes += self.dispose_all_nodes(head, &on_dispose);
+                }
+
+                // Remove from parent's children list
+                if !partition.parent.is_null() {
+                    if let Some(parent_partition) = self.partitions.get_mut(&partition.parent) {
+                        if let Some(pos) = parent_partition
+                            .children
+                            .iter()
+                            .position(|&id| id == current_id)
+                        {
+                            parent_partition.children.swap_remove(pos);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            self.dbg_dropping_root_partition = None;
+        }
+
+        freed_bytes
+    }
+
     /// Attach a node to partition's nodes chain.
     ///
     /// # Note
@@ -151,7 +200,7 @@ impl GcHeap {
     #[inline]
     pub(crate) fn attach(&mut self, partition_id: GcPartitionId, mut node: NonNull<GcHead>) {
         debug_assert!(!partition_id.is_null());
-        debug_assert!(self.partition_nodes.contains_key(&partition_id));
+        let partition = self.partitions.get_mut(&partition_id).unwrap();
 
         unsafe {
             debug_assert!(node.as_ref().scope_id().is_null());
@@ -159,37 +208,29 @@ impl GcHeap {
 
             node.as_mut().set_scope_id(partition_id);
 
-            let cur_head = self
-                .partition_nodes
-                .remove(&partition_id)
-                .unwrap_unchecked();
+            let cur_head = partition.nodes.take();
 
             node.as_mut().next = cur_head;
-            self.partition_nodes.insert(partition_id, Some(node));
+            partition.nodes = Some(node);
         }
     }
 
     /// Set/unset a node to be root
-    pub fn set_root_node(&mut self, node: NonNull<GcHead>, is_root: bool) {
+    pub fn set_root_node(&mut self, mut node: NonNull<GcHead>, is_root: bool) {
         unsafe {
-            let pid = (*node.as_ptr()).scope_id();
+            node.as_mut().set_root(is_root);
 
-            (*node.as_ptr()).set_root(is_root);
-
-            if is_root {
-                // Add to partition's root object list, create if doesn't exist
-                let roots = self
-                    .partition_root_nodes
-                    .entry(pid)
-                    .or_insert_with(|| Vec::with_capacity(8));
-                if !roots.contains(&node) {
-                    roots.push(node);
-                }
-            } else {
-                // Remove from partition's root object list
-                if let Some(roots) = self.partition_root_nodes.get_mut(&pid) {
-                    if let Some(pos) = roots.iter().position(|&r| r == node) {
-                        roots.swap_remove(pos);
+            let pid = node.as_ref().scope_id();
+            if let Some(partition) = self.partitions.get_mut(&pid) {
+                if is_root {
+                    // Add to partition's root object list
+                    if !partition.root_nodes.contains(&node) {
+                        partition.root_nodes.push(node);
+                    }
+                } else {
+                    // Remove from partition's root object list
+                    if let Some(pos) = partition.root_nodes.iter().position(|&r| r == node) {
+                        partition.root_nodes.swap_remove(pos);
                     }
                 }
             }
@@ -200,6 +241,17 @@ impl GcHeap {
     #[inline(always)]
     pub fn set_root<T: GcNode>(&mut self, gc_ref: GcRef<T>, is_root: bool) {
         self.set_root_node(gc_ref.head_ptr, is_root);
+    }
+
+    pub fn get_roots(
+        &self,
+        partition_id: GcPartitionId,
+    ) -> impl Iterator<Item = NonNull<GcHead>> + '_ {
+        self.partitions
+            .get(&partition_id)
+            .map(|p| p.root_nodes.iter().copied())
+            .into_iter()
+            .flatten()
     }
 
     /// Check if `node` was allocated in this heap
@@ -254,7 +306,8 @@ impl GcHeap {
         ctx.trace_iter(stack.iter().copied(), GcTraceCtx::MARK_FUNC);
 
         let b = unsafe { node.as_ref().is_marked() };
-        ctx.clear_marked_flag();
+
+        self.clear_node_flags(GcNodeFlag::MARKED);
 
         b
     }
@@ -294,14 +347,12 @@ impl GcHeap {
 
 #[cfg(test)]
 mod heap_tests {
-    use crate::{GcNode, trace::GcTraceCtx};
+    use crate::{GcNode, trace::GcTracable};
 
     use super::*;
 
     #[test]
     fn test_is_node_reachable() {
-        use crate::trace::GcTracable;
-
         // 定义一个简单的结构体，包含对其他 GC 对象的引用
         #[derive(Debug)]
         struct Node {

@@ -11,6 +11,7 @@ use std::{
 use crate::{GcHead, GcHeap, GcTracable, trace::GcTraceCtx};
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct GcTypeInfo {
     pub size: u32,
     pub(super) trace_fn: fn(NonNull<GcHead>, &mut GcTraceCtx),

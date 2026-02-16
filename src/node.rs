@@ -165,7 +165,7 @@ impl GcHead {
     }
 
     /// Get direct referencing children nodes
-    pub fn gc_children(&self, heap: &GcHeap) -> Vec<NonNull<GcHead>> {
+    pub fn gc_children(&self, heap: &mut GcHeap) -> Vec<NonNull<GcHead>> {
         let mut ctx = GcTraceCtx::new(heap, GcTraceRestrict::No, false);
         (self.trace_fn())(NonNull::from_ref(self), &mut ctx);
         ctx.take_traced_nodes().into()
@@ -367,10 +367,10 @@ impl GcHead {
         self.debug_assert_node_valid_simple();
     }
 
-    pub fn debug_assert_node_tree_valid(&self, heap: &GcHeap) {
-        debug_assert_eq!(self.dbg_heap, NonNull::from_ref(heap));
-        let mut ctx = GcTraceCtx::new(heap, GcTraceRestrict::No, false);
-        ctx.trace(NonNull::from_ref(self), |n, _| unsafe {
+    pub fn debug_assert_node_tree_valid(&self, heap: &mut GcHeap) {
+        debug_assert_eq!(self.dbg_heap.as_ptr(), heap as *mut _);
+        let mut gcx = GcTraceCtx::new(heap, GcTraceRestrict::No, false);
+        gcx.trace(NonNull::from_ref(self), |n, _| unsafe {
             n.as_ref().debug_assert_node_valid(heap);
         });
     }

@@ -14,22 +14,23 @@ pub struct GcPartitionId(pub u16);
 impl GcPartitionId {
     /// Special partition ID representing no parent (null value)
     pub const NONE: Self = Self(0);
-}
 
-impl GcPartitionId {
     #[inline(always)]
     pub const fn is_null(&self) -> bool {
         self.0 == 0
     }
 }
 
-/// Partition information
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct GcPartition {
     /// Parent partition ID, GcPartitionId::NONE (0) means no parent (root partition)
     pub(crate) parent: GcPartitionId,
     /// Child partition IDs
     pub(crate) children: SmallVec<[GcPartitionId; 4]>,
+    /// nodes in this partition
+    pub(crate) nodes: Option<NonNull<GcHead>>,
+    /// root nodes in this partition
+    pub(crate) root_nodes: SmallVec<[NonNull<GcHead>; 8]>,
     /// Current memory usage
     pub(crate) memory_used: usize,
     /// Memory usage limit, 0 for unlimited
@@ -47,6 +48,8 @@ impl GcPartition {
             memory_used: 0,
             memory_limit,
             gc_threshold: 0, // Default threshold is 0 bytes (disable automatic GC)
+            nodes: None,
+            root_nodes: SmallVec::new(),
         }
     }
 
@@ -210,11 +213,7 @@ impl GcHeap {
     /// # Returns
     /// The ID of the newly created top-level partition
     pub fn create_root_partition(&mut self, memory_limit: usize) -> GcPartitionId {
-        let id = self.create_partition(Some(memory_limit), GcPartitionId::NONE);
-        self.partition_nodes.insert(id, None);
-        self.partition_root_nodes.insert(id, Vec::new());
-
-        id
+        self.create_partition(Some(memory_limit), GcPartitionId::NONE)
     }
 
     /// Create a new sub-partition under the specified parent partition
@@ -225,10 +224,7 @@ impl GcHeap {
     /// # Returns
     /// The ID of the newly created sub-partition
     pub fn create_sub_partition(&mut self, parent: GcPartitionId) -> GcPartitionId {
-        let id = self.create_partition(None, parent);
-        self.partition_nodes.insert(id, None);
-        self.partition_root_nodes.insert(id, Vec::new());
-        id
+        self.create_partition(None, parent)
     }
 
     /// Note: `since` is not included in result vec
@@ -270,8 +266,9 @@ impl GcHeap {
             log::trace!("[close_scope] {pid:?}");
 
             // fix xref tree recursively
-            if let Some(roots) = self.partition_root_nodes.remove(&pid) {
-                for xn in roots
+            if let Some(partition) = self.partitions.get_mut(&pid) {
+                let roots = std::mem::take(&mut partition.root_nodes);
+                for &xn in roots
                     .iter()
                     .filter(|n| unsafe { !n.as_ref().xref_partition().is_null() })
                 {
@@ -280,7 +277,7 @@ impl GcHeap {
                         xn.as_ref().xref_partition()
                     };
 
-                    self.traverse_subtree(*xn, GcPartitionId::NONE, {
+                    self.traverse_subtree(xn, GcPartitionId::NONE, {
                         let hp = NonNull::from_ref(self);
 
                         move |mut n, _| unsafe {
@@ -303,59 +300,62 @@ impl GcHeap {
                 }
             }
 
-            if let Some(link0) = self.partition_nodes.remove(&pid) {
-                // migrate xref nodes
-                let mut link1 = link0;
-                let mut current = link0;
-                let mut prev: Option<NonNull<GcHead>> = None;
+            if let Some(mut partition) = self.partitions.remove(&pid) {
+                if let Some(link0_head) = partition.nodes.take() {
+                    // migrate xref nodes
+                    let mut link1 = Some(link0_head);
+                    let mut current = Some(link0_head);
+                    let mut prev: Option<NonNull<GcHead>> = None;
 
-                while let Some(mut this) = current {
-                    current = unsafe { this.as_ref().next };
+                    while let Some(mut this) = current {
+                        current = unsafe { this.as_ref().next };
 
-                    let xref = unsafe { this.as_ref().xref_partition() };
-                    if !xref.is_null() {
-                        log::trace!("[migrate] {:?} -> {xref:?}", unsafe { this.as_ref() });
-                        debug_assert_ne!(xref, pid);
+                        let xref = unsafe { this.as_ref().xref_partition() };
+                        if !xref.is_null() {
+                            log::trace!("[migrate] {:?} -> {xref:?}", unsafe { this.as_ref() });
+                            debug_assert_ne!(xref, pid);
 
-                        if let Some(p) = prev {
-                            unsafe {
-                                (*p.as_ptr()).next = current;
+                            if let Some(p) = prev {
+                                unsafe {
+                                    (*p.as_ptr()).next = current;
+                                }
+                            } else {
+                                link1 = current;
                             }
+
+                            if call_on_migrate {
+                                on_migrate(self, unsafe { this.as_ref() }, xref);
+                            }
+
+                            // clear flags and attach to xref chain
+                            unsafe {
+                                let mut f = this.as_ref().flags();
+                                f.remove(
+                                    GcNodeFlag::ROOT | GcNodeFlag::MARKED | GcNodeFlag::TRACED,
+                                );
+                                this.as_mut().set_flags(f);
+                                this.as_mut().partition = 0; // clear partition & xref
+                                this.as_mut().next.take();
+                            }
+                            self.attach(xref, this);
+
+                            // Increase memory usage with rollup to xref partitions
+                            self.update_mem_use(
+                                xref,
+                                (Self::with_node_gc_type(this, |ty| ty.size) as usize
+                                    + std::mem::size_of::<GcHead>())
+                                    as i32,
+                            );
                         } else {
-                            link1 = current;
+                            prev = Some(this);
                         }
+                    }
 
-                        if call_on_migrate {
-                            on_migrate(self, unsafe { this.as_ref() }, xref);
-                        }
-
-                        // clear flags and attach to xref chain
-                        unsafe {
-                            let mut f = this.as_ref().flags();
-                            f.remove(GcNodeFlag::ROOT | GcNodeFlag::MARKED | GcNodeFlag::TRACED);
-                            this.as_mut().set_flags(f);
-                            this.as_mut().partition = 0; // clear partition & xref
-                            this.as_mut().next.take();
-                        }
-                        self.attach(xref, this);
-
-                        // Increase memory usage with rollup to xref partitions
-                        self.update_mem_use(
-                            xref,
-                            (Self::with_node_gc_type(this, |ty| ty.size) as usize
-                                + std::mem::size_of::<GcHead>()) as i32,
-                        );
-                    } else {
-                        prev = Some(this);
+                    // free rest nodes
+                    if let Some(first) = link1 {
+                        freed_bytes += self.dispose_all_nodes(first, &on_dispose);
                     }
                 }
-
-                // free rest nodes
-                if let Some(first) = link1 {
-                    freed_bytes += self.dispose_all_nodes(first, &on_dispose);
-                }
-
-                self.partitions.remove(&pid);
             }
 
             if let Some(parent) = self.partition_mut(parent_id) {
@@ -371,39 +371,6 @@ impl GcHeap {
     }
 
     /// drop root partition and all its descendants without check and fixes - the fast path.
-    pub(crate) fn remove_root_partition_fast(
-        &mut self,
-        partition_id: GcPartitionId,
-        on_dispose: impl Fn(&GcHeap, &GcHead),
-    ) {
-        log::trace!("[remove_root_partition] {partition_id:?}");
-        debug_assert!(self.partition(partition_id).unwrap().is_root());
-
-        #[cfg(debug_assertions)]
-        {
-            debug_assert!(self.dbg_dropping_root_partition.is_none());
-            self.dbg_dropping_root_partition = Some(partition_id);
-        }
-
-        let mut scopes = Vec::with_capacity(64);
-        scopes.push(partition_id);
-        self.load_descendants(partition_id, &mut scopes);
-        log::debug!("[descendant_partitions] {:?}", &scopes[1..]);
-
-        // from descendants to ancestor - using ::pop() from tail.
-        while let Some(pid) = scopes.pop() {
-            if let Some(link) = self.partition_nodes.remove(&pid).unwrap() {
-                self.dispose_all_nodes(link, &on_dispose);
-            }
-            self.partition_root_nodes.remove(&pid);
-            self.partitions.remove(&pid);
-        }
-
-        #[cfg(debug_assertions)]
-        {
-            self.dbg_dropping_root_partition = None;
-        }
-    }
 
     /// Get partition information
     pub fn partition(&self, partition_id: GcPartitionId) -> Option<&GcPartition> {

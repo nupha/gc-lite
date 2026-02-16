@@ -4,7 +4,7 @@
 use std::{alloc::Layout, marker::PhantomData, ptr::NonNull};
 
 use crate::{
-    GcError, GcHead, GcHeap, GcNode, GcPartitionId, GcRef, GcTracable, gctype::TypeRegistry,
+    GcError, GcHead, GcHeap, GcNode, GcPartitionId, GcRef, gctype::TypeRegistry,
     unlikely, weak::GcWeakRawId,
 };
 

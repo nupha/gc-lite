@@ -147,7 +147,7 @@ mod xref_tests {
             assert_eq!(slave.head_ptr.as_ref().xref_partition(), root_id);
             assert!(slave.head_ptr.as_ref().is_root());
         }
-        heap.remove_root_partition_fast(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     }
 
     #[test]
@@ -176,7 +176,7 @@ mod xref_tests {
             );
             assert!(!slave.head_ptr.as_ref().is_root());
         }
-        heap.remove_root_partition_fast(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     }
 
     #[test]
@@ -203,7 +203,7 @@ mod xref_tests {
             assert_eq!(slave.head_ptr.as_ref().xref_partition(), a_id);
             assert!(slave.head_ptr.as_ref().is_root());
         }
-        heap.remove_root_partition_fast(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     }
 
     #[test]
@@ -229,7 +229,7 @@ mod xref_tests {
             assert_eq!(slave.head_ptr.as_ref().xref_partition(), root_id);
             assert!(!slave.head_ptr.as_ref().is_root());
         }
-        heap.remove_root_partition_fast(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     }
 
     #[test]
@@ -253,7 +253,7 @@ mod xref_tests {
             assert_eq!(node.head_ptr.as_ref().xref_partition(), root_id);
             assert!(!node.head_ptr.as_ref().is_root());
         }
-        heap.remove_root_partition_fast(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     }
 
     #[test]
@@ -279,7 +279,7 @@ mod xref_tests {
             assert_eq!(node.head_ptr.as_ref().xref_partition(), root_id);
             assert!(!node.head_ptr.as_ref().is_root());
         }
-        heap.remove_root_partition_fast(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     }
 
     #[test]
@@ -310,6 +310,6 @@ mod xref_tests {
             assert_eq!(node.head_ptr.as_ref().xref_partition(), root_id);
             assert!(node.head_ptr.as_ref().is_root());
         }
-        heap.remove_root_partition_fast(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     }
 }
