@@ -168,7 +168,7 @@ impl GcHead {
     pub fn gc_children(&self, heap: &mut GcHeap) -> Vec<NonNull<GcHead>> {
         let mut ctx = GcTraceCtx::new(heap, GcTraceRestrict::No, false);
         (self.trace_fn())(NonNull::from_ref(self), &mut ctx);
-        ctx.take_traced_nodes().into()
+        ctx.take_traced_nodes()
     }
 
     /// Get GcRef<T> from node. if node is not of type T, returns None
@@ -211,10 +211,7 @@ impl<T: GcNode> DerefMut for GcRef<T> {
 
 impl<T: GcNode> Clone for GcRef<T> {
     fn clone(&self) -> Self {
-        Self {
-            head_ptr: self.head_ptr,
-            _marker: PhantomData,
-        }
+        *self
     }
 }
 

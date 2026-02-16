@@ -40,10 +40,7 @@ pub struct GcWeak<T: GcNode> {
 
 impl<T: GcNode> Clone for GcWeak<T> {
     fn clone(&self) -> Self {
-        Self {
-            weak_id: self.weak_id,
-            _marker: PhantomData,
-        }
+        *self
     }
 }
 

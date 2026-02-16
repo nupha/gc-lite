@@ -24,7 +24,7 @@ impl GcHead {
             self.partition = (self.partition & 0x0000_FFFF) | ((xref.0 as u32) << 16);
             true
         } else {
-            self.partition = self.partition & 0x0000_FFFF;
+            self.partition &= 0x0000_FFFF;
             false
         }
     }

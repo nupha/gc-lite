@@ -56,12 +56,11 @@ impl GcHeap {
                             freed_bytes += self.dispose(this);
 
                             // If root node: remove from root list
-                            if is_root {
-                                if let Some(p) = self.partitions.get_mut(&partition_id) {
-                                    if let Some(i) = p.root_nodes.iter().position(|&x| x == this) {
-                                        p.root_nodes.swap_remove(i);
-                                    }
-                                }
+                            if is_root
+                                && let Some(p) = self.partitions.get_mut(&partition_id)
+                                && let Some(i) = p.root_nodes.iter().position(|&x| x == this)
+                            {
+                                p.root_nodes.swap_remove(i);
                             }
                         } else {
                             prev = Some(this);

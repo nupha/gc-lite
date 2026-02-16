@@ -4,8 +4,8 @@
 use std::{alloc::Layout, marker::PhantomData, ptr::NonNull};
 
 use crate::{
-    GcError, GcHead, GcHeap, GcNode, GcPartitionId, GcRef, gctype::TypeRegistry,
-    unlikely, weak::GcWeakRawId,
+    GcError, GcHead, GcHeap, GcNode, GcPartitionId, GcRef, gctype::TypeRegistry, unlikely,
+    weak::GcWeakRawId,
 };
 
 impl GcHeap {
@@ -129,9 +129,7 @@ impl GcHeap {
                     })
                 }
             }
-            None => {
-                return Err((GcError::PartitionNotFound, payload));
-            }
+            None => Err((GcError::PartitionNotFound, payload)),
         }
     }
 

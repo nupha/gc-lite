@@ -204,7 +204,7 @@ impl GcHeap {
         const MAX_SERIAL: u16 = 1023;
 
         thread_local! {
-            static NEXT_PARTITION_SERIAL: Cell<u16> = Cell::new(1);
+            static NEXT_PARTITION_SERIAL: Cell<u16> = const { Cell::new(1) };
         }
 
         let depth = if parent.is_null() {
@@ -456,12 +456,6 @@ impl GcHeap {
         self.is_ancestor_of(lower, upper)
     }
 
-    /// Get the depth of a partition (distance to root)
-    fn depth(&self, id: GcPartitionId) -> usize {
-        debug_assert!(self.partition(id).is_some());
-        self.partition_parent_iter(id).count()
-    }
-
     /// Find the nearest common parent partition of two partitions
     ///
     /// # Parameters
@@ -479,8 +473,8 @@ impl GcHeap {
         }
 
         // Get depths
-        let d1 = self.depth(p1);
-        let d2 = self.depth(p2);
+        let d1 = p1.depth() as usize;
+        let d2 = p2.depth() as usize;
 
         // Align nodes to the same depth - the minimum
         let dmin = d1.min(d2);
@@ -546,16 +540,14 @@ impl GcHeap {
         // If any two are equal, reduce to two-node case
         if p1 == p2 {
             return self.common_parent2(p1, p3);
-        } else if p1 == p3 {
-            return self.common_parent2(p1, p2);
-        } else if p2 == p3 {
+        } else if p1 == p3 || p2 == p3 {
             return self.common_parent2(p1, p2);
         }
 
         // Get depths
-        let d1 = self.depth(p1);
-        let d2 = self.depth(p2);
-        let d3 = self.depth(p3);
+        let d1 = p1.depth() as usize;
+        let d2 = p2.depth() as usize;
+        let d3 = p3.depth() as usize;
 
         // Align nodes to the same depth - the minimum
         let dmin = d1.min(d2).min(d3);

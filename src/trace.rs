@@ -70,14 +70,12 @@ impl<'a> GcTraceCtx<'a> {
             heap.clear_node_flags(GcNodeFlag::MARKED | GcNodeFlag::TRACED);
         }
 
-        let ctx = GcTraceCtx {
+        GcTraceCtx {
             heap: NonNull::from_ref(heap),
             restrict,
             traced_nodes: VecDeque::new(),
             _mark: PhantomData,
-        };
-
-        ctx
+        }
     }
 
     #[inline(always)]
