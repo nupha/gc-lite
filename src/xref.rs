@@ -109,7 +109,12 @@ mod xref_tests {
             }
         }
     }
+
     impl GcNode for TestNode {}
+
+    crate::gc_type_table! {
+        0 => TestNode, drop_pass = 0;
+    }
 
     fn alloc_node(heap: &mut GcHeap, pid: GcPartitionId) -> GcRef<TestNode> {
         heap.alloc(
@@ -123,7 +128,7 @@ mod xref_tests {
 
     #[test]
     fn test_bind_sets_xref_to_common_parent_no_existing_xref() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
 
         let root_id = heap.create_root_partition(4096);
         let a_id = heap.create_sub_partition(root_id);
@@ -152,7 +157,7 @@ mod xref_tests {
 
     #[test]
     fn test_bind_no_change_same_partition() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
 
         let root_id = heap.create_root_partition(4096);
         let a_id = heap.create_sub_partition(root_id);
@@ -181,7 +186,7 @@ mod xref_tests {
 
     #[test]
     fn test_set_xref_elevates_lower_existing_xref() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
 
         let root_id = heap.create_root_partition(4096);
         let a_id = heap.create_sub_partition(root_id);
@@ -208,7 +213,7 @@ mod xref_tests {
 
     #[test]
     fn test_set_xref_no_regression_when_existing_xref_higher() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
 
         let root_id = heap.create_root_partition(4096);
         let a_id = heap.create_sub_partition(root_id);
@@ -234,7 +239,7 @@ mod xref_tests {
 
     #[test]
     fn test_set_xref_same_partition_no_update() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
 
         let root_id = heap.create_root_partition(4096);
         let a_id = heap.create_sub_partition(root_id);
@@ -258,7 +263,7 @@ mod xref_tests {
 
     #[test]
     fn test_set_xref_from_is_lower_no_update() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
 
         let root_id = heap.create_root_partition(4096);
         let node_pid = heap.create_sub_partition(root_id);
@@ -284,7 +289,7 @@ mod xref_tests {
 
     #[test]
     fn test_multiple_bind_converges_to_common_parent() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
 
         let root_id = heap.create_root_partition(4096);
         let a_id = heap.create_sub_partition(root_id);

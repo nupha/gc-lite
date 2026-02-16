@@ -11,12 +11,45 @@
 
 use std::ops::Deref;
 
-use gc_lite::{GcHeap, GcNode, GcRef, GcResult, GcTracable, GcTraceCtx};
+use gc_lite::{GcHeap, GcNode, GcRef, GcResult, GcTracable, GcTraceCtx, gc_type_table};
+
+#[derive(Debug)]
+struct MyString(String);
+
+impl PartialEq<str> for MyString {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+unsafe impl GcTracable for MyString {
+    fn trace(&self, _: &mut GcTraceCtx) {}
+}
+
+impl GcNode for MyString {}
+
+impl std::fmt::Display for MyString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+gc_type_table! {
+    0 => MyString, drop_pass = 0;
+    1 => CyclicNode, drop_pass = 0;
+    2 => TreeNode, drop_pass = 0;
+    3 => DataContainer, drop_pass = 0;
+    4 => TestData, drop_pass = 0;
+}
+
+fn new_heap() -> GcHeap {
+    GcHeap::new_with_types(GC_TYPE_INFO_LUT)
+}
 
 fn main() -> GcResult<()> {
     println!("=== Advanced features example of partitioned garbage collection system ===");
 
-    let mut heap = GcHeap::new();
+    let mut heap = new_heap();
     let partition = heap.create_root_partition(2048);
 
     // Demonstrate weak reference functionality
@@ -51,7 +84,7 @@ fn demonstrate_weak_references(
     println!("1. Create strong and weak references...");
 
     let strong_ref = heap
-        .alloc(partition, String::from("Strong Reference Data"))
+        .alloc(partition, MyString(String::from("Strong Reference Data")))
         .map_err(|(err, _)| err)?;
 
     let weak_ref = heap.downgrade(&strong_ref);
@@ -257,8 +290,8 @@ fn demonstrate_reference_recovery(
 fn demonstrate_cross_context_detection() -> GcResult<()> {
     println!("1. Create two independent contexts...");
 
-    let mut context1 = GcHeap::new();
-    let mut context2 = GcHeap::new();
+    let mut context1 = new_heap();
+    let mut context2 = new_heap();
 
     let partition1 = context1.create_root_partition(1024);
     let partition2 = context2.create_root_partition(1024);

@@ -4,8 +4,8 @@
 use std::ptr::NonNull;
 
 use crate::{
-    GcHeap, GcTraceRestrict, gctype::TypeRegistry, node::GcHead, node_iterator::NodeLinkIter,
-    partition::GcPartitionId, trace::GcTraceCtx,
+    GcHeap, GcTraceRestrict, node::GcHead, node_iterator::NodeLinkIter, partition::GcPartitionId,
+    trace::GcTraceCtx,
 };
 
 impl GcHeap {
@@ -28,7 +28,9 @@ impl GcHeap {
             let mut link1 = Some(link0);
             let mut freed_bytes = 0;
 
-            for &pass in TypeRegistry::drop_passes(&mut [0; 4]) {
+            let mut passes = [0u8; 4];
+            let pass_slice = self.drop_passes(&mut passes);
+            for &pass in pass_slice {
                 let mut current = link1;
                 let mut prev: Option<NonNull<GcHead>> = None;
 
@@ -39,9 +41,9 @@ impl GcHeap {
 
                         current = this.as_mut().next;
 
-                        if predicate(this.as_mut())
-                            && TypeRegistry::with_node_gc_type(this, |ty| ty.drop_pass) == pass
-                        {
+                        let dtype = this.as_ref().gc_dtype() as usize;
+                        let info = &self.gc_types[dtype];
+                        if predicate(this.as_mut()) && info.drop_pass == pass {
                             if let Some(mut p) = prev {
                                 p.as_mut().next = current;
                             } else {
@@ -112,7 +114,9 @@ impl GcHeap {
         let mut link = Some(head);
         let mut freed_bytes = 0;
 
-        for &pass in TypeRegistry::drop_passes(&mut [0; 4]) {
+        let mut passes = [0u8; 4];
+        let pass_slice = self.drop_passes(&mut passes);
+        for &pass in pass_slice {
             log::trace!(
                 "[dipose_all] pass {pass}, count={}",
                 NodeLinkIter::new(link).count()
@@ -128,7 +132,9 @@ impl GcHeap {
 
                     current = this.as_ref().next;
 
-                    if TypeRegistry::with_node_gc_type(this, |ty| ty.drop_pass) == pass {
+                    let dtype = this.as_ref().gc_dtype() as usize;
+                    let info = &self.gc_types[dtype];
+                    if info.drop_pass == pass {
                         if let Some(mut p) = prev {
                             p.as_mut().next = current;
                         } else {
@@ -163,6 +169,21 @@ mod sweep_test {
     use super::*;
     use crate::GcRef;
 
+    use crate::{GcNode, trace::GcTracable};
+
+    #[derive(Debug)]
+    struct MyI32(i32);
+
+    unsafe impl GcTracable for MyI32 {
+        fn trace(&self, _: &mut GcTraceCtx) {}
+    }
+
+    impl GcNode for MyI32 {}
+
+    crate::gc_type_table! {
+        0 => MyI32, drop_pass = 0;
+    }
+
     /// Helper function to count nodes in a partition
     fn count_nodes_in_partition(heap: &GcHeap, partition_id: GcPartitionId) -> usize {
         let mut count = 0;
@@ -195,12 +216,11 @@ mod sweep_test {
     /// Test basic sweep_with functionality
     #[test]
     fn test_sweep_with_basic() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
         let partition_id = heap.create_root_partition(4096);
 
-        // Allocate 5 objects
-        let objects: Vec<GcRef<i32>> = (0..5)
-            .map(|i| heap.alloc(partition_id, i).unwrap())
+        let objects: Vec<GcRef<MyI32>> = (0..5)
+            .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
             .collect();
 
         // Verify we have 5 nodes
@@ -213,7 +233,7 @@ mod sweep_test {
                 unsafe {
                     let payload_ptr =
                         (node as *const GcHead as *const u8).add(std::mem::size_of::<GcHead>());
-                    let value = *(payload_ptr as *const i32);
+                    let value = (*(payload_ptr as *const MyI32)).0;
                     value % 2 == 0 // Remove even numbers
                 }
             },
@@ -242,20 +262,19 @@ mod sweep_test {
     /// Test removing chain head nodes (n个节点被剔除后)
     #[test]
     fn test_sweep_with_chain_head_removal() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
         let partition_id = heap.create_root_partition(4096);
 
-        // Allocate 5 objects with values 0-4
-        let objects: Vec<GcRef<i32>> = (0..5)
-            .map(|i| heap.alloc(partition_id, i).unwrap())
+        let objects: Vec<GcRef<MyI32>> = (0..5)
+            .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
             .collect();
 
         // Mark first 3 objects (0, 1, 2) for removal
         let removed = heap.sweep(
             partition_id,
             |node| {
-                let payload_ptr = node.payload().cast::<i32>();
-                let value = unsafe { *payload_ptr.as_ptr() };
+                let payload_ptr = node.payload().cast::<MyI32>();
+                let value = unsafe { (*payload_ptr.as_ptr()).0 };
                 value < 3 // Remove values 0, 1, 2
             },
             GcHeap::DUMMY_DISPOSE_CALLBACK,
@@ -273,7 +292,7 @@ mod sweep_test {
         unsafe {
             let payload_ptr =
                 (head.unwrap().as_ptr() as *mut u8).add(std::mem::size_of::<GcHead>());
-            let value = *(payload_ptr as *const i32);
+            let value = (*(payload_ptr as *const MyI32)).0;
             assert_eq!(
                 value, 4,
                 "Chain head should be value 4 (last allocated, first in chain)"
@@ -284,14 +303,13 @@ mod sweep_test {
         let nodes = get_all_nodes_in_partition(&heap, partition_id);
         assert_eq!(nodes.len(), 2);
 
-        // Check values are 4 and 3 (in reverse allocation order)
         unsafe {
-            let payload_ptr1 = nodes[0].as_ref().payload().cast::<i32>();
-            let value1 = *(payload_ptr1.as_ptr());
+            let payload_ptr1 = nodes[0].as_ref().payload().cast::<MyI32>();
+            let value1 = (*payload_ptr1.as_ptr()).0;
             assert_eq!(value1, 4);
 
-            let payload_ptr2 = nodes[1].as_ref().payload().cast::<i32>();
-            let value2 = *(payload_ptr2.as_ptr());
+            let payload_ptr2 = nodes[1].as_ref().payload().cast::<MyI32>();
+            let value2 = (*payload_ptr2.as_ptr()).0;
             assert_eq!(value2, 3);
         }
     }
@@ -299,12 +317,11 @@ mod sweep_test {
     /// Test removing all chain head nodes (连续剔除所有链头节点)
     #[test]
     fn test_sweep_with_all_chain_head_removal() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
         let partition_id = heap.create_root_partition(4096);
 
-        // Allocate 3 objects
-        let objects: Vec<GcRef<i32>> = (0..3)
-            .map(|i| heap.alloc(partition_id, i).unwrap())
+        let objects: Vec<GcRef<MyI32>> = (0..3)
+            .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
             .collect();
 
         // Remove all nodes
@@ -332,20 +349,19 @@ mod sweep_test {
     /// Test removing middle nodes
     #[test]
     fn test_sweep_with_middle_node_removal() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
         let partition_id = heap.create_root_partition(4096);
 
-        // Allocate 5 objects
-        let objects: Vec<GcRef<i32>> = (0..5)
-            .map(|i| heap.alloc(partition_id, i).unwrap())
+        let objects: Vec<GcRef<MyI32>> = (0..5)
+            .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
             .collect();
 
         // Remove only middle node (value 2)
         let removed = heap.sweep(
             partition_id,
             |node| unsafe {
-                let payload_ptr = node.payload().cast::<i32>();
-                let value = *(payload_ptr.as_ptr());
+                let payload_ptr = node.payload().cast::<MyI32>();
+                let value = (*payload_ptr.as_ptr()).0;
                 value == 2
             },
             GcHeap::DUMMY_DISPOSE_CALLBACK,
@@ -360,12 +376,11 @@ mod sweep_test {
         let nodes = get_all_nodes_in_partition(&heap, partition_id);
         assert_eq!(nodes.len(), 4);
 
-        // Check values are 4, 3, 1, 0 (in reverse allocation order, skipping value 2)
         let expected_values = vec![4, 3, 1, 0];
         for (i, node) in nodes.iter().enumerate() {
             unsafe {
                 let payload_ptr = (node.as_ptr() as *mut u8).add(std::mem::size_of::<GcHead>());
-                let value = *(payload_ptr as *const i32);
+                let value = (*(payload_ptr as *const MyI32)).0;
                 assert_eq!(
                     value, expected_values[i],
                     "Node at position {} should have value {}",
@@ -378,12 +393,11 @@ mod sweep_test {
     /// Test removing root nodes
     #[test]
     fn test_sweep_with_root_node_removal() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
         let partition_id = heap.create_root_partition(4096);
 
-        // Allocate 3 objects
-        let objects: Vec<GcRef<i32>> = (0..3)
-            .map(|i| heap.alloc(partition_id, i).unwrap())
+        let objects: Vec<GcRef<MyI32>> = (0..3)
+            .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
             .collect();
 
         // Mark first object as root
@@ -401,12 +415,10 @@ mod sweep_test {
         // Remove the root object
         let removed = heap.sweep(
             partition_id,
-            |node| {
-                unsafe {
-                    let payload_ptr = node.payload().cast::<i32>();
-                    let value = *(payload_ptr.as_ptr());
-                    value == 0 // Remove value 0 (the root)
-                }
+            |node| unsafe {
+                let payload_ptr = node.payload().cast::<MyI32>();
+                let value = (*payload_ptr.as_ptr()).0;
+                value == 0
             },
             GcHeap::DUMMY_DISPOSE_CALLBACK,
         );
@@ -430,7 +442,7 @@ mod sweep_test {
     /// Test empty partition
     #[test]
     fn test_sweep_with_empty_partition() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
         let partition_id = heap.create_root_partition(4096);
 
         // No objects allocated, sweep should return 0
@@ -441,7 +453,7 @@ mod sweep_test {
     /// Test non-existent partition
     #[test]
     fn test_sweep_with_nonexistent_partition() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
         let non_existent_partition = GcPartitionId(9999);
 
         // Non-existent partition should return 0

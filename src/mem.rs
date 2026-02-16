@@ -4,8 +4,7 @@
 use std::{alloc::Layout, marker::PhantomData, ptr::NonNull};
 
 use crate::{
-    GcError, GcHead, GcHeap, GcNode, GcPartitionId, GcRef, gctype::TypeRegistry, unlikely,
-    weak::GcWeakRawId,
+    GcError, GcHead, GcHeap, GcPartitionId, GcRef, node::GcTypedNode, unlikely, weak::GcWeakRawId,
 };
 
 impl GcHeap {
@@ -62,8 +61,8 @@ impl GcHeap {
         }
     }
 
-    /// Allocate a GcRef with payload data in given scope
-    pub fn alloc<T: GcNode>(
+    /// Allocate a GcRef with payload data in given scope, using a known static type id
+    pub fn alloc_typed<T: GcTypedNode>(
         &mut self,
         scope: GcPartitionId,
         payload: T,
@@ -77,7 +76,7 @@ impl GcHeap {
                 {
                     return Err((GcError::PartitionFull, payload));
                 } else {
-                    let gc_dtype = TypeRegistry::with_mut(|tt| tt.register::<T>(0));
+                    let gc_dtype = T::GC_TYPE_ID;
                     let ptr = match self.mem_alloc(gross_size) {
                         Some(p) => p,
                         None => {
@@ -133,6 +132,16 @@ impl GcHeap {
         }
     }
 
+    /// Backward compatible allocation API for typed GC nodes
+    #[inline]
+    pub fn alloc<T: GcTypedNode>(
+        &mut self,
+        scope: GcPartitionId,
+        payload: T,
+    ) -> Result<GcRef<T>, (GcError, T)> {
+        self.alloc_typed(scope, payload)
+    }
+
     /// Dispose a node
     pub(crate) fn dispose(&mut self, node: NonNull<GcHead>) -> usize {
         let hd = unsafe { node.as_ref() };
@@ -155,14 +164,15 @@ impl GcHeap {
             }
         }
 
-        let (size, drop_fn) = TypeRegistry::with_node_gc_type(node, |ty| (ty.size, ty.drop_fn));
-        let gross_size = std::mem::size_of::<GcHead>() + size as usize;
+        let dtype = hd.gc_dtype() as usize;
+        let info = &self.gc_types[dtype];
+        let gross_size = std::mem::size_of::<GcHead>() + info.size as usize;
 
         unsafe {
             std::ptr::drop_in_place(node.cast::<GcHead>().as_ptr());
         }
 
-        if let Some(f) = drop_fn {
+        if let Some(f) = info.drop_fn {
             unsafe {
                 f(node.as_ref().payload().as_ptr());
             }

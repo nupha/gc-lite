@@ -12,13 +12,48 @@
 
 use std::ops::Deref;
 
-use gc_lite::{GcHeap, GcNode, GcRef, GcResult, GcTracable, GcTraceCtx};
+use gc_lite::{GcHeap, GcNode, GcRef, GcResult, GcTracable, GcTraceCtx, gc_type_table};
+
+#[derive(Debug)]
+struct MyString(String);
+
+#[derive(Debug)]
+struct MyI32(i32);
+
+unsafe impl GcTracable for MyString {
+    fn trace(&self, _: &mut GcTraceCtx) {}
+}
+
+unsafe impl GcTracable for MyI32 {
+    fn trace(&self, _: &mut GcTraceCtx) {}
+}
+
+impl GcNode for MyString {}
+impl GcNode for MyI32 {}
+
+impl std::fmt::Display for MyString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::fmt::Display for MyI32 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+gc_type_table! {
+    0 => MyString, drop_pass = 0;
+    1 => MyI32, drop_pass = 0;
+    2 => TestNode, drop_pass = 0;
+}
 
 fn main() -> GcResult<()> {
     println!("=== Basic usage example of partitioned garbage collection system ===");
 
     // Create garbage collection context
-    let mut heap = GcHeap::new();
+    let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
 
     println!("Initial state:");
     println!("  Number of partitions: {}", heap.partition_ids().len());
@@ -34,11 +69,11 @@ fn main() -> GcResult<()> {
     // Allocate objects in partition1
     println!("\nAllocate objects in partition1:");
     let obj1 = heap
-        .alloc(partition1, String::from("Hello"))
+        .alloc(partition1, MyString(String::from("Hello")))
         .map_err(|(err, _)| err)?;
-    let obj2 = heap.alloc(partition1, 42).map_err(|(err, _)| err)?;
+    let obj2 = heap.alloc(partition1, MyI32(42)).map_err(|(err, _)| err)?;
     let obj3 = heap
-        .alloc(partition1, String::from("VectorData"))
+        .alloc(partition1, MyString(String::from("VectorData")))
         .map_err(|(err, _)| err)?;
 
     println!("  Created string: '{}'", obj1.deref());
@@ -48,9 +83,9 @@ fn main() -> GcResult<()> {
     // Allocate objects in partition2
     println!("\nAllocate objects in partition2:");
     let obj4 = heap
-        .alloc(partition2, String::from("World"))
+        .alloc(partition2, MyString(String::from("World")))
         .map_err(|(err, _)| err)?;
-    let obj5 = heap.alloc(partition2, 99).map_err(|(err, _)| err)?;
+    let obj5 = heap.alloc(partition2, MyI32(99)).map_err(|(err, _)| err)?;
 
     println!("  Created string: '{}'", obj4.deref());
     println!("  Created number: {}", obj5.deref());
@@ -132,7 +167,7 @@ fn main() -> GcResult<()> {
     // Allocate multiple objects to fill partition
     for i in 0..5 {
         let _obj = heap
-            .alloc(small_partition, format!("Object {}", i))
+            .alloc(small_partition, MyString(format!("Object {}", i)))
             .map_err(|(err, _)| err)?;
     }
 

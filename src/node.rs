@@ -8,8 +8,7 @@ use std::{
 };
 
 use crate::{
-    GcHeap, GcPartitionId, GcTracable, GcTraceCtx, GcTraceRestrict, GcWeak, gctype::TypeRegistry,
-    weak::GcWeakRawId,
+    GcHeap, GcPartitionId, GcTracable, GcTraceCtx, GcTraceRestrict, GcWeak, weak::GcWeakRawId,
 };
 
 bitflags::bitflags! {
@@ -167,13 +166,15 @@ impl GcHead {
     /// Get direct referencing children nodes
     pub fn gc_children(&self, heap: &mut GcHeap) -> Vec<NonNull<GcHead>> {
         let mut ctx = GcTraceCtx::new(heap, GcTraceRestrict::No, false);
-        (self.trace_fn())(NonNull::from_ref(self), &mut ctx);
+        let dtype = self.gc_dtype() as usize;
+        let info = &ctx.heap().gc_types[dtype];
+        (info.trace_fn)(NonNull::from_ref(self), &mut ctx);
         ctx.take_traced_nodes()
     }
 
     /// Get GcRef<T> from node. if node is not of type T, returns None
-    pub fn gc_ref<T: GcNode>(&self) -> Option<GcRef<T>> {
-        if TypeRegistry::type_id_of::<T>().is_some_and(|i| i == self.gc_dtype()) {
+    pub fn gc_ref<T: GcTypedNode>(&self) -> Option<GcRef<T>> {
+        if T::GC_TYPE_ID == self.gc_dtype() {
             Some(GcRef::<T> {
                 head_ptr: NonNull::from_ref(self),
                 _marker: PhantomData,
@@ -185,6 +186,10 @@ impl GcHead {
 }
 
 pub trait GcNode: GcTracable {}
+
+pub trait GcTypedNode: GcNode {
+    const GC_TYPE_ID: u8;
+}
 
 /// Garbage collection reference
 #[repr(transparent)]
@@ -246,7 +251,7 @@ impl<T: GcNode> std::fmt::Debug for GcRef<T> {
     }
 }
 
-impl<T: GcNode> GcRef<T> {
+impl<T: GcTypedNode> GcRef<T> {
     /// Create GcRef<T> from &T reference
     ///
     /// This method verifies that the passed reference comes from a valid GC object.
@@ -269,9 +274,7 @@ impl<T: GcNode> GcRef<T> {
                 .cast::<GcHead>()
         };
 
-        if let Some(dtype_id) = GcHeap::type_id_of::<T>()
-            && dtype_id == unsafe { node.as_ref().gc_dtype() }
-        {
+        if T::GC_TYPE_ID == unsafe { node.as_ref().gc_dtype() } {
             #[cfg(debug_assertions)]
             unsafe {
                 node.as_ref().debug_assert_node_valid(heap);
@@ -348,15 +351,20 @@ impl GcHead {
     }
 
     pub fn debug_assert_node_valid_simple(&self) {
+        if std::thread::panicking() {
+            return;
+        }
         debug_assert!(
-            self.gc_dtype() != 0
-                && self.flags().contains(GcNodeFlag::MAGIC_NUM)
+            self.flags().contains(GcNodeFlag::MAGIC_NUM)
                 && self.next.is_none_or(|n| n.is_aligned()),
             "bad node: {self:p}"
         )
     }
 
     pub fn debug_assert_node_valid(&self, heap: &GcHeap) {
+        if std::thread::panicking() {
+            return;
+        }
         debug_assert!(
             heap.dbg_living_nodes.contains(&NonNull::from_ref(self)),
             "[O.o] bad node: {self:p}"
@@ -365,6 +373,9 @@ impl GcHead {
     }
 
     pub fn debug_assert_node_tree_valid(&self, heap: &mut GcHeap) {
+        if std::thread::panicking() {
+            return;
+        }
         debug_assert_eq!(self.dbg_heap.as_ptr(), heap as *mut _);
         let mut gcx = GcTraceCtx::new(heap, GcTraceRestrict::No, false);
         gcx.trace(NonNull::from_ref(self), |n, _| unsafe {

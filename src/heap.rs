@@ -4,7 +4,7 @@
 use std::{collections::HashMap, ptr::NonNull};
 
 use crate::{
-    GcNode, GcRef,
+    GcNode, GcRef, GcTypeInfo,
     node::{GcHead, GcNodeFlag},
     partition::{GcPartition, GcPartitionId},
     trace::{GcTraceCtx, GcTraceRestrict},
@@ -17,6 +17,9 @@ pub struct GcHeap {
     pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
     /// User provided opaque raw pointer
     opaque: *mut u8,
+
+    /// Static GC type information table
+    pub(crate) gc_types: &'static [GcTypeInfo],
 
     #[cfg(debug_assertions)]
     pub(crate) dbg_dropping_root_partition: Option<GcPartitionId>,
@@ -53,18 +56,42 @@ impl GcHeap {
     pub const DUMMY_MIGRATE_CALLBACK: fn(&GcHeap, &GcHead, GcPartitionId) = |_, _, _| {};
     pub const DUMMY_DISPOSE_CALLBACK: fn(&GcHeap, &GcHead) = |_, _| {};
 
-    /// Create a new garbage collection heap
-    pub fn new() -> Self {
+    /// Create a new garbage collection heap with an explicit GC type table
+    pub fn new_with_types(gc_types: &'static [crate::gctype::GcTypeInfo]) -> Self {
         Self {
             partitions: HashMap::new(),
             weak_slots: Vec::new(),
             opaque: std::ptr::null_mut(),
+            gc_types,
 
             #[cfg(debug_assertions)]
             dbg_dropping_root_partition: None,
             #[cfg(debug_assertions)]
             dbg_living_nodes: std::collections::HashSet::with_capacity(128),
         }
+    }
+
+    /// Create a new garbage collection heap without any static GC types
+    pub fn new() -> Self {
+        Self::new_with_types(&[])
+    }
+
+    pub(crate) fn drop_passes<'a>(&self, out: &'a mut [u8; 4]) -> &'a [u8] {
+        let mut present = [false; 4];
+        for (idx, info) in self.gc_types.iter().enumerate() {
+            let p = info.drop_pass as usize;
+            if p < present.len() {
+                present[p] = true;
+            }
+        }
+        let mut count = 0;
+        for (i, &b) in present.iter().enumerate() {
+            if b {
+                out[count] = i as u8;
+                count += 1;
+            }
+        }
+        &out[..count]
     }
 
     #[inline(always)]
@@ -351,26 +378,29 @@ mod heap_tests {
 
     use super::*;
 
-    #[test]
-    fn test_is_node_reachable() {
-        // 定义一个简单的结构体，包含对其他 GC 对象的引用
-        #[derive(Debug)]
-        struct Node {
-            next: Option<GcRef<Node>>,
-            value: i32,
-        }
+    #[derive(Debug)]
+    struct Node {
+        next: Option<GcRef<Node>>,
+        value: i32,
+    }
 
-        unsafe impl GcTracable for Node {
-            fn trace(&self, tr: &mut GcTraceCtx) {
-                if let Some(next) = self.next {
-                    tr.add(next);
-                }
+    unsafe impl GcTracable for Node {
+        fn trace(&self, tr: &mut GcTraceCtx) {
+            if let Some(next) = self.next {
+                tr.add(next);
             }
         }
+    }
 
-        impl GcNode for Node {}
+    impl GcNode for Node {}
 
-        let mut heap = GcHeap::new();
+    crate::gc_type_table! {
+        0 => Node, drop_pass = 0;
+    }
+
+    #[test]
+    fn test_is_node_reachable() {
+        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
         let partition_id = heap.create_root_partition(4096);
 
         // 创建三个节点：A -> B -> C
