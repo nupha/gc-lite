@@ -184,38 +184,6 @@ impl GcHead {
     }
 }
 
-#[cfg(debug_assertions)]
-impl GcHead {
-    pub fn debug_set_dbg_string(&mut self, str: std::borrow::Cow<'static, str>) {
-        self.dbg_string = str;
-    }
-
-    pub fn debug_assert_node_valid_simple(&self) {
-        debug_assert!(
-            self.gc_dtype() != 0
-                && self.flags().contains(GcNodeFlag::MAGIC_NUM)
-                && self.next.is_none_or(|n| n.is_aligned()),
-            "bad node: {self:p}"
-        )
-    }
-
-    pub fn debug_assert_node_valid(&self, heap: &GcHeap) {
-        debug_assert!(
-            heap.dbg_living_nodes.contains(&NonNull::from_ref(self)),
-            "[O.o] bad node: {self:p}"
-        );
-        self.debug_assert_node_valid_simple();
-    }
-
-    pub fn debug_assert_node_tree_valid(&self, heap: &GcHeap) {
-        debug_assert_eq!(self.dbg_heap, NonNull::from_ref(heap));
-        let mut ctx = GcTraceCtx::new(heap, GcTraceRestrict::No, false);
-        ctx.trace(NonNull::from_ref(self), |n, _| unsafe {
-            n.as_ref().debug_assert_node_valid(heap);
-        });
-    }
-}
-
 pub trait GcNode: GcTracable {}
 
 /// Garbage collection reference
@@ -373,5 +341,37 @@ impl<T: GcNode> GcRef<T> {
     #[inline(always)]
     pub fn node_info_mut(&mut self) -> &mut GcHead {
         unsafe { self.head_ptr.as_mut() }
+    }
+}
+
+#[cfg(debug_assertions)]
+impl GcHead {
+    pub fn debug_set_dbg_string(&mut self, str: std::borrow::Cow<'static, str>) {
+        self.dbg_string = str;
+    }
+
+    pub fn debug_assert_node_valid_simple(&self) {
+        debug_assert!(
+            self.gc_dtype() != 0
+                && self.flags().contains(GcNodeFlag::MAGIC_NUM)
+                && self.next.is_none_or(|n| n.is_aligned()),
+            "bad node: {self:p}"
+        )
+    }
+
+    pub fn debug_assert_node_valid(&self, heap: &GcHeap) {
+        debug_assert!(
+            heap.dbg_living_nodes.contains(&NonNull::from_ref(self)),
+            "[O.o] bad node: {self:p}"
+        );
+        self.debug_assert_node_valid_simple();
+    }
+
+    pub fn debug_assert_node_tree_valid(&self, heap: &GcHeap) {
+        debug_assert_eq!(self.dbg_heap, NonNull::from_ref(heap));
+        let mut ctx = GcTraceCtx::new(heap, GcTraceRestrict::No, false);
+        ctx.trace(NonNull::from_ref(self), |n, _| unsafe {
+            n.as_ref().debug_assert_node_valid(heap);
+        });
     }
 }

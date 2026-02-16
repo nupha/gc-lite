@@ -7,7 +7,6 @@ use crate::{
     GcNode, GcTraceCtx, GcTraceRestrict,
     node::{GcHead, GcRef},
     partition::{GcPartition, GcPartitionId},
-    trace::GcTracable,
 };
 
 pub struct GcHeap {
