@@ -28,7 +28,7 @@ pub(crate) const fn unlikely(expr: bool) -> bool {
 }
 
 #[macro_export]
-macro_rules! gc_type_table {
+macro_rules! gc_type_register {
     ( $( $ty:ty $(, drop_pass = $pass:expr)?; )+ ) => {
         $crate::gc_type_table_internal! {
             crate_path = $crate;

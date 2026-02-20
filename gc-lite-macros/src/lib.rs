@@ -138,7 +138,7 @@ impl Parse for TypeTableInput {
     }
 }
 
-/// Function-like proc-macro used internally by gc-lite's `gc_type_table!` wrapper.
+/// Function-like proc-macro used internally by gc-lite's `gc_type_register!` wrapper.
 ///
 /// Do not call this directly unless you know what you are doing.
 #[proc_macro]

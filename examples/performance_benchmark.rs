@@ -9,7 +9,7 @@
 //! - Memory usage efficiency analysis
 //! - Automatic GC threshold performance
 
-use gc_lite::{GcHeap, GcNode, GcRef, GcTracable, GcTraceCtx, gc_type_table};
+use gc_lite::{GcHeap, GcNode, GcRef, GcTracable, GcTraceCtx, gc_type_register};
 use std::time::{Duration, Instant};
 
 fn main() {
@@ -301,7 +301,7 @@ unsafe impl GcTracable for SmallData {
 
 impl GcNode for SmallData {}
 
-gc_type_table! {
+gc_type_register! {
     SimpleNode;
     GraphNode;
     SmallData;

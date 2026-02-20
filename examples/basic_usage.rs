@@ -12,7 +12,7 @@
 
 use std::ops::Deref;
 
-use gc_lite::{GcHeap, GcNode, GcRef, GcResult, GcTracable, GcTraceCtx, gc_type_table};
+use gc_lite::{GcHeap, GcNode, GcRef, GcResult, GcTracable, GcTraceCtx, gc_type_register};
 
 #[derive(Debug)]
 struct MyString(String);
@@ -43,7 +43,7 @@ impl std::fmt::Display for MyI32 {
     }
 }
 
-gc_type_table! {
+gc_type_register! {
     MyString, drop_pass = 0;
     MyI32;
     TestNode;

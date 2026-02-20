@@ -9,7 +9,7 @@
 //! - Partition management errors
 //! - Invalid reference handling
 
-use gc_lite::{GcError, GcHeap, GcNode, GcRef, GcResult, GcTracable, GcTraceCtx, gc_type_table};
+use gc_lite::{GcError, GcHeap, GcNode, GcRef, GcResult, GcTracable, GcTraceCtx, gc_type_register};
 
 fn main() -> GcResult<()> {
     println!("=== Error handling example of partitioned garbage collection system ===");
@@ -235,7 +235,7 @@ unsafe impl GcTracable for Node {
 
 impl GcNode for Node {}
 
-gc_type_table! {
+gc_type_register! {
     LargeData;
     TestData;
 }

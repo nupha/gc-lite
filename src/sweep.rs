@@ -180,7 +180,7 @@ mod sweep_test {
 
     impl GcNode for MyI32 {}
 
-    crate::gc_type_table! {
+    crate::gc_type_register! {
         MyI32, drop_pass = 0;
     }
 

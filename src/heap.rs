@@ -394,7 +394,7 @@ mod heap_tests {
 
     impl GcNode for Node {}
 
-    crate::gc_type_table! {
+    crate::gc_type_register! {
         Node, drop_pass = 0;
     }
 
