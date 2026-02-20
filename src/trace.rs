@@ -141,8 +141,7 @@ impl<'a> GcTraceCtx<'a> {
 
                 if self.can_trace(pid) {
                     // collect direct children nodes of `node`
-                    let info =
-                        &self.heap.as_ref().gc_types[unsafe { node.as_ref().gc_type() } as usize];
+                    let info = &self.heap.as_ref().gc_types[node.as_ref().gc_type() as usize];
                     (info.trace_fn)(node, self);
                 }
             }
@@ -349,25 +348,21 @@ macro_rules! impl_dummy_trace_for_primitive {
                 #[inline(always)]
                 fn trace(&self, _: &mut GcTraceCtx) { }
             }
-            impl GcNode for $ty {}
 
             unsafe impl GcTracable for [$ty] {
                 #[inline(always)]
                 fn trace(&self, _: &mut GcTraceCtx) { }
             }
-            impl GcNode for [$ty] {}
 
             unsafe impl GcTracable for Vec<$ty> {
                 #[inline(always)]
                 fn trace(&self, _: &mut GcTraceCtx) { }
             }
-            impl GcNode for Vec<$ty> {}
 
             unsafe impl GcTracable for Box<[$ty]> {
                 #[inline(always)]
                 fn trace(&self, _: &mut GcTraceCtx) { }
             }
-            impl GcNode for Box<[$ty]> {}
         )*
     };
 }
@@ -381,32 +376,28 @@ unsafe impl GcTracable for str {
     #[inline(always)]
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
-impl GcNode for str {}
 
 unsafe impl GcTracable for &'static str {
     #[inline(always)]
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
-impl GcNode for &'static str {}
 
 unsafe impl GcTracable for String {
     #[inline(always)]
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
-impl GcNode for String {}
 
 unsafe impl GcTracable for &'static String {
     #[inline(always)]
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
-impl GcNode for &'static String {}
 
 #[cfg(test)]
 mod tests {
     use std::ops::DerefMut;
 
     use super::*;
-    use crate::{GcHeap, GcRef, GcTypedNode};
+    use crate::{GcHeap, GcNode, GcRef};
 
     /// Test node structure for tracing tests
     #[derive(Debug)]
@@ -441,8 +432,6 @@ mod tests {
             }
         }
     }
-
-    impl GcNode for TestNode {}
 
     crate::gc_type_register! {
         TestNode, drop_pass = 0;

@@ -110,8 +110,6 @@ mod xref_tests {
         }
     }
 
-    impl GcNode for TestNode {}
-
     crate::gc_type_register! {
         TestNode, drop_pass = 0;
     }

@@ -178,8 +178,6 @@ mod sweep_test {
         fn trace(&self, _: &mut GcTraceCtx) {}
     }
 
-    impl GcNode for MyI32 {}
-
     crate::gc_type_register! {
         MyI32, drop_pass = 0;
     }

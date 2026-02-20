@@ -78,7 +78,7 @@ impl GcHeap {
 
     pub(crate) fn drop_passes<'a>(&self, out: &'a mut [u8; 4]) -> &'a [u8] {
         let mut present = [false; 4];
-        for (idx, info) in self.gc_types.iter().enumerate() {
+        for info in self.gc_types.iter() {
             let p = info.drop_pass as usize;
             if p < present.len() {
                 present[p] = true;
@@ -391,8 +391,6 @@ mod heap_tests {
             }
         }
     }
-
-    impl GcNode for Node {}
 
     crate::gc_type_register! {
         Node, drop_pass = 0;

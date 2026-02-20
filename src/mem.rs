@@ -3,9 +3,7 @@
 
 use std::{alloc::Layout, marker::PhantomData, ptr::NonNull};
 
-use crate::{
-    GcError, GcHead, GcHeap, GcPartitionId, GcRef, node::GcTypedNode, unlikely, weak::GcWeakRawId,
-};
+use crate::{GcError, GcHead, GcHeap, GcNode, GcPartitionId, GcRef, unlikely, weak::GcWeakRawId};
 
 impl GcHeap {
     fn mem_alloc(&mut self, size: usize) -> Option<NonNull<u8>> {
@@ -61,8 +59,8 @@ impl GcHeap {
         }
     }
 
-    /// Allocate a GcRef with payload data in given scope, using a known static type id
-    pub fn alloc_typed<T: GcTypedNode>(
+    /// Allocate a typed gc node with payload data in given scope
+    pub fn alloc<T: GcNode>(
         &mut self,
         scope: GcPartitionId,
         payload: T,
@@ -128,16 +126,6 @@ impl GcHeap {
             }
             None => Err((GcError::PartitionNotFound, payload)),
         }
-    }
-
-    /// Backward compatible allocation API for typed GC nodes
-    #[deprecated(note = "use ::alloc_typed() instead")]
-    pub fn alloc<T: GcTypedNode>(
-        &mut self,
-        scope: GcPartitionId,
-        payload: T,
-    ) -> Result<GcRef<T>, (GcError, T)> {
-        self.alloc_typed(scope, payload)
     }
 
     /// Dispose a node

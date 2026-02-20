@@ -172,12 +172,33 @@ impl GcHeap {
 
 #[cfg(test)]
 mod tests {
+    use crate::{GcTracable, GcTraceCtx, gc_type_register};
+
     use super::*;
+
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct TestData1;
+
+    unsafe impl GcTracable for TestData1 {
+        fn trace(&self, _: &mut GcTraceCtx) {}
+    }
+
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct TestData2;
+
+    unsafe impl GcTracable for TestData2 {
+        fn trace(&self, _: &mut GcTraceCtx) {}
+    }
+
+    gc_type_register! {
+        TestData1;
+        TestData2;
+    }
 
     /// Test WeakRef's Clone and Copy traits
     #[test]
     fn test_weak_ref_clone_and_copy() {
-        let weak1 = GcWeak::<String>::new(10, 1);
+        let weak1 = GcWeak::<TestData1>::new(10, 1);
 
         // Test Clone
         let weak2 = weak1.clone();
@@ -192,9 +213,9 @@ mod tests {
     /// Test WeakRef's equality
     #[test]
     fn test_weak_ref_equality() {
-        let weak1 = GcWeak::<i32>::new(5, 1);
-        let weak2 = GcWeak::<i32>::new(5, 1);
-        let weak3 = GcWeak::<i32>::new(10, 1);
+        let weak1 = GcWeak::<TestData1>::new(5, 1);
+        let weak2 = GcWeak::<TestData1>::new(5, 1);
+        let weak3 = GcWeak::<TestData1>::new(10, 1);
 
         // WeakRef with same slot should be equal
         assert_eq!(weak1, weak2);
@@ -207,7 +228,7 @@ mod tests {
     #[test]
     fn test_weak_ref_upgrade_interface() {
         let heap = GcHeap::new();
-        let weak_ref = GcWeak::<i32>::new(0, 1);
+        let weak_ref = GcWeak::<TestData1>::new(0, 1);
 
         // Test upgrade interface
         let result = weak_ref.upgrade(&heap);
@@ -220,19 +241,19 @@ mod tests {
     #[test]
     fn test_weak_ref_type_safety() {
         // Create WeakRef of different types
-        let weak_i32 = GcWeak::<i32>::new(1, 1);
-        let weak_string = GcWeak::<String>::new(1, 1);
+        let weak_i32 = GcWeak::<TestData1>::new(1, 1);
+        let weak_string = GcWeak::<TestData2>::new(1, 1);
 
         // Different type WeakRef with same slot should be equal (because only slot is compared)
         debug_assert_eq!(weak_i32.index(), weak_string.index());
         // But they are different types
         debug_assert_eq!(
-            std::any::TypeId::of::<GcWeak<i32>>(),
-            std::any::TypeId::of::<GcWeak<i32>>()
+            std::any::TypeId::of::<GcWeak<TestData1>>(),
+            std::any::TypeId::of::<GcWeak<TestData1>>()
         );
         debug_assert_ne!(
-            std::any::TypeId::of::<GcWeak<i32>>(),
-            std::any::TypeId::of::<GcWeak<String>>()
+            std::any::TypeId::of::<GcWeak<TestData1>>(),
+            std::any::TypeId::of::<GcWeak<TestData2>>()
         );
     }
 
@@ -240,17 +261,17 @@ mod tests {
     #[test]
     fn test_weak_ref_edge_cases() {
         // Test maximum slot value
-        let weak_max = GcWeak::<i32>::new(u16::MAX, 1);
+        let weak_max = GcWeak::<TestData1>::new(u16::MAX, 1);
 
         debug_assert_eq!(weak_max.index(), u16::MAX);
 
         // Test minimum slot value
-        let weak_min = GcWeak::<i32>::new(0, 1);
+        let weak_min = GcWeak::<TestData1>::new(0, 1);
         debug_assert_eq!(weak_min.index(), 0);
 
         // Test WeakRef comparison with same slot but different types
-        let weak_i32 = GcWeak::<i32>::new(5, 1);
-        let weak_string = GcWeak::<String>::new(5, 1);
+        let weak_i32 = GcWeak::<TestData1>::new(5, 1);
+        let weak_string = GcWeak::<TestData2>::new(5, 1);
 
         // Although types are different, slots are the same, should be equal
         debug_assert_eq!(weak_i32.index(), weak_string.index());
@@ -262,17 +283,17 @@ mod tests {
         // Test WeakRef can be safely serialized and deserialized
         // This mainly tests structural layout stability
 
-        let _weak_ref = GcWeak::<Vec<u8>>::new(42, 1);
+        let _weak_ref = GcWeak::<TestData1>::new(42, 1);
 
         // Ensure struct size is fixed
         assert_eq!(
-            std::mem::size_of::<GcWeak<Vec<u8>>>(),
+            std::mem::size_of::<GcWeak<TestData1>>(),
             std::mem::size_of::<u32>()
         );
 
         // Ensure alignment is reasonable
         assert_eq!(
-            std::mem::align_of::<GcWeak<Vec<u8>>>(),
+            std::mem::align_of::<GcWeak<TestData1>>(),
             std::mem::align_of::<u32>()
         );
     }

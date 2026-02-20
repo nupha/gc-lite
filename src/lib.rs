@@ -17,7 +17,7 @@ pub use {
     gctype::{GcTypeInfo, drop_fn as gctype_drop, trace_fn as gctype_trace},
     heap::GcHeap,
     helpers::{GcError, GcResult},
-    node::{GcHead, GcNode, GcRef, GcTypedNode},
+    node::{GcHead, GcNode, GcRef},
     partition::{GcPartition, GcPartitionId},
     trace::{GcTracable, GcTraceCtx, GcTraceRestrict},
     weak::GcWeak,

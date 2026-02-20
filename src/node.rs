@@ -171,7 +171,7 @@ impl GcHead {
     }
 
     /// Get GcRef<T> from node. if node is not of type T, returns None
-    pub fn gc_ref<T: GcTypedNode>(&self) -> Option<GcRef<T>> {
+    pub fn gc_ref<T: GcNode>(&self) -> Option<GcRef<T>> {
         if T::GC_TYPE_ID == self.gc_type() {
             Some(GcRef::<T> {
                 head_ptr: NonNull::from_ref(self),
@@ -183,9 +183,7 @@ impl GcHead {
     }
 }
 
-pub trait GcNode: GcTracable {}
-
-pub trait GcTypedNode: GcNode {
+pub trait GcNode: GcTracable {
     const GC_TYPE_ID: u8;
 }
 
@@ -249,7 +247,7 @@ impl<T: GcNode> std::fmt::Debug for GcRef<T> {
     }
 }
 
-impl<T: GcTypedNode> GcRef<T> {
+impl<T: GcNode> GcRef<T> {
     /// Create GcRef<T> from &T reference
     ///
     /// This method verifies that the passed reference comes from a valid GC object.
