@@ -191,7 +191,7 @@ pub fn gc_type_table_internal(input: TokenStream) -> TokenStream {
         ];
 
         #(
-        impl #crate_path::GcTypedNode for #tys {
+        impl #crate_path::GcNode for #tys {
             const GC_TYPE_ID: u8 = #ids;
         }
 
@@ -201,7 +201,7 @@ pub fn gc_type_table_internal(input: TokenStream) -> TokenStream {
                 scope: #crate_path::GcPartitionId,
                 payload: #tys,
             ) -> Result<#crate_path::GcRef<#tys>, (#crate_path::GcError, #tys)> {
-                heap.alloc_typed(scope, payload)
+                heap.alloc(scope, payload)
             }
         }
         )*

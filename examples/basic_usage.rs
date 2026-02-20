@@ -28,9 +28,6 @@ unsafe impl GcTracable for MyI32 {
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
 
-impl GcNode for MyString {}
-impl GcNode for MyI32 {}
-
 impl std::fmt::Display for MyString {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
@@ -273,8 +270,6 @@ unsafe impl GcTracable for TestNode {
         }
     }
 }
-
-impl GcNode for TestNode {}
 
 impl std::fmt::Display for TestNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

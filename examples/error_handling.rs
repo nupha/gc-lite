@@ -203,8 +203,6 @@ unsafe impl GcTracable for LargeData {
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
 
-impl GcNode for LargeData {}
-
 /// Test data structure
 #[derive(Debug, PartialEq)]
 struct TestData {
@@ -216,10 +214,7 @@ unsafe impl GcTracable for TestData {
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
 
-impl GcNode for TestData {}
-
 /// Node structure for reference detection testing
-#[derive(Debug)]
 struct Node {
     value: i32,
     next: Option<GcRef<Node>>,
@@ -233,9 +228,8 @@ unsafe impl GcTracable for Node {
     }
 }
 
-impl GcNode for Node {}
-
 gc_type_register! {
     LargeData;
     TestData;
+    Node;
 }

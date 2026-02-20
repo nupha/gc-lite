@@ -12,8 +12,8 @@
 //! - Error handling
 
 use gc_lite::{
-    GcError, GcHeap, GcNode, GcPartitionId, GcRef, GcTracable, GcTraceCtx, GcTypeInfo, GcTypedNode,
-    gctype_drop, gctype_trace,
+    GcError, GcHeap, GcNode, GcPartitionId, GcRef, GcTracable, GcTraceCtx, GcTypeInfo, gctype_drop,
+    gctype_trace,
 };
 
 /// Test data structure for integration tests
@@ -26,8 +26,6 @@ struct TestData {
 unsafe impl GcTracable for TestData {
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
-
-impl GcNode for TestData {}
 
 /// Test node structure with GC references
 struct TestNode {
@@ -42,8 +40,6 @@ unsafe impl GcTracable for TestNode {
         }
     }
 }
-
-impl GcNode for TestNode {}
 
 impl core::fmt::Debug for TestNode {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -94,11 +90,11 @@ const GC_TYPE_INFO_LIST: &[GcTypeInfo] = &[
     },
 ];
 
-impl GcTypedNode for TestData {
+impl GcNode for TestData {
     const GC_TYPE_ID: u8 = 0;
 }
 
-impl GcTypedNode for TestNode {
+impl GcNode for TestNode {
     const GC_TYPE_ID: u8 = 1;
 }
 

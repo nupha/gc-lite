@@ -271,8 +271,6 @@ unsafe impl GcTracable for SimpleNode {
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
 
-impl GcNode for SimpleNode {}
-
 /// Graph node for complex object graph testing
 #[derive(Debug)]
 struct GraphNode {
@@ -287,8 +285,6 @@ unsafe impl GcTracable for GraphNode {
     }
 }
 
-impl GcNode for GraphNode {}
-
 /// Small data object for memory efficiency testing
 #[derive(Debug)]
 struct SmallData {
@@ -298,8 +294,6 @@ struct SmallData {
 unsafe impl GcTracable for SmallData {
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
-
-impl GcNode for SmallData {}
 
 gc_type_register! {
     SimpleNode;
