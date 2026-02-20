@@ -44,9 +44,9 @@ impl std::fmt::Display for MyI32 {
 }
 
 gc_type_table! {
-    0 => MyString, drop_pass = 0;
-    1 => MyI32, drop_pass = 0;
-    2 => TestNode, drop_pass = 0;
+    MyString, drop_pass = 0;
+    MyI32;
+    TestNode;
 }
 
 fn main() -> GcResult<()> {

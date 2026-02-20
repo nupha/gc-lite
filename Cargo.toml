@@ -12,3 +12,4 @@ keywords = ["gc", "memory"]
 bitflags = "2.0"
 smallvec = "1.15"
 log = "*"
+gc-lite-macros = { path = "gc-lite-macros" }

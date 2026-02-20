@@ -406,7 +406,7 @@ mod tests {
     use std::ops::DerefMut;
 
     use super::*;
-    use crate::{GcHeap, GcRef};
+    use crate::{GcHeap, GcRef, GcTypedNode};
 
     /// Test node structure for tracing tests
     #[derive(Debug)]
@@ -445,7 +445,7 @@ mod tests {
     impl GcNode for TestNode {}
 
     crate::gc_type_table! {
-        0 => TestNode, drop_pass = 0;
+        TestNode, drop_pass = 0;
     }
 
     /// Helper function to count marked nodes in a partition

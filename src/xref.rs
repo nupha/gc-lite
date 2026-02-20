@@ -113,7 +113,7 @@ mod xref_tests {
     impl GcNode for TestNode {}
 
     crate::gc_type_table! {
-        0 => TestNode, drop_pass = 0;
+        TestNode, drop_pass = 0;
     }
 
     fn alloc_node(heap: &mut GcHeap, pid: GcPartitionId) -> GcRef<TestNode> {

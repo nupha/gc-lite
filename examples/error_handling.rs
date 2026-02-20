@@ -236,6 +236,6 @@ unsafe impl GcTracable for Node {
 impl GcNode for Node {}
 
 gc_type_table! {
-    0 => LargeData, drop_pass = 0;
-    1 => TestData, drop_pass = 0;
+    LargeData;
+    TestData;
 }

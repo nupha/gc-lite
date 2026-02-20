@@ -35,11 +35,11 @@ impl std::fmt::Display for MyString {
 }
 
 gc_type_table! {
-    0 => MyString, drop_pass = 0;
-    1 => CyclicNode, drop_pass = 0;
-    2 => TreeNode, drop_pass = 0;
-    3 => DataContainer, drop_pass = 0;
-    4 => TestData, drop_pass = 0;
+    MyString;
+    CyclicNode;
+    TreeNode;
+    DataContainer;
+    TestData;
 }
 
 fn new_heap() -> GcHeap {

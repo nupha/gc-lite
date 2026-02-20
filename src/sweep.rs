@@ -181,7 +181,7 @@ mod sweep_test {
     impl GcNode for MyI32 {}
 
     crate::gc_type_table! {
-        0 => MyI32, drop_pass = 0;
+        MyI32, drop_pass = 0;
     }
 
     /// Helper function to count nodes in a partition

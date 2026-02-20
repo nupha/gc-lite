@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+extern crate self as gc_lite;
+
 mod gctype;
 mod heap;
 mod mem;
@@ -13,6 +15,7 @@ mod weak;
 mod xref;
 
 pub use {
+    gctype::{GcTypeInfo, drop_fn as gctype_drop, trace_fn as gctype_trace},
     heap::GcHeap,
     node::{GcHead, GcNode, GcRef, GcTypedNode},
     partition::{GcPartition, GcPartitionId},
@@ -20,43 +23,15 @@ pub use {
     weak::GcWeak,
 };
 
-pub use gctype::{GcTypeInfo, drop_fn as gctype_drop, trace_fn as gctype_trace};
+pub use gc_lite_macros::gc_type_table_internal;
 
 #[macro_export]
 macro_rules! gc_type_table {
-    ( $( $id:expr => $ty:ty, drop_pass = $pass:expr; )+ ) => {
-        pub const GC_TYPE_INFO_LUT: &[$crate::GcTypeInfo] = &[
-            $(
-                $crate::GcTypeInfo {
-                    size: core::mem::size_of::<$ty>() as u32,
-                    trace_fn: $crate::gctype_trace::<$ty>,
-                    drop_fn: {
-                        if core::mem::needs_drop::<$ty>() {
-                            Some($crate::gctype_drop::<$ty>)
-                        } else {
-                            None
-                        }
-                    },
-                    drop_pass: $pass,
-                },
-            )+
-        ];
-
-        $(
-        impl $crate::GcTypedNode for $ty {
-            const GC_TYPE_ID: u8 = $id;
+    ( $( $ty:ty $(, drop_pass = $pass:expr)?; )+ ) => {
+        $crate::gc_type_table_internal! {
+            crate_path = $crate;
+            $( $ty $(, drop_pass = $pass)?; )+
         }
-
-        impl $ty {
-            pub fn alloc_node(
-                heap: &mut $crate::GcHeap,
-                scope: $crate::GcPartitionId,
-                payload: $ty,
-            ) -> Result<$crate::GcRef<$ty>, ($crate::GcError, $ty)> {
-                heap.alloc_typed(scope, payload)
-            }
-        }
-        )+
     };
 }
 

@@ -302,7 +302,7 @@ unsafe impl GcTracable for SmallData {
 impl GcNode for SmallData {}
 
 gc_type_table! {
-    0 => SimpleNode, drop_pass = 0;
-    1 => GraphNode, drop_pass = 0;
-    2 => SmallData, drop_pass = 0;
+    SimpleNode;
+    GraphNode;
+    SmallData;
 }

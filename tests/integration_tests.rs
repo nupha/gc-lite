@@ -12,7 +12,8 @@
 //! - Error handling
 
 use gc_lite::{
-    GcError, GcHeap, GcNode, GcPartitionId, GcRef, GcTracable, GcTraceCtx, gc_type_table,
+    GcError, GcHeap, GcNode, GcPartitionId, GcRef, GcTracable, GcTraceCtx, GcTypeInfo, GcTypedNode,
+    gctype_drop, gctype_trace,
 };
 
 /// Test data structure for integration tests
@@ -66,9 +67,39 @@ impl TestNode {
     }
 }
 
-gc_type_table! {
-    0 => TestData, drop_pass = 0;
-    1 => TestNode, drop_pass = 0;
+const GC_TYPE_INFO_LUT: &[GcTypeInfo] = &[
+    GcTypeInfo {
+        size: core::mem::size_of::<TestData>() as u32,
+        trace_fn: gctype_trace::<TestData>,
+        drop_fn: {
+            if core::mem::needs_drop::<TestData>() {
+                Some(gctype_drop::<TestData>)
+            } else {
+                None
+            }
+        },
+        drop_pass: 0,
+    },
+    GcTypeInfo {
+        size: core::mem::size_of::<TestNode>() as u32,
+        trace_fn: gctype_trace::<TestNode>,
+        drop_fn: {
+            if core::mem::needs_drop::<TestNode>() {
+                Some(gctype_drop::<TestNode>)
+            } else {
+                None
+            }
+        },
+        drop_pass: 0,
+    },
+];
+
+impl GcTypedNode for TestData {
+    const GC_TYPE_ID: u8 = 0;
+}
+
+impl GcTypedNode for TestNode {
+    const GC_TYPE_ID: u8 = 1;
 }
 
 // ============ Partition Management Tests ============
