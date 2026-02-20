@@ -23,14 +23,6 @@ pub unsafe trait GcTracable: 'static {
     }
 }
 
-impl GcHead {
-    /// get trace func of node
-    pub(crate) fn trace_fn<'a>(&self, heap: &GcHeap) -> fn(NonNull<GcHead>, &mut GcTraceCtx<'a>) {
-        let id = self.gc_type() as usize;
-        heap.gc_types[id].trace_fn
-    }
-}
-
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GcTraceRestrict {
@@ -397,7 +389,7 @@ mod tests {
     use std::ops::DerefMut;
 
     use super::*;
-    use crate::{GcHeap, GcNode, GcRef};
+    use crate::{GcHeap, GcRef};
 
     /// Test node structure for tracing tests
     #[derive(Debug)]

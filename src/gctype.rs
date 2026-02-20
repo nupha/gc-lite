@@ -14,15 +14,13 @@ pub struct GcTypeInfo {
     pub drop_pass: u8,
 }
 
-#[inline(never)]
-pub fn trace_fn<T: GcTracable>(node: NonNull<GcHead>, tr: &mut GcTraceCtx) {
+pub fn trace_fn<T: GcTracable>(node: NonNull<GcHead>, gcx: &mut GcTraceCtx) {
     unsafe {
-        node.as_ref().payload().cast::<T>().as_ref().trace(tr);
+        node.as_ref().payload().cast::<T>().as_ref().trace(gcx);
     }
 }
 
 /// Generic dispose function, used to call drop_in_place of specific type
-#[inline(never)]
 pub unsafe fn drop_fn<T>(data_ptr: *mut u8) {
     unsafe { std::ptr::drop_in_place(data_ptr.cast::<T>()) };
 }
