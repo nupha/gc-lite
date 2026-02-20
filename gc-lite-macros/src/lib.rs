@@ -173,7 +173,7 @@ pub fn gc_type_table_internal(input: TokenStream) -> TokenStream {
     }
 
     let expanded = quote! {
-        pub const GC_TYPE_INFO_LUT: &[#crate_path::GcTypeInfo] = &[
+        pub const GC_TYPE_INFO_LIST: &[#crate_path::GcTypeInfo] = &[
             #(
                 #crate_path::GcTypeInfo {
                     size: ::core::mem::size_of::<#tys>() as u32,

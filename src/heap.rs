@@ -400,7 +400,7 @@ mod heap_tests {
 
     #[test]
     fn test_is_node_reachable() {
-        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
+        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
         let partition_id = heap.create_root_partition(4096);
 
         // 创建三个节点：A -> B -> C

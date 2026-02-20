@@ -41,7 +41,7 @@ fn benchmark_object_sizes() {
     for &size in &sizes {
         println!("\nTest object count: {}", size);
 
-        let mut context = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
+        let mut context = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
         let partition = context.create_root_partition(1024 * 1024 * 10); // 10MB
 
         // Measure allocation performance
@@ -90,7 +90,7 @@ fn benchmark_complex_graphs() {
     for &size in &sizes {
         println!("\nTest complex object graph size: {} nodes", size);
 
-        let mut context = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
+        let mut context = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
         let partition = context.create_root_partition(1024 * 1024 * 10);
 
         // Create complex object graph
@@ -148,7 +148,7 @@ fn benchmark_complex_graphs() {
 fn benchmark_memory_efficiency() {
     println!("\nTesting memory usage efficiency...");
 
-    let mut context = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
+    let mut context = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
     let partition = context.create_root_partition(1024 * 1024); // 1MB
 
     // Allocate many small objects
@@ -208,7 +208,7 @@ fn benchmark_memory_efficiency() {
 fn benchmark_auto_gc_threshold() {
     println!("\nTesting automatic GC threshold performance...");
 
-    let mut context = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
+    let mut context = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
     let partition = context.create_root_partition(2048); // 2KB limit
 
     // Set automatic GC threshold to 1.5KB

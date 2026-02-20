@@ -43,7 +43,7 @@ gc_type_table! {
 }
 
 fn new_heap() -> GcHeap {
-    GcHeap::new_with_types(GC_TYPE_INFO_LUT)
+    GcHeap::new_with_types(GC_TYPE_INFO_LIST)
 }
 
 fn main() -> GcResult<()> {

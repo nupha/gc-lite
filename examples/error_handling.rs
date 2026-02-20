@@ -34,7 +34,7 @@ fn main() -> GcResult<()> {
 fn demonstrate_out_of_memory() -> GcResult<()> {
     println!("1. Create limited memory partition...");
 
-    let mut context = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
+    let mut context = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
     let partition_id = context.create_root_partition(2048); // 2KB limit
 
     // Allocate first large object (1KB + header)
@@ -81,7 +81,7 @@ fn demonstrate_out_of_memory() -> GcResult<()> {
 fn demonstrate_partition_management_errors() -> GcResult<()> {
     println!("1. Test non-existent partition operations...");
 
-    let mut context = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
+    let mut context = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
     let invalid_partition = gc_lite::GcPartitionId(9999); // Non-existent partition
 
     // Test allocating objects in non-existent partition
@@ -152,7 +152,7 @@ fn demonstrate_partition_management_errors() -> GcResult<()> {
 fn demonstrate_gc_threshold_errors() -> GcResult<()> {
     println!("1. Test GC threshold API...");
 
-    let mut context = GcHeap::new_with_types(GC_TYPE_INFO_LUT);
+    let mut context = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
     let partition_id = context.create_root_partition(1024);
 
     // Test default values
