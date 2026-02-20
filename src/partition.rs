@@ -609,7 +609,7 @@ mod tests {
 
     #[test]
     fn test_partition_creation() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new(&[]);
         let id = heap.create_root_partition(1024);
 
         let partition = heap.partition(id).unwrap();
@@ -633,7 +633,7 @@ mod tests {
 
     #[test]
     fn test_hierarchical_partition_creation() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new(&[]);
 
         // Create root partition
         let root_id = heap.create_root_partition(1024);
@@ -662,7 +662,7 @@ mod tests {
 
     #[test]
     fn test_gc_threshold() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new(&[]);
         let id = heap.create_root_partition(1024);
 
         let partition = heap.partition_mut(id).unwrap();
@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn test_memory_limit() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new(&[]);
         let id = heap.create_root_partition(1024);
 
         let partition = heap.partition_mut(id).unwrap();
@@ -706,7 +706,7 @@ mod tests {
 
     #[test]
     fn test_is_ancestor_of() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new(&[]);
         let p1 = heap.create_root_partition(0);
         let p2 = heap.create_sub_partition(p1);
         let p3 = heap.create_sub_partition(p2);
@@ -736,7 +736,7 @@ mod tests {
 
     #[test]
     fn test_common_parent() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new(&[]);
         let p1 = heap.create_root_partition(0);
         let p2 = heap.create_sub_partition(p1);
         let p3 = heap.create_sub_partition(p1);
@@ -766,7 +766,7 @@ mod tests {
 
     #[test]
     fn test_update_mem_use() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new(&[]);
         let p1 = heap.create_root_partition(0);
         let p2 = heap.create_sub_partition(p1);
         let p3 = heap.create_sub_partition(p2);
@@ -796,7 +796,7 @@ mod tests {
 
     #[test]
     fn test_common_parent_none_cases() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new(&[]);
 
         let root_id = heap.create_root_partition(2048);
         let child_id = heap.create_sub_partition(root_id);
@@ -820,7 +820,7 @@ mod tests {
 
     #[test]
     fn test_common_parent_different_trees() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new(&[]);
 
         // Create two separate root partitions (different trees)
         let root1_id = heap.create_root_partition(2048);
@@ -840,7 +840,7 @@ mod tests {
 
     #[test]
     fn test_common_parent3() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new(&[]);
 
         // Create hierarchy:
         // root_id
@@ -922,7 +922,7 @@ mod tests {
 
     #[test]
     fn test_common_parent3_complex_hierarchy() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new(&[]);
 
         // Create a more complex hierarchy:
         // root
@@ -969,7 +969,7 @@ mod tests {
 
     #[test]
     fn test_partition_depth_bits_on_creation() {
-        let mut heap = GcHeap::new();
+        let mut heap = GcHeap::new(&[]);
         let root = heap.create_root_partition(0);
         let child = heap.create_sub_partition(root);
         let grandchild = heap.create_sub_partition(child);

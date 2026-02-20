@@ -50,7 +50,7 @@ fn main() -> GcResult<()> {
     println!("=== Basic usage example of partitioned garbage collection system ===");
 
     // Create garbage collection context
-    let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
 
     println!("Initial state:");
     println!("  Number of partitions: {}", heap.partition_ids().len());

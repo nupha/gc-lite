@@ -214,7 +214,7 @@ mod sweep_test {
     /// Test basic sweep_with functionality
     #[test]
     fn test_sweep_with_basic() {
-        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
         let partition_id = heap.create_root_partition(4096);
 
         let objects: Vec<GcRef<MyI32>> = (0..5)
@@ -260,7 +260,7 @@ mod sweep_test {
     /// Test removing chain head nodes (n个节点被剔除后)
     #[test]
     fn test_sweep_with_chain_head_removal() {
-        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
         let partition_id = heap.create_root_partition(4096);
 
         let objects: Vec<GcRef<MyI32>> = (0..5)
@@ -315,7 +315,7 @@ mod sweep_test {
     /// Test removing all chain head nodes (连续剔除所有链头节点)
     #[test]
     fn test_sweep_with_all_chain_head_removal() {
-        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
         let partition_id = heap.create_root_partition(4096);
 
         let objects: Vec<GcRef<MyI32>> = (0..3)
@@ -347,7 +347,7 @@ mod sweep_test {
     /// Test removing middle nodes
     #[test]
     fn test_sweep_with_middle_node_removal() {
-        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
         let partition_id = heap.create_root_partition(4096);
 
         let objects: Vec<GcRef<MyI32>> = (0..5)
@@ -391,7 +391,7 @@ mod sweep_test {
     /// Test removing root nodes
     #[test]
     fn test_sweep_with_root_node_removal() {
-        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
         let partition_id = heap.create_root_partition(4096);
 
         let objects: Vec<GcRef<MyI32>> = (0..3)
@@ -440,7 +440,7 @@ mod sweep_test {
     /// Test empty partition
     #[test]
     fn test_sweep_with_empty_partition() {
-        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
         let partition_id = heap.create_root_partition(4096);
 
         // No objects allocated, sweep should return 0
@@ -451,7 +451,7 @@ mod sweep_test {
     /// Test non-existent partition
     #[test]
     fn test_sweep_with_nonexistent_partition() {
-        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
         let non_existent_partition = GcPartitionId(9999);
 
         // Non-existent partition should return 0

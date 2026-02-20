@@ -57,7 +57,7 @@ impl GcHeap {
     pub const DUMMY_DISPOSE_CALLBACK: fn(&GcHeap, &GcHead) = |_, _| {};
 
     /// Create a new garbage collection heap with an explicit GC type table
-    pub fn new_with_types(gc_types: &'static [crate::gctype::GcTypeInfo]) -> Self {
+    pub fn new(gc_types: &'static [GcTypeInfo]) -> Self {
         Self {
             partitions: HashMap::new(),
             weak_slots: Vec::new(),
@@ -69,11 +69,6 @@ impl GcHeap {
             #[cfg(debug_assertions)]
             dbg_living_nodes: std::collections::HashSet::with_capacity(128),
         }
-    }
-
-    /// Create a new garbage collection heap without any static GC types
-    pub fn new() -> Self {
-        Self::new_with_types(&[])
     }
 
     pub(crate) fn drop_passes<'a>(&self, out: &'a mut [u8; 4]) -> &'a [u8] {
@@ -398,7 +393,7 @@ mod heap_tests {
 
     #[test]
     fn test_is_node_reachable() {
-        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
         let partition_id = heap.create_root_partition(4096);
 
         // 创建三个节点：A -> B -> C

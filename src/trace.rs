@@ -469,7 +469,7 @@ mod tests {
     /// Test 1: Simple tree structure with Propagate (depth-first)
     #[test]
     fn test_trace_propagate_simple_tree() {
-        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
         let partition_id = heap.create_root_partition(4096);
 
         // Create a simple tree: root -> child1, child2
@@ -509,7 +509,7 @@ mod tests {
     /// Test 2: Simple tree structure with Continue (breadth-first)
     #[test]
     fn test_trace_continue_simple_tree() {
-        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
         let partition_id = heap.create_root_partition(4096);
 
         // Create a simple tree: root -> child1, child2
@@ -535,7 +535,7 @@ mod tests {
     /// Test 3: Deep nested tree with both algorithms
     #[test]
     fn test_trace_deep_nested_tree() {
-        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
         let partition_id = heap.create_root_partition(8192);
 
         // Create a deep tree: level0 -> level1 -> level2 -> level3
@@ -567,7 +567,7 @@ mod tests {
     /// Test 4: Complex tree with multiple branches
     #[test]
     fn test_trace_complex_tree() {
-        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
         let partition_id = heap.create_root_partition(16384);
 
         // Create a complex tree:
@@ -611,7 +611,7 @@ mod tests {
     /// Test 5: Verify both algorithms produce same result
     #[test]
     fn test_trace_algorithms_equivalence() {
-        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
         let partition_id = heap.create_root_partition(8192);
 
         // Create a tree with 10 nodes in a balanced structure
@@ -668,7 +668,7 @@ mod tests {
     /// Test 6: Circular reference handling
     #[test]
     fn test_trace_circular_reference() {
-        let mut heap = GcHeap::new_with_types(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
         let partition_id = heap.create_root_partition(4096);
 
         // Create two nodes that reference each other
