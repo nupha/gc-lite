@@ -1,14 +1,3 @@
-
-#[macro_export]
-macro_rules! gc_type_table {
-    ( $( $ty:ty $(, drop_pass = $pass:expr)?; )+ ) => {
-        ::gc_lite_macros::gc_type_table_internal! {
-            crate_path = $crate;
-            $( $ty $(, drop_pass = $pass)?; )+
-        }
-    };
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GcError {
     /// Memory allocation failed
@@ -36,4 +25,14 @@ pub(crate) const fn unlikely(expr: bool) -> bool {
     } else {
         false
     }
+}
+
+#[macro_export]
+macro_rules! gc_type_table {
+    ( $( $ty:ty $(, drop_pass = $pass:expr)?; )+ ) => {
+        $crate::gc_type_table_internal! {
+            crate_path = $crate;
+            $( $ty $(, drop_pass = $pass)?; )+
+        }
+    };
 }
