@@ -48,7 +48,7 @@ pub struct GcPartition {
     pub(crate) parent: GcPartitionId,
     /// Child partition IDs
     pub(crate) children: SmallVec<[GcPartitionId; 4]>,
-    /// nodes in this partition
+    /// link of nodes in this partition
     pub(crate) nodes: Option<NonNull<GcHead>>,
     /// root nodes in this partition
     pub(crate) root_nodes: SmallVec<[NonNull<GcHead>; 8]>,
@@ -238,16 +238,16 @@ impl GcHeap {
         });
 
         // If parent is specified, add this partition to parent's children
-        if parent != GcPartitionId::NONE {
-            if let Some(parent_partition) = self.partitions.get_mut(&parent) {
-                parent_partition.children.push(id);
-            }
+        if !parent.is_null()
+            && let Some(parent_partition) = self.partitions.get_mut(&parent)
+        {
+            parent_partition.children.push(id);
         }
 
         let partition = GcPartition::new(memory_limit.unwrap_or(0), parent);
         self.partitions.insert(id, partition);
 
-        log::trace!("[open_scope] {id:?} : {parent:?}");
+        log::trace!("[new_scope] {id:?} : {parent:?}");
 
         id
     }
@@ -317,18 +317,18 @@ impl GcHeap {
                 let roots = std::mem::take(&mut partition.root_nodes);
                 for &xn in roots
                     .iter()
-                    .filter(|n| unsafe { !n.as_ref().xref_partition().is_null() })
+                    .filter(|n| unsafe { !n.as_ref().xref().is_null() })
                 {
                     let xref = unsafe {
                         debug_assert_eq!(xn.as_ref().scope_id(), pid); // O.o
-                        xn.as_ref().xref_partition()
+                        xn.as_ref().xref()
                     };
 
                     self.traverse_subtree(xn, GcPartitionId::NONE, {
                         let hp = NonNull::from_ref(self);
 
                         move |mut n, _| unsafe {
-                            let xref0 = n.as_ref().xref_partition();
+                            let xref0 = n.as_ref().xref();
 
                             let xref = if xref0.is_null() {
                                 hp.as_ref().common_parent2(xref, n.as_ref().scope_id())
@@ -357,7 +357,7 @@ impl GcHeap {
                     while let Some(mut this) = current {
                         current = unsafe { this.as_ref().next };
 
-                        let xref = unsafe { this.as_ref().xref_partition() };
+                        let xref = unsafe { this.as_ref().xref() };
                         if !xref.is_null() {
                             log::trace!("[migrate] {:?} -> {xref:?}", unsafe { this.as_ref() });
                             debug_assert_ne!(xref, pid);
@@ -388,7 +388,7 @@ impl GcHeap {
 
                             self.update_mem_use(
                                 xref,
-                                (self.gc_types[unsafe { this.as_ref().gc_dtype() } as usize].size
+                                (self.gc_types[unsafe { this.as_ref().gc_type() } as usize].size
                                     as usize
                                     + std::mem::size_of::<GcHead>())
                                     as i32,
@@ -417,14 +417,14 @@ impl GcHeap {
         }
     }
 
-    /// drop root partition and all its descendants without check and fixes - the fast path.
-
     /// Get partition information
+    #[inline(always)]
     pub fn partition(&self, partition_id: GcPartitionId) -> Option<&GcPartition> {
         self.partitions.get(&partition_id)
     }
 
     /// Get partition information
+    #[inline(always)]
     pub fn partition_mut(&mut self, partition_id: GcPartitionId) -> Option<&mut GcPartition> {
         self.partitions.get_mut(&partition_id)
     }

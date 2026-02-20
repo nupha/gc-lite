@@ -7,7 +7,7 @@ use crate::{GcHead, GcHeap, GcPartitionId};
 
 impl GcHead {
     /// Get cross reference scope
-    pub fn xref_partition(&self) -> GcPartitionId {
+    pub fn xref(&self) -> GcPartitionId {
         let p = (self.partition >> 16) as u16;
         GcPartitionId(p)
     }
@@ -49,7 +49,7 @@ impl GcHeap {
 
         let (node_pid, xref0) = unsafe {
             let n = node.as_ref();
-            (n.scope_id(), n.xref_partition())
+            (n.scope_id(), n.xref())
         };
         debug_assert!(self.partition(node_pid).is_some(), "{:?}", unsafe {
             node.as_ref()
@@ -140,16 +140,13 @@ mod xref_tests {
         unsafe { (*slave.head_ptr.as_ptr()).unset_xref() };
 
         unsafe {
-            assert_eq!(
-                slave.head_ptr.as_ref().xref_partition(),
-                GcPartitionId::NONE
-            );
+            assert_eq!(slave.head_ptr.as_ref().xref(), GcPartitionId::NONE);
         }
 
         heap.bind(master.head_ptr, slave.head_ptr);
 
         unsafe {
-            assert_eq!(slave.head_ptr.as_ref().xref_partition(), root_id);
+            assert_eq!(slave.head_ptr.as_ref().xref(), root_id);
             assert!(slave.head_ptr.as_ref().is_root());
         }
         heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
@@ -166,19 +163,13 @@ mod xref_tests {
         let slave = alloc_node(&mut heap, a_id);
 
         unsafe {
-            assert_eq!(
-                slave.head_ptr.as_ref().xref_partition(),
-                GcPartitionId::NONE
-            );
+            assert_eq!(slave.head_ptr.as_ref().xref(), GcPartitionId::NONE);
         }
 
         heap.bind(master.head_ptr, slave.head_ptr);
 
         unsafe {
-            assert_eq!(
-                slave.head_ptr.as_ref().xref_partition(),
-                GcPartitionId::NONE
-            );
+            assert_eq!(slave.head_ptr.as_ref().xref(), GcPartitionId::NONE);
             assert!(!slave.head_ptr.as_ref().is_root());
         }
         heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
@@ -199,13 +190,13 @@ mod xref_tests {
         unsafe { (*slave.head_ptr.as_ptr()).set_xref(a_child) };
 
         unsafe {
-            assert_eq!(slave.head_ptr.as_ref().xref_partition(), a_child);
+            assert_eq!(slave.head_ptr.as_ref().xref(), a_child);
         }
 
         heap.bind(master.head_ptr, slave.head_ptr);
 
         unsafe {
-            assert_eq!(slave.head_ptr.as_ref().xref_partition(), a_id);
+            assert_eq!(slave.head_ptr.as_ref().xref(), a_id);
             assert!(slave.head_ptr.as_ref().is_root());
         }
         heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
@@ -225,13 +216,13 @@ mod xref_tests {
         unsafe { (*slave.head_ptr.as_ptr()).set_xref(root_id) };
 
         unsafe {
-            assert_eq!(slave.head_ptr.as_ref().xref_partition(), root_id);
+            assert_eq!(slave.head_ptr.as_ref().xref(), root_id);
         }
 
         heap.bind(master.head_ptr, slave.head_ptr);
 
         unsafe {
-            assert_eq!(slave.head_ptr.as_ref().xref_partition(), root_id);
+            assert_eq!(slave.head_ptr.as_ref().xref(), root_id);
             assert!(!slave.head_ptr.as_ref().is_root());
         }
         heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
@@ -248,14 +239,14 @@ mod xref_tests {
 
         unsafe {
             (*node.head_ptr.as_ptr()).set_xref(root_id);
-            assert_eq!(node.head_ptr.as_ref().xref_partition(), root_id);
+            assert_eq!(node.head_ptr.as_ref().xref(), root_id);
         }
 
         let updated = heap.set_xref(a_id, node.head_ptr);
         assert!(!updated);
 
         unsafe {
-            assert_eq!(node.head_ptr.as_ref().xref_partition(), root_id);
+            assert_eq!(node.head_ptr.as_ref().xref(), root_id);
             assert!(!node.head_ptr.as_ref().is_root());
         }
         heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
@@ -274,14 +265,14 @@ mod xref_tests {
         unsafe { (*node.head_ptr.as_ptr()).set_xref(root_id) };
 
         unsafe {
-            assert_eq!(node.head_ptr.as_ref().xref_partition(), root_id);
+            assert_eq!(node.head_ptr.as_ref().xref(), root_id);
         }
 
         let updated = heap.set_xref(from_pid, node.head_ptr);
         assert!(!updated);
 
         unsafe {
-            assert_eq!(node.head_ptr.as_ref().xref_partition(), root_id);
+            assert_eq!(node.head_ptr.as_ref().xref(), root_id);
             assert!(!node.head_ptr.as_ref().is_root());
         }
         heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
@@ -306,13 +297,13 @@ mod xref_tests {
 
         unsafe {
             (*node.head_ptr.as_ptr()).set_xref(a_id);
-            assert_eq!(node.head_ptr.as_ref().xref_partition(), a_id);
+            assert_eq!(node.head_ptr.as_ref().xref(), a_id);
         }
 
         heap.bind(master_b1.head_ptr, node.head_ptr);
 
         unsafe {
-            assert_eq!(node.head_ptr.as_ref().xref_partition(), root_id);
+            assert_eq!(node.head_ptr.as_ref().xref(), root_id);
             assert!(node.head_ptr.as_ref().is_root());
         }
         heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);

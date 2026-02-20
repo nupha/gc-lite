@@ -26,7 +26,7 @@ pub unsafe trait GcTracable: 'static {
 impl GcHead {
     /// get trace func of node
     pub(crate) fn trace_fn<'a>(&self, heap: &GcHeap) -> fn(NonNull<GcHead>, &mut GcTraceCtx<'a>) {
-        let id = self.gc_dtype() as usize;
+        let id = self.gc_type() as usize;
         heap.gc_types[id].trace_fn
     }
 }
@@ -142,7 +142,7 @@ impl<'a> GcTraceCtx<'a> {
                 if self.can_trace(pid) {
                     // collect direct children nodes of `node`
                     let info =
-                        &self.heap.as_ref().gc_types[unsafe { node.as_ref().gc_dtype() } as usize];
+                        &self.heap.as_ref().gc_types[unsafe { node.as_ref().gc_type() } as usize];
                     (info.trace_fn)(node, self);
                 }
             }
@@ -261,7 +261,7 @@ impl GcHeap {
             this.as_mut().set_flags(f.union(GcNodeFlag::TRACED));
 
             let heap = ctx.heap();
-            let dtype = this.as_ref().gc_dtype() as usize;
+            let dtype = this.as_ref().gc_type() as usize;
             let info = &heap.gc_types[dtype];
             (info.trace_fn)(this, ctx);
 

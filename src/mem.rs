@@ -76,7 +76,7 @@ impl GcHeap {
                 {
                     return Err((GcError::PartitionFull, payload));
                 } else {
-                    let gc_dtype = T::GC_TYPE_ID;
+                    let gc_type = T::GC_TYPE_ID;
                     let ptr = match self.mem_alloc(gross_size) {
                         Some(p) => p,
                         None => {
@@ -92,12 +92,12 @@ impl GcHeap {
                             #[cfg(debug_assertions)]
                             {
                                 0xFF00_0000
-                                    | ((gc_dtype as u32) << 8)
+                                    | ((gc_type as u32) << 8)
                                     | (crate::node::GcNodeFlag::MAGIC_NUM.bits() as u32)
                             }
                             #[cfg(not(debug_assertions))]
                             {
-                                0xFF00_0000 | ((gc_dtype as u32) << 8)
+                                0xFF00_0000 | ((gc_type as u32) << 8)
                             }
                         },
                         partition: 0,
@@ -106,8 +106,6 @@ impl GcHeap {
 
                         #[cfg(debug_assertions)]
                         dbg_string: std::any::type_name::<T>().into(),
-                        #[cfg(debug_assertions)]
-                        dbg_heap: NonNull::from_ref(self),
                     };
 
                     unsafe {
@@ -133,7 +131,7 @@ impl GcHeap {
     }
 
     /// Backward compatible allocation API for typed GC nodes
-    #[inline]
+    #[deprecated(note = "use ::alloc_typed() instead")]
     pub fn alloc<T: GcTypedNode>(
         &mut self,
         scope: GcPartitionId,
@@ -151,7 +149,7 @@ impl GcHeap {
         {
             hd.debug_assert_node_valid(self);
             if self.dbg_dropping_root_partition.is_none() {
-                debug_assert!(hd.xref_partition().is_null(), "{hd:?}");
+                debug_assert!(hd.xref().is_null(), "{hd:?}");
             }
         }
 
@@ -164,7 +162,7 @@ impl GcHeap {
             }
         }
 
-        let dtype = hd.gc_dtype() as usize;
+        let dtype = hd.gc_type() as usize;
         let info = &self.gc_types[dtype];
         let gross_size = std::mem::size_of::<GcHead>() + info.size as usize;
 
