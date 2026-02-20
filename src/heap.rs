@@ -16,11 +16,10 @@ pub struct GcHeap {
     pub(super) partitions: HashMap<GcPartitionId, GcPartition>,
     /// Weak reference list, each slot stores (version, GcHeader)
     pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
+    /// Static GC type information table
+    pub(crate) gc_types: &'static GcTypeRegistry,
     /// User provided opaque raw pointer
     opaque: *mut u8,
-
-    /// Static GC type information table
-    pub(crate) registry: &'static GcTypeRegistry,
 
     #[cfg(debug_assertions)]
     pub(crate) dbg_dropping_root_partition: Option<GcPartitionId>,
@@ -63,7 +62,7 @@ impl GcHeap {
             partitions: HashMap::new(),
             weak_slots: Vec::new(),
             opaque: std::ptr::null_mut(),
-            registry,
+            gc_types: registry,
 
             #[cfg(debug_assertions)]
             dbg_dropping_root_partition: None,
@@ -205,18 +204,25 @@ impl GcHeap {
     #[inline]
     pub(crate) fn attach(&mut self, partition_id: GcPartitionId, mut node: NonNull<GcHead>) {
         debug_assert!(!partition_id.is_null());
-        let partition = self.partitions.get_mut(&partition_id).unwrap();
 
         unsafe {
             debug_assert!(node.as_ref().scope_id().is_null());
             debug_assert!(node.as_ref().next.is_none());
 
+            let xref = node.as_ref().xref();
+
             node.as_mut().set_scope_id(partition_id);
+            if xref == partition_id {
+                node.as_mut().unset_xref();
+            } else if !xref.is_null() {
+                debug_assert!(self.common_parent2(xref, partition_id) != partition_id);
+                self.set_root_node(node, true);
+            }
 
-            let cur_head = partition.nodes.take();
-
+            let par = self.partitions.get_mut(&partition_id).unwrap();
+            let cur_head = par.nodes.take();
             node.as_mut().next = cur_head;
-            partition.nodes = Some(node);
+            par.nodes = Some(node);
         }
     }
 

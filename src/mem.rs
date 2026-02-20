@@ -151,9 +151,10 @@ impl GcHeap {
         }
 
         let dtype = hd.gc_type() as usize;
-        let info = &self.registry.type_info_list[dtype];
+        let info = &self.gc_types.type_info_list[dtype];
         let gross_size = std::mem::size_of::<GcHead>() + info.size as usize;
 
+        #[cfg(debug_assertions)]
         unsafe {
             std::ptr::drop_in_place(node.cast::<GcHead>().as_ptr());
         }

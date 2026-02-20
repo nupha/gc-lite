@@ -28,7 +28,7 @@ impl GcHeap {
             let mut link1 = Some(link0);
             let mut freed_bytes = 0;
 
-            let pass_slice = self.registry.drop_passes;
+            let pass_slice = self.gc_types.drop_passes;
             for &pass in pass_slice {
                 let mut current = link1;
                 let mut prev: Option<NonNull<GcHead>> = None;
@@ -41,7 +41,7 @@ impl GcHeap {
                         current = this.as_mut().next;
 
                         let dtype = this.as_ref().gc_type() as usize;
-                        let info = &self.registry.type_info_list[dtype];
+                        let info = &self.gc_types.type_info_list[dtype];
                         if predicate(this.as_mut()) && info.drop_pass == pass {
                             if let Some(mut p) = prev {
                                 p.as_mut().next = current;
@@ -113,7 +113,7 @@ impl GcHeap {
         let mut link = Some(head);
         let mut freed_bytes = 0;
 
-        let pass_slice = self.registry.drop_passes;
+        let pass_slice = self.gc_types.drop_passes;
         for &pass in pass_slice {
             log::trace!(
                 "[dipose_all] pass {pass}, count={}",
@@ -131,7 +131,7 @@ impl GcHeap {
                     current = this.as_ref().next;
 
                     let dtype = this.as_ref().gc_type() as usize;
-                    let info = &self.registry.type_info_list[dtype];
+                    let info = &self.gc_types.type_info_list[dtype];
                     if info.drop_pass == pass {
                         if let Some(mut p) = prev {
                             p.as_mut().next = current;

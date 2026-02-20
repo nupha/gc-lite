@@ -3,7 +3,7 @@
 
 use std::ptr::NonNull;
 
-use crate::{GcHead, GcTracable, trace::GcTraceCtx};
+use crate::{GcHead, GcNode, GcTracable, trace::GcTraceCtx};
 
 #[derive(Debug, Copy, Clone)]
 #[allow(dead_code)]
@@ -21,7 +21,7 @@ pub fn trace_fn<T: GcTracable>(node: NonNull<GcHead>, gcx: &mut GcTraceCtx) {
 }
 
 /// Generic dispose function, used to call drop_in_place of specific type
-pub unsafe fn drop_fn<T>(data_ptr: *mut u8) {
+pub unsafe fn drop_fn<T: GcNode>(data_ptr: *mut u8) {
     unsafe { std::ptr::drop_in_place(data_ptr.cast::<T>()) };
 }
 

@@ -275,7 +275,7 @@ impl GcHeap {
     }
 
     /// Note: `since` is not included in result vec
-    fn load_descendants(&self, since: GcPartitionId, lst: &mut Vec<GcPartitionId>) {
+    fn load_descendants(&self, since: GcPartitionId, lst: &mut SmallVec<[GcPartitionId; 8]>) {
         for &ch in self.partition(since).unwrap().children() {
             lst.push(ch);
             self.load_descendants(ch, lst);
@@ -301,7 +301,7 @@ impl GcHeap {
         //     return self.remove_root_partition_fast(partition_id, on_dispose);
         // }
 
-        let mut scopes = Vec::<GcPartitionId>::with_capacity(64);
+        let mut scopes = SmallVec::<[GcPartitionId; 8]>::new();
         scopes.push(partition_id);
         self.load_descendants(partition_id, &mut scopes);
 
@@ -347,8 +347,8 @@ impl GcHeap {
                 }
             }
 
-            if let Some(mut partition) = self.partitions.remove(&pid) {
-                if let Some(link0_head) = partition.nodes.take() {
+            if let Some(mut par) = self.partitions.remove(&pid) {
+                if let Some(link0_head) = par.nodes.take() {
                     // migrate xref nodes
                     let mut link1 = Some(link0_head);
                     let mut current = Some(link0_head);
@@ -381,14 +381,14 @@ impl GcHeap {
                                     GcNodeFlag::ROOT | GcNodeFlag::MARKED | GcNodeFlag::TRACED,
                                 );
                                 this.as_mut().set_flags(f);
-                                this.as_mut().partition = 0; // clear partition & xref
+                                this.as_mut().unset_scope_id();
                                 this.as_mut().next.take();
                             }
                             self.attach(xref, this);
 
                             self.update_mem_use(
                                 xref,
-                                (self.registry.type_info_list
+                                (self.gc_types.type_info_list
                                     [unsafe { this.as_ref().gc_type() } as usize]
                                     .size as usize
                                     + std::mem::size_of::<GcHead>())

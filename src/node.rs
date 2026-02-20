@@ -143,6 +143,11 @@ impl GcHead {
         self.partition = (self.partition & 0xFFFF_0000) | id.0 as u32;
     }
 
+    #[inline(always)]
+    pub(crate) fn unset_scope_id(&mut self) {
+        self.partition = self.partition & 0xFFFF_0000;
+    }
+
     /// get node weakref info
     pub fn weak(&self) -> Option<GcWeakRawId> {
         if self.weak_id.is_null() {
@@ -165,7 +170,7 @@ impl GcHead {
     pub fn gc_children(&self, heap: &mut GcHeap) -> Vec<NonNull<GcHead>> {
         let mut ctx = GcTraceCtx::new(heap, GcTraceRestrict::No, false);
         let dtype = self.gc_type() as usize;
-        let info = &ctx.heap().registry.type_info_list[dtype];
+        let info = &ctx.heap().gc_types.type_info_list[dtype];
         (info.trace_fn)(NonNull::from_ref(self), &mut ctx);
         ctx.take_traced_nodes()
     }

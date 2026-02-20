@@ -133,7 +133,7 @@ impl<'a> GcTraceCtx<'a> {
 
                 if self.can_trace(pid) {
                     // collect direct children nodes of `node`
-                    let info = &self.heap.as_ref().registry.type_info_list
+                    let info = &self.heap.as_ref().gc_types.type_info_list
                         [node.as_ref().gc_type() as usize];
                     (info.trace_fn)(node, self);
                 }
@@ -254,7 +254,7 @@ impl GcHeap {
 
             let heap = ctx.heap();
             let dtype = this.as_ref().gc_type() as usize;
-            let info = &heap.registry.type_info_list[dtype];
+            let info = &heap.gc_types.type_info_list[dtype];
             (info.trace_fn)(this, ctx);
 
             let mut children = ctx.take_traced_nodes();
