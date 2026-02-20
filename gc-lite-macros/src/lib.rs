@@ -172,23 +172,34 @@ pub fn gc_type_table_internal(input: TokenStream) -> TokenStream {
         ids.push(id);
     }
 
+    let mut drop_passes = passes.clone();
+    drop_passes.sort_unstable();
+    drop_passes.dedup();
+
     let expanded = quote! {
-        pub const GC_TYPE_INFO_LIST: &[#crate_path::GcTypeInfo] = &[
-            #(
-                #crate_path::GcTypeInfo {
-                    size: ::core::mem::size_of::<#tys>() as u32,
-                    trace_fn: #crate_path::gctype_trace::<#tys>,
-                    drop_fn: {
-                        if ::core::mem::needs_drop::<#tys>() {
-                            Some(#crate_path::gctype_drop::<#tys>)
-                        } else {
-                            None
-                        }
+        pub const GC_TYPE_REGISTRY: #crate_path::gctype::GcTypeRegistry = #crate_path::gctype::GcTypeRegistry {
+            type_info_list: &[
+                #(
+                    #crate_path::GcTypeInfo {
+                        size: ::core::mem::size_of::<#tys>() as u32,
+                        trace_fn: #crate_path::gctype_trace::<#tys>,
+                        drop_fn: {
+                            if ::core::mem::needs_drop::<#tys>() {
+                                Some(#crate_path::gctype_drop::<#tys>)
+                            } else {
+                                None
+                            }
+                        },
+                        drop_pass: #passes,
                     },
-                    drop_pass: #passes,
-                },
-            )*
-        ];
+                )*
+            ],
+            drop_passes: &[
+                #(
+                    #drop_passes
+                ),*
+            ],
+        };
 
         #(
         impl #crate_path::GcNode for #tys {

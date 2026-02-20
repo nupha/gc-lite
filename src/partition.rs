@@ -388,8 +388,9 @@ impl GcHeap {
 
                             self.update_mem_use(
                                 xref,
-                                (self.gc_types[unsafe { this.as_ref().gc_type() } as usize].size
-                                    as usize
+                                (self.registry.type_info_list
+                                    [unsafe { this.as_ref().gc_type() } as usize]
+                                    .size as usize
                                     + std::mem::size_of::<GcHead>())
                                     as i32,
                             );
@@ -607,9 +608,18 @@ impl GcHeap {
 mod tests {
     use super::*;
 
+    struct DummyType;
+    unsafe impl crate::trace::GcTracable for DummyType {
+        fn trace(&self, _: &mut crate::trace::GcTraceCtx) {}
+    }
+
+    crate::gc_type_register! {
+        DummyType, drop_pass = 0;
+    }
+
     #[test]
     fn test_partition_creation() {
-        let mut heap = GcHeap::new(&[]);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let id = heap.create_root_partition(1024);
 
         let partition = heap.partition(id).unwrap();
@@ -633,7 +643,7 @@ mod tests {
 
     #[test]
     fn test_hierarchical_partition_creation() {
-        let mut heap = GcHeap::new(&[]);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
 
         // Create root partition
         let root_id = heap.create_root_partition(1024);
@@ -662,7 +672,7 @@ mod tests {
 
     #[test]
     fn test_gc_threshold() {
-        let mut heap = GcHeap::new(&[]);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let id = heap.create_root_partition(1024);
 
         let partition = heap.partition_mut(id).unwrap();
@@ -684,7 +694,7 @@ mod tests {
 
     #[test]
     fn test_memory_limit() {
-        let mut heap = GcHeap::new(&[]);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let id = heap.create_root_partition(1024);
 
         let partition = heap.partition_mut(id).unwrap();
@@ -706,7 +716,7 @@ mod tests {
 
     #[test]
     fn test_is_ancestor_of() {
-        let mut heap = GcHeap::new(&[]);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let p1 = heap.create_root_partition(0);
         let p2 = heap.create_sub_partition(p1);
         let p3 = heap.create_sub_partition(p2);
@@ -736,7 +746,7 @@ mod tests {
 
     #[test]
     fn test_common_parent() {
-        let mut heap = GcHeap::new(&[]);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let p1 = heap.create_root_partition(0);
         let p2 = heap.create_sub_partition(p1);
         let p3 = heap.create_sub_partition(p1);
@@ -766,7 +776,7 @@ mod tests {
 
     #[test]
     fn test_update_mem_use() {
-        let mut heap = GcHeap::new(&[]);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let p1 = heap.create_root_partition(0);
         let p2 = heap.create_sub_partition(p1);
         let p3 = heap.create_sub_partition(p2);
@@ -796,7 +806,7 @@ mod tests {
 
     #[test]
     fn test_common_parent_none_cases() {
-        let mut heap = GcHeap::new(&[]);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
 
         let root_id = heap.create_root_partition(2048);
         let child_id = heap.create_sub_partition(root_id);
@@ -820,7 +830,7 @@ mod tests {
 
     #[test]
     fn test_common_parent_different_trees() {
-        let mut heap = GcHeap::new(&[]);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
 
         // Create two separate root partitions (different trees)
         let root1_id = heap.create_root_partition(2048);
@@ -840,7 +850,7 @@ mod tests {
 
     #[test]
     fn test_common_parent3() {
-        let mut heap = GcHeap::new(&[]);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
 
         // Create hierarchy:
         // root_id
@@ -922,7 +932,7 @@ mod tests {
 
     #[test]
     fn test_common_parent3_complex_hierarchy() {
-        let mut heap = GcHeap::new(&[]);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
 
         // Create a more complex hierarchy:
         // root
@@ -969,7 +979,7 @@ mod tests {
 
     #[test]
     fn test_partition_depth_bits_on_creation() {
-        let mut heap = GcHeap::new(&[]);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let root = heap.create_root_partition(0);
         let child = heap.create_sub_partition(root);
         let grandchild = heap.create_sub_partition(child);

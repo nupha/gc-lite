@@ -151,7 +151,7 @@ impl GcHeap {
         }
 
         let dtype = hd.gc_type() as usize;
-        let info = &self.gc_types[dtype];
+        let info = &self.registry.type_info_list[dtype];
         let gross_size = std::mem::size_of::<GcHead>() + info.size as usize;
 
         unsafe {

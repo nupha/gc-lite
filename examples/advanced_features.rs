@@ -41,7 +41,7 @@ gc_type_register! {
 }
 
 fn new_heap() -> GcHeap {
-    GcHeap::new(GC_TYPE_INFO_LIST)
+    GcHeap::new(&GC_TYPE_REGISTRY)
 }
 
 fn main() -> GcResult<()> {

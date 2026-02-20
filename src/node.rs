@@ -165,7 +165,7 @@ impl GcHead {
     pub fn gc_children(&self, heap: &mut GcHeap) -> Vec<NonNull<GcHead>> {
         let mut ctx = GcTraceCtx::new(heap, GcTraceRestrict::No, false);
         let dtype = self.gc_type() as usize;
-        let info = &ctx.heap().gc_types[dtype];
+        let info = &ctx.heap().registry.type_info_list[dtype];
         (info.trace_fn)(NonNull::from_ref(self), &mut ctx);
         ctx.take_traced_nodes()
     }

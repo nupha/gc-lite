@@ -24,3 +24,17 @@ pub fn trace_fn<T: GcTracable>(node: NonNull<GcHead>, gcx: &mut GcTraceCtx) {
 pub unsafe fn drop_fn<T>(data_ptr: *mut u8) {
     unsafe { std::ptr::drop_in_place(data_ptr.cast::<T>()) };
 }
+
+pub struct GcTypeRegistry {
+    pub type_info_list: &'static [GcTypeInfo],
+    pub drop_passes: &'static [u8],
+}
+
+impl GcTypeRegistry {
+    pub const fn empty() -> &'static GcTypeRegistry {
+        &GcTypeRegistry {
+            type_info_list: &[],
+            drop_passes: &[],
+        }
+    }
+}

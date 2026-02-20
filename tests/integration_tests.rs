@@ -11,10 +11,7 @@
 //! - Weak references
 //! - Error handling
 
-use gc_lite::{
-    GcError, GcHeap, GcNode, GcPartitionId, GcRef, GcTracable, GcTraceCtx, GcTypeInfo, gctype_drop,
-    gctype_trace,
-};
+use gc_lite::{GcError, GcHeap, GcPartitionId, GcRef, GcTracable, GcTraceCtx, gc_type_register};
 
 /// Test data structure for integration tests
 #[derive(Debug, PartialEq, Clone)]
@@ -63,46 +60,16 @@ impl TestNode {
     }
 }
 
-const GC_TYPE_INFO_LIST: &[GcTypeInfo] = &[
-    GcTypeInfo {
-        size: core::mem::size_of::<TestData>() as u32,
-        trace_fn: gctype_trace::<TestData>,
-        drop_fn: {
-            if core::mem::needs_drop::<TestData>() {
-                Some(gctype_drop::<TestData>)
-            } else {
-                None
-            }
-        },
-        drop_pass: 0,
-    },
-    GcTypeInfo {
-        size: core::mem::size_of::<TestNode>() as u32,
-        trace_fn: gctype_trace::<TestNode>,
-        drop_fn: {
-            if core::mem::needs_drop::<TestNode>() {
-                Some(gctype_drop::<TestNode>)
-            } else {
-                None
-            }
-        },
-        drop_pass: 0,
-    },
-];
-
-impl GcNode for TestData {
-    const GC_TYPE_ID: u8 = 0;
-}
-
-impl GcNode for TestNode {
-    const GC_TYPE_ID: u8 = 1;
+gc_type_register! {
+    TestData, drop_pass = 0;
+    TestNode, drop_pass = 0;
 }
 
 // ============ Partition Management Tests ============
 
 #[test]
 fn test_partition_creation_and_retrieval() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
 
     // Create partitions
     let id1 = heap.create_root_partition(1024);
@@ -119,7 +86,7 @@ fn test_partition_creation_and_retrieval() {
 
 #[test]
 fn test_partition_removal() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_root_partition(1024);
 
     assert!(heap.partition(id).is_some());
@@ -137,7 +104,7 @@ fn test_partition_removal() {
 
 #[test]
 fn test_partition_gc_threshold() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_root_partition(1024);
 
     // Default threshold should be 0 (disabled)
@@ -157,7 +124,7 @@ fn test_partition_gc_threshold() {
 
 #[test]
 fn test_allocation_fails_when_limit_exceeded() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_root_partition(256); // Small limit
 
     // Allocate objects until we hit the limit
@@ -200,7 +167,7 @@ fn test_allocation_fails_when_limit_exceeded() {
 
 #[test]
 fn test_set_memory_limit_above_used_memory() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_root_partition(1024);
 
     // Allocate some objects to use memory
@@ -248,7 +215,7 @@ fn test_set_memory_limit_above_used_memory() {
 
 #[test]
 fn test_set_memory_limit_below_used_memory() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_root_partition(2048);
 
     // Allocate some objects to use memory
@@ -302,7 +269,7 @@ fn test_set_memory_limit_below_used_memory() {
 
 #[test]
 fn test_set_unlimited_memory() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_root_partition(512);
 
     // Set limit to 0 (unlimited)
@@ -341,7 +308,7 @@ fn test_set_unlimited_memory() {
 
 #[test]
 fn test_object_allocation() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_root_partition(2048);
 
     // Get initial memory usage
@@ -370,7 +337,7 @@ fn test_object_allocation() {
 
 #[test]
 fn test_memory_usage_increases_with_allocation() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_root_partition(8192);
 
     // Track memory usage after each allocation
@@ -424,7 +391,7 @@ fn test_memory_usage_increases_with_allocation() {
 
 #[test]
 fn test_multiple_object_allocation() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_root_partition(4096);
 
     // Allocate multiple objects
@@ -455,7 +422,7 @@ fn test_multiple_object_allocation() {
 
 #[test]
 fn test_partition_full_error() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_root_partition(512); // Very small limit
 
     // Try to allocate objects until partition is full
@@ -486,7 +453,7 @@ fn test_partition_full_error() {
 
 #[test]
 fn test_invalid_partition_allocation() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let invalid_id = GcPartitionId(9999);
 
     let result = heap.alloc(
@@ -504,7 +471,7 @@ fn test_invalid_partition_allocation() {
 
 #[test]
 fn test_root_object_management() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_root_partition(2048);
 
     let obj = heap
@@ -531,7 +498,7 @@ fn test_root_object_management() {
 
 #[test]
 fn test_root_objects_preserve_during_gc() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_root_partition(2048);
 
     let obj = heap
@@ -556,7 +523,7 @@ fn test_root_objects_preserve_during_gc() {
 
 #[test]
 fn test_non_root_objects_collected() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_root_partition(2048);
 
     // Create two objects, one is root, one is not
@@ -595,7 +562,7 @@ fn test_non_root_objects_collected() {
 
 #[test]
 fn test_manual_garbage_collection() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_root_partition(2048);
 
     // Create objects with some as roots
@@ -631,7 +598,7 @@ fn test_manual_garbage_collection() {
 
 #[test]
 fn test_circular_reference_handling() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_root_partition(2048);
 
     // Create two nodes that reference each other
@@ -667,7 +634,7 @@ fn test_circular_reference_handling() {
 
 #[test]
 fn test_weak_reference_creation_and_upgrade() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_root_partition(2048);
 
     // Create object and weak reference
@@ -695,7 +662,7 @@ fn test_weak_reference_creation_and_upgrade() {
 
 #[test]
 fn test_weak_reference_after_collection() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_root_partition(2048);
 
     // Create object and weak reference
@@ -722,7 +689,7 @@ fn test_weak_reference_after_collection() {
 
 #[test]
 fn test_multiple_weak_references() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_root_partition(2048);
 
     let obj = heap
@@ -750,7 +717,7 @@ fn test_multiple_weak_references() {
 
 #[test]
 fn test_weak_reference_after_partition_removal() {
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
 
     // 创建有层级的partitions
     let root_id = heap.create_root_partition(2048);
@@ -790,8 +757,8 @@ fn test_weak_reference_after_partition_removal() {
 
 #[test]
 fn test_contains_method() {
-    let mut heap1 = GcHeap::new(GC_TYPE_INFO_LIST);
-    let mut heap2 = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap1 = GcHeap::new(&GC_TYPE_REGISTRY);
+    let mut heap2 = GcHeap::new(&GC_TYPE_REGISTRY);
 
     let id1 = heap1.create_root_partition(1024);
     let id2 = heap2.create_root_partition(1024);

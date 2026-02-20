@@ -9,7 +9,7 @@
 //! - Memory usage efficiency analysis
 //! - Automatic GC threshold performance
 
-use gc_lite::{GcHeap, GcNode, GcRef, GcTracable, GcTraceCtx, gc_type_register};
+use gc_lite::{GcHeap, GcRef, GcTracable, GcTraceCtx, gc_type_register};
 use std::time::{Duration, Instant};
 
 fn main() {
@@ -41,18 +41,18 @@ fn benchmark_object_sizes() {
     for &size in &sizes {
         println!("\nTest object count: {}", size);
 
-        let mut context = GcHeap::new(GC_TYPE_INFO_LIST);
+        let mut context = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition = context.create_root_partition(1024 * 1024 * 10); // 10MB
 
         // Measure allocation performance
         let alloc_start = Instant::now();
         let mut objects = Vec::new();
-        for i in 0..size {
+        for _i in 0..size {
             let node = context
                 .alloc(
                     partition,
                     SimpleNode {
-                        data: vec![0u8; 100],
+                        _data: vec![0u8; 100],
                     },
                 ) // Each node 100 bytes
                 .unwrap();
@@ -90,7 +90,7 @@ fn benchmark_complex_graphs() {
     for &size in &sizes {
         println!("\nTest complex object graph size: {} nodes", size);
 
-        let mut context = GcHeap::new(GC_TYPE_INFO_LIST);
+        let mut context = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition = context.create_root_partition(1024 * 1024 * 10);
 
         // Create complex object graph
@@ -148,14 +148,14 @@ fn benchmark_complex_graphs() {
 fn benchmark_memory_efficiency() {
     println!("\nTesting memory usage efficiency...");
 
-    let mut context = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut context = GcHeap::new(&GC_TYPE_REGISTRY);
     let partition = context.create_root_partition(1024 * 1024); // 1MB
 
     // Allocate many small objects
     let small_objects_count = 1000;
     let mut small_objects = Vec::new();
 
-    for i in 0..small_objects_count {
+    for _i in 0..small_objects_count {
         let obj = context.alloc(partition, SmallData {}).unwrap();
         small_objects.push(obj);
     }
@@ -208,7 +208,7 @@ fn benchmark_memory_efficiency() {
 fn benchmark_auto_gc_threshold() {
     println!("\nTesting automatic GC threshold performance...");
 
-    let mut context = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut context = GcHeap::new(&GC_TYPE_REGISTRY);
     let partition = context.create_root_partition(2048); // 2KB limit
 
     // Set automatic GC threshold to 1.5KB
@@ -224,7 +224,7 @@ fn benchmark_auto_gc_threshold() {
         // Try at most 100 times
         // Allocate objects of about 100 bytes
         let node = SimpleNode {
-            data: vec![0u8; 100],
+            _data: vec![0u8; 100],
         };
         match context.alloc(partition, node) {
             Ok(_gc_ref) => {
@@ -264,7 +264,7 @@ fn benchmark_auto_gc_threshold() {
 /// Simple node for performance testing
 #[derive(Debug)]
 struct SimpleNode {
-    data: Vec<u8>,
+    _data: Vec<u8>,
 }
 
 unsafe impl GcTracable for SimpleNode {

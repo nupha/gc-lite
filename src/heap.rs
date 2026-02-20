@@ -4,7 +4,8 @@
 use std::{collections::HashMap, ptr::NonNull};
 
 use crate::{
-    GcNode, GcRef, GcTypeInfo,
+    GcNode, GcRef,
+    gctype::GcTypeRegistry,
     node::{GcHead, GcNodeFlag},
     partition::{GcPartition, GcPartitionId},
     trace::{GcTraceCtx, GcTraceRestrict},
@@ -19,7 +20,7 @@ pub struct GcHeap {
     opaque: *mut u8,
 
     /// Static GC type information table
-    pub(crate) gc_types: &'static [GcTypeInfo],
+    pub(crate) registry: &'static GcTypeRegistry,
 
     #[cfg(debug_assertions)]
     pub(crate) dbg_dropping_root_partition: Option<GcPartitionId>,
@@ -56,37 +57,19 @@ impl GcHeap {
     pub const DUMMY_MIGRATE_CALLBACK: fn(&GcHeap, &GcHead, GcPartitionId) = |_, _, _| {};
     pub const DUMMY_DISPOSE_CALLBACK: fn(&GcHeap, &GcHead) = |_, _| {};
 
-    /// Create a new garbage collection heap with an explicit GC type table
-    pub fn new(gc_types: &'static [GcTypeInfo]) -> Self {
+    /// Create a new garbage collection heap with an explicit GC type registry
+    pub fn new(registry: &'static GcTypeRegistry) -> Self {
         Self {
             partitions: HashMap::new(),
             weak_slots: Vec::new(),
             opaque: std::ptr::null_mut(),
-            gc_types,
+            registry,
 
             #[cfg(debug_assertions)]
             dbg_dropping_root_partition: None,
             #[cfg(debug_assertions)]
             dbg_living_nodes: std::collections::HashSet::with_capacity(128),
         }
-    }
-
-    pub(crate) fn drop_passes<'a>(&self, out: &'a mut [u8; 4]) -> &'a [u8] {
-        let mut present = [false; 4];
-        for info in self.gc_types.iter() {
-            let p = info.drop_pass as usize;
-            if p < present.len() {
-                present[p] = true;
-            }
-        }
-        let mut count = 0;
-        for (i, &b) in present.iter().enumerate() {
-            if b {
-                out[count] = i as u8;
-                count += 1;
-            }
-        }
-        &out[..count]
     }
 
     #[inline(always)]
@@ -393,7 +376,7 @@ mod heap_tests {
 
     #[test]
     fn test_is_node_reachable() {
-        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_root_partition(4096);
 
         // 创建三个节点：A -> B -> C

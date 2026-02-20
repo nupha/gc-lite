@@ -28,8 +28,7 @@ impl GcHeap {
             let mut link1 = Some(link0);
             let mut freed_bytes = 0;
 
-            let mut passes = [0u8; 4];
-            let pass_slice = self.drop_passes(&mut passes);
+            let pass_slice = self.registry.drop_passes;
             for &pass in pass_slice {
                 let mut current = link1;
                 let mut prev: Option<NonNull<GcHead>> = None;
@@ -42,7 +41,7 @@ impl GcHeap {
                         current = this.as_mut().next;
 
                         let dtype = this.as_ref().gc_type() as usize;
-                        let info = &self.gc_types[dtype];
+                        let info = &self.registry.type_info_list[dtype];
                         if predicate(this.as_mut()) && info.drop_pass == pass {
                             if let Some(mut p) = prev {
                                 p.as_mut().next = current;
@@ -114,8 +113,7 @@ impl GcHeap {
         let mut link = Some(head);
         let mut freed_bytes = 0;
 
-        let mut passes = [0u8; 4];
-        let pass_slice = self.drop_passes(&mut passes);
+        let pass_slice = self.registry.drop_passes;
         for &pass in pass_slice {
             log::trace!(
                 "[dipose_all] pass {pass}, count={}",
@@ -133,7 +131,7 @@ impl GcHeap {
                     current = this.as_ref().next;
 
                     let dtype = this.as_ref().gc_type() as usize;
-                    let info = &self.gc_types[dtype];
+                    let info = &self.registry.type_info_list[dtype];
                     if info.drop_pass == pass {
                         if let Some(mut p) = prev {
                             p.as_mut().next = current;
@@ -214,10 +212,10 @@ mod sweep_test {
     /// Test basic sweep_with functionality
     #[test]
     fn test_sweep_with_basic() {
-        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_root_partition(4096);
 
-        let objects: Vec<GcRef<MyI32>> = (0..5)
+        let _objects: Vec<GcRef<MyI32>> = (0..5)
             .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
             .collect();
 
@@ -260,10 +258,10 @@ mod sweep_test {
     /// Test removing chain head nodes (n个节点被剔除后)
     #[test]
     fn test_sweep_with_chain_head_removal() {
-        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_root_partition(4096);
 
-        let objects: Vec<GcRef<MyI32>> = (0..5)
+        let _objects: Vec<GcRef<MyI32>> = (0..5)
             .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
             .collect();
 
@@ -315,10 +313,10 @@ mod sweep_test {
     /// Test removing all chain head nodes (连续剔除所有链头节点)
     #[test]
     fn test_sweep_with_all_chain_head_removal() {
-        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_root_partition(4096);
 
-        let objects: Vec<GcRef<MyI32>> = (0..3)
+        let _objects: Vec<GcRef<MyI32>> = (0..3)
             .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
             .collect();
 
@@ -347,10 +345,10 @@ mod sweep_test {
     /// Test removing middle nodes
     #[test]
     fn test_sweep_with_middle_node_removal() {
-        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_root_partition(4096);
 
-        let objects: Vec<GcRef<MyI32>> = (0..5)
+        let _objects: Vec<GcRef<MyI32>> = (0..5)
             .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
             .collect();
 
@@ -391,15 +389,16 @@ mod sweep_test {
     /// Test removing root nodes
     #[test]
     fn test_sweep_with_root_node_removal() {
-        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_root_partition(4096);
 
-        let objects: Vec<GcRef<MyI32>> = (0..3)
+        let root_obj = heap.alloc(partition_id, MyI32(0)).unwrap();
+        let _objects: Vec<GcRef<MyI32>> = (1..3)
             .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
             .collect();
 
         // Mark first object as root
-        heap.set_root(objects[0], true);
+        heap.set_root(root_obj, true);
 
         // Verify root list contains the object
         assert!(
@@ -407,7 +406,7 @@ mod sweep_test {
                 .get(&partition_id)
                 .unwrap()
                 .root_nodes
-                .contains(&objects[0].head_ptr)
+                .contains(&root_obj.head_ptr)
         );
 
         // Remove the root object
@@ -433,14 +432,14 @@ mod sweep_test {
                 .get(&partition_id)
                 .unwrap()
                 .root_nodes
-                .contains(&objects[0].head_ptr)
+                .contains(&root_obj.head_ptr)
         );
     }
 
     /// Test empty partition
     #[test]
     fn test_sweep_with_empty_partition() {
-        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_root_partition(4096);
 
         // No objects allocated, sweep should return 0
@@ -451,7 +450,7 @@ mod sweep_test {
     /// Test non-existent partition
     #[test]
     fn test_sweep_with_nonexistent_partition() {
-        let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let non_existent_partition = GcPartitionId(9999);
 
         // Non-existent partition should return 0

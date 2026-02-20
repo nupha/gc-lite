@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-mod gctype;
+pub mod gctype;
 mod heap;
 mod helpers;
 mod mem;
@@ -14,7 +14,7 @@ mod weak;
 mod xref;
 
 pub use {
-    gctype::{GcTypeInfo, drop_fn as gctype_drop, trace_fn as gctype_trace},
+    gctype::{GcTypeInfo, GcTypeRegistry, drop_fn as gctype_drop, trace_fn as gctype_trace},
     heap::GcHeap,
     helpers::{GcError, GcResult},
     node::{GcHead, GcNode, GcRef},

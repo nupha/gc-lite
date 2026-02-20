@@ -227,7 +227,7 @@ mod tests {
     /// Test WeakRef's upgrade method (interface test)
     #[test]
     fn test_weak_ref_upgrade_interface() {
-        let heap = GcHeap::new(&[]);
+        let heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let weak_ref = GcWeak::<TestData1>::new(0, 1);
 
         // Test upgrade interface

@@ -12,7 +12,7 @@
 
 use std::ops::Deref;
 
-use gc_lite::{GcHeap, GcNode, GcRef, GcResult, GcTracable, GcTraceCtx, gc_type_register};
+use gc_lite::{GcHeap, GcRef, GcResult, GcTracable, GcTraceCtx, gc_type_register};
 
 #[derive(Debug)]
 struct MyString(String);
@@ -50,7 +50,7 @@ fn main() -> GcResult<()> {
     println!("=== Basic usage example of partitioned garbage collection system ===");
 
     // Create garbage collection context
-    let mut heap = GcHeap::new(GC_TYPE_INFO_LIST);
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
 
     println!("Initial state:");
     println!("  Number of partitions: {}", heap.partition_ids().len());
