@@ -80,7 +80,7 @@ impl std::fmt::Debug for GcHead {
             .field("color", &self.color());
 
         if !self.xref().is_null() {
-            s.field("xref", &self.xref().0);
+            s.field("xref", &self.xref());
         }
         if !self.weak_id.is_null() {
             let w = self.weak_id;
@@ -205,6 +205,21 @@ impl GcHead {
 pub trait GcNode: GcTracable {
     /// Node data type id
     const GC_TYPE_ID: u8;
+
+    /// get gc node head info pointer
+    fn gc_head_ptr(&self) -> NonNull<GcHead>;
+
+    /// get gc node head info
+    #[inline(always)]
+    fn gc_head(&self) -> &GcHead {
+        unsafe { self.gc_head_ptr().as_ref() }
+    }
+
+    /// get gc node head info
+    #[inline(always)]
+    fn gc_head_mut(&mut self) -> &mut GcHead {
+        unsafe { self.gc_head_ptr().as_mut() }
+    }
 }
 
 /// Garbage collection reference

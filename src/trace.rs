@@ -72,9 +72,7 @@ impl<'a> GcTraceCtx<'a> {
                     unreachable!();
 
                     #[cfg(not(debug_assertions))]
-                    unsafe {
-                        std::hint::unreachable_unchecked();
-                    }
+                    std::hint::unreachable_unchecked();
                 }
             }
         }
@@ -96,13 +94,13 @@ impl<'a> GcTraceCtx<'a> {
 
     /// Trace multiple nodes recursively.
     pub fn trace_iter(&mut self, iter: impl Iterator<Item = NonNull<GcHead>>) {
-        for ptr in iter {
-            self.trace(ptr);
+        for n in iter {
+            self.trace(n);
         }
     }
 
     pub fn trace_roots(&mut self, partition_id: GcPartitionId) {
-        if let Some(p) = unsafe { self.heap.as_ref().partitions.get(&partition_id) } {
+        if let Some(p) = self.heap().partitions.get(&partition_id) {
             let roots = p.root_nodes.clone();
             for root in roots {
                 self.trace(root);
@@ -119,11 +117,13 @@ impl<'a> GcTraceCtx<'a> {
     }
 
     /// take out collected nodes
+    #[inline(always)]
     pub fn take_traced_nodes(&mut self) -> Vec<NonNull<GcHead>> {
         std::mem::take(&mut self.traced_nodes).into()
     }
 
     /// clear collected nodes
+    #[inline(always)]
     pub fn clear(&mut self) {
         self.traced_nodes.clear();
     }
@@ -131,13 +131,13 @@ impl<'a> GcTraceCtx<'a> {
     /// Submit a node to collected list regardless its color state.
     #[inline]
     pub fn add_node(&mut self, node: NonNull<GcHead>) {
+        #[cfg(debug_assertions)]
         unsafe {
-            #[cfg(debug_assertions)]
             node.as_ref().debug_assert_node_valid(self.heap.as_ref()); // O.o
+        }
 
-            if !self.traced_nodes.iter().any(|&n| n == node) {
-                self.traced_nodes.push_back(node);
-            }
+        if !self.traced_nodes.iter().any(|&n| n == node) {
+            self.traced_nodes.push_back(node);
         }
     }
 

@@ -4,79 +4,10 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    DeriveInput, Expr, ExprLit, Ident, Lit, LitInt, Meta, Path, Result as SynResult, Token, Type,
+    Ident, LitInt, Path, Result as SynResult, Token, Type,
     parse::{Parse, ParseStream},
     parse_macro_input,
 };
-
-fn parse_drop_pass(attr: TokenStream) -> syn::Result<u8> {
-    if attr.is_empty() {
-        return Ok(0);
-    }
-
-    let meta = syn::parse::<Meta>(attr)?;
-
-    if let Meta::NameValue(nv) = meta {
-        if !nv.path.is_ident("drop_pass") {
-            return Err(syn::Error::new_spanned(nv.path, "expected `drop_pass = N`"));
-        }
-
-        if let Expr::Lit(ExprLit {
-            lit: Lit::Int(lit_int),
-            ..
-        }) = nv.value
-        {
-            let v = lit_int.base10_parse::<u8>()?;
-            if v > 3 {
-                return Err(syn::Error::new_spanned(
-                    lit_int,
-                    "drop_pass must be 0, 1, 2 or 3",
-                ));
-            }
-            Ok(v)
-        } else {
-            Err(syn::Error::new_spanned(
-                nv.value,
-                "drop_pass must be an integer literal",
-            ))
-        }
-    } else {
-        Err(syn::Error::new_spanned(meta, "expected `drop_pass = N`"))
-    }
-}
-
-#[proc_macro_attribute]
-pub fn gc_node(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(item as DeriveInput);
-
-    let drop_pass = match parse_drop_pass(attr) {
-        Ok(v) => v,
-        Err(e) => return e.into_compile_error().into(),
-    };
-
-    let ident = input.ident.clone();
-    let vis = input.vis.clone();
-
-    let expanded = quote! {
-        #input
-
-        impl gc_lite::GcNode for #ident {}
-
-        impl #ident {
-            #vis const GC_DROP_PASS: u8 = #drop_pass;
-
-            #vis fn alloc_node(
-                heap: &mut gc_lite::GcHeap,
-                scope: gc_lite::GcPartitionId,
-                payload: #ident,
-            ) -> Result<gc_lite::GcRef<#ident>, (gc_lite::GcError, #ident)> {
-                heap.alloc(scope, payload)
-            }
-        }
-    };
-
-    expanded.into()
-}
 
 struct TypeTableEntry {
     ty: Type,
@@ -207,6 +138,11 @@ pub fn gc_type_table_internal(input: TokenStream) -> TokenStream {
         #(
         impl #crate_path::GcNode for #tys {
             const GC_TYPE_ID: u8 = #ids;
+
+            #[inline(always)]
+            fn gc_head_ptr(&self) -> std::ptr::NonNull<#crate_path::GcHead> {
+                unsafe { #crate_path::GcRef::<Self>::from_ref_unchecked(self).node_ptr() }
+            }
         }
 
         impl #tys {
