@@ -353,62 +353,61 @@ impl GcHeap {
                 }
             }
 
-            if let Some(mut par) = self.partitions.remove(&pid) {
-                if let Some(link0_head) = par.nodes.take() {
-                    // promote xref nodes
-                    let mut link1 = Some(link0_head);
-                    let mut current = Some(link0_head);
-                    let mut prev: Option<NonNull<GcHead>> = None;
+            if let Some(mut par) = self.partitions.remove(&pid)
+                && let Some(link0_head) = par.nodes.take()
+            {
+                // promote xref nodes
+                let mut link1 = Some(link0_head);
+                let mut current = Some(link0_head);
+                let mut prev: Option<NonNull<GcHead>> = None;
 
-                    while let Some(mut this) = current {
-                        current = unsafe { this.as_ref().next };
+                while let Some(mut this) = current {
+                    current = unsafe { this.as_ref().next };
 
-                        let xref = unsafe { this.as_ref().xref() };
-                        if !xref.is_null() {
-                            log::trace!("[promote] {:?} -> {xref:?}", unsafe { this.as_ref() });
-                            debug_assert_ne!(xref, pid);
+                    let xref = unsafe { this.as_ref().xref() };
+                    if !xref.is_null() {
+                        log::trace!("[promote] {:?} -> {xref:?}", unsafe { this.as_ref() });
+                        debug_assert_ne!(xref, pid);
 
-                            if let Some(p) = prev {
-                                unsafe {
-                                    (*p.as_ptr()).next = current;
-                                }
-                            } else {
-                                link1 = current;
-                            }
-
-                            if call_on_promote {
-                                on_promote(self, unsafe { this.as_ref() }, xref);
-                            }
-
-                            // clear flags and attach to xref chain
+                        if let Some(p) = prev {
                             unsafe {
-                                let n = this.as_mut();
-                                let mut f = n.flags();
-
-                                f.remove(GcNodeFlag::ROOT);
-                                n.set_flags(f);
-                                n.partition = 0;
-                                n.next.take();
+                                (*p.as_ptr()).next = current;
                             }
-                            self.attach_node(xref, this);
-
-                            self.update_mem_use(
-                                xref,
-                                (self.node_dtypes.type_info_list
-                                    [unsafe { this.as_ref().dtype() } as usize]
-                                    .size as usize
-                                    + std::mem::size_of::<GcHead>())
-                                    as i32,
-                            );
                         } else {
-                            prev = Some(this);
+                            link1 = current;
                         }
-                    }
 
-                    // free rest nodes
-                    if let Some(first) = link1 {
-                        freed_bytes += self.dispose_all_nodes(first, &on_dispose);
+                        if call_on_promote {
+                            on_promote(self, unsafe { this.as_ref() }, xref);
+                        }
+
+                        // clear flags and attach to xref chain
+                        unsafe {
+                            let n = this.as_mut();
+                            let mut f = n.flags();
+
+                            f.remove(GcNodeFlag::ROOT);
+                            n.set_flags(f);
+                            n.partition = 0;
+                            n.next.take();
+                        }
+                        self.attach_node(xref, this);
+
+                        self.update_mem_use(
+                            xref,
+                            (self.node_dtypes.type_info_list
+                                [unsafe { this.as_ref().dtype() } as usize]
+                                .size as usize
+                                + std::mem::size_of::<GcHead>()) as i32,
+                        );
+                    } else {
+                        prev = Some(this);
                     }
+                }
+
+                // free rest nodes
+                if let Some(first) = link1 {
+                    freed_bytes += self.dispose_all_nodes(first, &on_dispose);
                 }
             }
 

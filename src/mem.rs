@@ -72,7 +72,7 @@ impl GcHeap {
 
                 if unlikely(par.memory_limit > 0 && par.memory_used + gross_size > par.memory_limit)
                 {
-                    return Err((GcError::PartitionFull, payload));
+                    Err((GcError::PartitionFull, payload))
                 } else {
                     let gc_type = T::GC_TYPE_ID;
                     let ptr = match self.mem_alloc(gross_size) {

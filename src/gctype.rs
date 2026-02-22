@@ -21,7 +21,7 @@ pub fn trace_fn<T: GcTracable>(node: NonNull<GcHead>, gcx: &mut GcTraceCtx) {
 }
 
 /// Generic dispose function, used to call drop_in_place of specific type
-pub unsafe fn drop_fn<T: GcNode>(data_ptr: *mut u8) {
+pub fn drop_fn<T: GcNode>(data_ptr: *mut u8) {
     unsafe { std::ptr::drop_in_place(data_ptr.cast::<T>()) };
 }
 

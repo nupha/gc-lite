@@ -23,7 +23,7 @@ pub use {
     weak::GcWeak,
 };
 
+pub(crate) use helpers::unlikely;
+
 #[doc(hidden)]
 pub use gc_lite_macros::gc_type_table_internal;
-
-pub(crate) use helpers::unlikely;

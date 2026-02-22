@@ -175,16 +175,11 @@ impl GcHeap {
                 }
 
                 // Remove from parent's children list
-                if !partition.parent.is_null() {
-                    if let Some(parent_partition) = self.partitions.get_mut(&partition.parent) {
-                        if let Some(pos) = parent_partition
-                            .children
-                            .iter()
-                            .position(|&id| id == current_id)
-                        {
-                            parent_partition.children.swap_remove(pos);
-                        }
-                    }
+                if !partition.parent.is_null()
+                    && let Some(up) = self.partitions.get_mut(&partition.parent)
+                    && let Some(i) = up.children.iter().position(|&id| id == current_id)
+                {
+                    up.children.swap_remove(i);
                 }
             }
         }
@@ -310,7 +305,7 @@ impl GcHeap {
         }
 
         let mut ctx = GcTraceCtx::new(self, true);
-        ctx.trace_iter(stack.iter().copied(), GcTraceCtx::MARK_FUNC);
+        ctx.trace_iter(stack.iter().copied());
 
         let b = unsafe { node.as_ref().color() != GcTriColor::White };
 
@@ -361,7 +356,7 @@ impl GcHeap {
 
 #[cfg(test)]
 mod heap_tests {
-    use crate::{GcNode, trace::GcTracable};
+    use crate::trace::GcTracable;
 
     use super::*;
 

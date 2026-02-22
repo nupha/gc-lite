@@ -99,7 +99,7 @@ impl GcHeap {
     ) -> usize {
         if self.partition(partition_id).is_some() {
             let mut ctx = GcTraceCtx::new(self, true);
-            ctx.trace_roots(partition_id, GcTraceCtx::MARK_FUNC);
+            ctx.trace_roots(partition_id);
             self.sweep(partition_id, Self::SWEEP_UNMARKED_FUNC, on_dispose)
         } else {
             0
@@ -170,7 +170,7 @@ mod sweep_test {
     use super::*;
     use crate::GcRef;
 
-    use crate::{GcNode, trace::GcTracable};
+    use crate::trace::GcTracable;
 
     #[derive(Debug)]
     struct MyI32(i32);
@@ -198,14 +198,14 @@ mod sweep_test {
         partition_id: GcPartitionId,
     ) -> Vec<NonNull<GcHead>> {
         let mut nodes: Vec<NonNull<GcHead>> = Vec::new();
-        if let Some(partition) = heap.partitions.get(&partition_id) {
-            if let Some(head) = partition.nodes {
-                let mut current = Some(head);
-                while let Some(node) = current {
-                    unsafe {
-                        nodes.push(node);
-                        current = node.as_ref().next;
-                    }
+        if let Some(partition) = heap.partitions.get(&partition_id)
+            && let Some(head) = partition.nodes
+        {
+            let mut current = Some(head);
+            while let Some(node) = current {
+                unsafe {
+                    nodes.push(node);
+                    current = node.as_ref().next;
                 }
             }
         }
@@ -375,7 +375,7 @@ mod sweep_test {
         let nodes = get_all_nodes_in_partition(&heap, partition_id);
         assert_eq!(nodes.len(), 4);
 
-        let expected_values = vec![4, 3, 1, 0];
+        let expected_values = [4, 3, 1, 0];
         for (i, node) in nodes.iter().enumerate() {
             unsafe {
                 let payload_ptr = (node.as_ptr() as *mut u8).add(std::mem::size_of::<GcHead>());

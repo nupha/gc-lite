@@ -6,13 +6,13 @@ use std::ptr::NonNull;
 use crate::{GcHead, GcHeap, GcPartitionId};
 
 impl GcHead {
-    /// Get cross reference scope
+    /// Get cross scope reference
     pub fn xref(&self) -> GcPartitionId {
         let p = (self.partition >> 16) as u16;
         GcPartitionId(p)
     }
 
-    /// Set cross reference.
+    /// Set cross scope reference.
     ///
     /// # Return
     ///
@@ -29,7 +29,7 @@ impl GcHead {
         }
     }
 
-    /// Unset cross reference
+    /// Unset cross scope reference
     #[inline(always)]
     pub fn unset_xref(&mut self) {
         self.set_xref(GcPartitionId::NONE);
