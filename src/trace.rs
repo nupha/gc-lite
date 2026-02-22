@@ -12,59 +12,39 @@ pub unsafe trait GcTracable: 'static {
     /// Collect directly referenced children gc nodes
     fn trace(&self, gcx: &mut GcTraceCtx);
 
-    /// Set cross scope for `self` node and its direct children nodes
-    fn set_xref(&self, heap: &mut GcHeap, scope: GcPartitionId) {
-        let mut gcx = GcTraceCtx::new(heap, GcTraceRestrict::No, false);
+    /// Get direct referencing children nodes, regardless their color state.
+    fn gc_children(&self, heap: &mut GcHeap) -> Vec<NonNull<GcHead>> {
+        let mut gcx = GcTraceCtx::new(heap, false);
         self.trace(&mut gcx);
-
-        for ch in gcx.take_traced_nodes() {
-            heap.set_xref(scope, ch);
-        }
+        gcx.take_traced_nodes()
     }
 }
 
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum GcTraceRestrict {
-    /// no restrict
-    No,
-    /// trace no restrict, collect restrict
-    Collect(GcPartitionId),
-    /// trace restrict, collect restrict
-    TraceCollect(GcPartitionId),
-}
-
 pub struct GcTraceCtx<'a> {
-    pub(super) heap: NonNull<GcHeap>,
-    pub(super) restrict: GcTraceRestrict,
-    pub(super) traced_nodes: VecDeque<NonNull<GcHead>>, // SmallVec<[NonNull<GcHead>; 16]>,
+    heap: NonNull<GcHeap>,
+    traced_nodes: VecDeque<NonNull<GcHead>>, // SmallVec<[NonNull<GcHead>; 16]>,
     _mark: PhantomData<&'a ()>,
 }
 
 impl<'a> GcTraceCtx<'a> {
+    #[deprecated]
     #[allow(non_snake_case)]
-    pub fn MARK_FUNC(mut h: NonNull<GcHead>, _: &GcHeap) {
-        unsafe {
-            if h.as_ref().color() == GcTriColor::White {
-                h.as_mut().set_color(GcTriColor::Gray);
-            }
-        }
+    pub fn MARK_FUNC(h: NonNull<GcHead>, _: &GcHeap) {
+        // unsafe {
+        //     if h.as_ref().color() == GcTriColor::White {
+        //         h.as_mut().set_color(GcTriColor::Gray);
+        //     }
+        // }
     }
 
     /// create new trace ctx, optionally clear all nodes' visit and mark flags.
-    pub fn new(heap: &mut GcHeap, restrict: GcTraceRestrict, prepare_trace: bool) -> Self {
-        #[cfg(debug_assertions)]
-        if let GcTraceRestrict::Collect(pid) | GcTraceRestrict::TraceCollect(pid) = restrict {
-            debug_assert!(heap.partition(pid).is_some());
+    pub fn new(heap: &mut GcHeap, reset_color: bool) -> Self {
+        if reset_color {
+            heap.reset_color_for_trace();
         }
 
-        if prepare_trace {
-            heap.prepare_for_trace();
-        }
-
-        GcTraceCtx {
+        Self {
             heap: NonNull::from_ref(heap),
-            restrict,
             traced_nodes: VecDeque::new(),
             _mark: PhantomData,
         }
@@ -80,50 +60,31 @@ impl<'a> GcTraceCtx<'a> {
         unsafe { self.heap.as_mut() }
     }
 
-    #[inline(always)]
-    fn can_trace(&self, partition_id: GcPartitionId) -> bool {
-        match self.restrict {
-            GcTraceRestrict::TraceCollect(p) => p == partition_id,
-            GcTraceRestrict::No | GcTraceRestrict::Collect(_) => true,
-        }
-    }
-
-    fn can_collect(&self, partition_id: GcPartitionId) -> bool {
-        match self.restrict {
-            GcTraceRestrict::TraceCollect(p) | GcTraceRestrict::Collect(p) => p == partition_id,
-            GcTraceRestrict::No => true,
-        }
-    }
-
     /// Apply callback on `node`, and optionally collect direct children nodes
-    fn apply1(
-        &mut self,
-        node: NonNull<GcHead>,
-        callback: impl Fn(NonNull<GcHead>, &GcHeap),
-        ignore_trace_flag: bool,
-    ) {
+    fn apply1(&mut self, mut node: NonNull<GcHead>, callback: impl Fn(NonNull<GcHead>, &GcHeap)) {
         unsafe {
             #[cfg(debug_assertions)]
             node.as_ref().debug_assert_node_valid(self.heap.as_ref()); // O.o
 
-            let pid = node.as_ref().scope_id();
-
-            // Only process white nodes to prevent cycles and redundant work.
-            // The `ignore_trace_flag` is kept for API compatibility, but the primary
-            // tracing logic now relies on the tri-color state.
-            if ignore_trace_flag || node.as_ref().color() == GcTriColor::White {
-                if self.can_collect(pid) {
+            match node.as_ref().color() {
+                GcTriColor::White => {
                     callback(node, self.heap.as_ref());
+                    node.as_mut().set_color(GcTriColor::Gray);
+                    self.add_node(node);
                 }
-
-                // The TRACED flag is no longer set. The color change from White to Gray
-                // (done by the callback) now serves as the "traced" marker.
-
-                if self.can_trace(pid) {
-                    // collect direct children nodes of `node`
-                    let info =
-                        &self.heap.as_ref().gc_types.type_info_list[node.as_ref().dtype() as usize];
-                    (info.trace_fn)(node, self);
+                GcTriColor::Gray => {
+                    // trace direct children nodes, then mark as black
+                    (self.heap().node_dtypes.type_info_list[node.as_ref().dtype() as usize]
+                        .trace_fn)(node, self);
+                    node.as_mut().set_color(GcTriColor::Black);
+                }
+                GcTriColor::Black => {
+                    #[cfg(debug_assertions)]
+                    unreachable!();
+                    #[cfg(not(debug_assertions))]
+                    unsafe {
+                        std::hint::unreachable_unchecked();
+                    }
                 }
             }
         }
@@ -132,11 +93,14 @@ impl<'a> GcTraceCtx<'a> {
     /// Trace single `node` recursively for all descendant nodes,
     /// apply `callback` on each of them.
     pub fn trace(&mut self, node: NonNull<GcHead>, callback: impl Fn(NonNull<GcHead>, &GcHeap)) {
-        // Note: to avoid cyclic dead loop, must check TRACED flag.
-        self.apply1(node, &callback, false);
+        if unsafe { node.as_ref().color() } != GcTriColor::Black {
+            self.apply1(node, &callback);
 
-        while let Some(ch) = self.traced_nodes.pop_front() {
-            self.apply1(ch, &callback, false);
+            while let Some(ch) = self.traced_nodes.pop_front() {
+                if unsafe { ch.as_ref().color() } != GcTriColor::Black {
+                    self.apply1(ch, &callback);
+                }
+            }
         }
     }
 
@@ -166,13 +130,10 @@ impl<'a> GcTraceCtx<'a> {
 
     pub fn commit(&mut self, callback: impl Fn(NonNull<GcHead>, &GcHeap)) {
         while let Some(n) = self.traced_nodes.pop_front() {
-            self.apply1(n, &callback, false);
+            if unsafe { n.as_ref().color() } != GcTriColor::Black {
+                self.apply1(n, &callback);
+            }
         }
-    }
-
-    /// clear collected nodes
-    pub fn clear(&mut self) {
-        self.traced_nodes.clear();
     }
 
     /// take out collected nodes
@@ -180,16 +141,19 @@ impl<'a> GcTraceCtx<'a> {
         std::mem::take(&mut self.traced_nodes).into()
     }
 
-    /// Submit a node to collected list
+    /// clear collected nodes
+    pub fn clear(&mut self) {
+        self.traced_nodes.clear();
+    }
+
+    /// Submit a node to collected list regardless its color state.
     #[inline]
     pub fn add_node(&mut self, node: NonNull<GcHead>) {
         unsafe {
             #[cfg(debug_assertions)]
             node.as_ref().debug_assert_node_valid(self.heap.as_ref()); // O.o
 
-            if self.can_collect(node.as_ref().scope_id())
-                && !self.traced_nodes.iter().any(|&n| n == node)
-            {
+            if !self.traced_nodes.iter().any(|&n| n == node) {
                 self.traced_nodes.push_back(node);
             }
         }
@@ -210,12 +174,12 @@ impl<'a> GcTraceCtx<'a> {
 }
 
 impl GcHeap {
-    pub fn prepare_for_trace(&mut self) {
+    /// reset all node's color state to White
+    fn reset_color_for_trace(&mut self) {
         for pid in self.partition_ids() {
             for mut n in self.nodes(pid) {
                 unsafe {
                     n.as_mut().set_color(GcTriColor::White);
-                    // The TRACED flag is obsolete; its role is replaced by the node's color.
                 }
             }
         }
@@ -255,7 +219,7 @@ impl GcHeap {
 
             let heap = ctx.heap();
             let dtype = this.as_ref().dtype() as usize;
-            let info = &heap.gc_types.type_info_list[dtype];
+            let info = &heap.node_dtypes.type_info_list[dtype];
             (info.trace_fn)(this, ctx);
 
             let mut children = ctx.take_traced_nodes();
@@ -278,8 +242,8 @@ impl GcHeap {
         mut callback: impl FnMut(NonNull<GcHead>, Option<NonNull<GcHead>>),
     ) {
         // Set all nodes to white to prepare for traversal.
-        self.prepare_for_trace();
-        let mut ctx = GcTraceCtx::new(self, GcTraceRestrict::No, false);
+        self.reset_color_for_trace();
+        let mut ctx = GcTraceCtx::new(self, false);
         Self::traverse_internal(None, node, &mut ctx, filter, &mut callback);
     }
 
@@ -490,7 +454,7 @@ mod tests {
         println!("Child2: {:?}", child2.node_ptr());
 
         // Create trace ctx and trace (using MARK_FUNC)
-        let mut ctx = GcTraceCtx::new(&mut heap, GcTraceRestrict::Collect(partition_id), true);
+        let mut ctx = GcTraceCtx::new(&mut heap, true);
         ctx.trace(root_ref.node_ptr(), GcTraceCtx::MARK_FUNC);
 
         // check marks after tracing
@@ -525,7 +489,7 @@ mod tests {
         let root_ref = heap.alloc(partition_id, root).unwrap();
 
         // Create tracer and trace with Continue
-        let mut ctx = GcTraceCtx::new(&mut heap, GcTraceRestrict::Collect(partition_id), true);
+        let mut ctx = GcTraceCtx::new(&mut heap, true);
         ctx.trace(root_ref.node_ptr(), GcTraceCtx::MARK_FUNC);
 
         // Verify all nodes are marked
@@ -557,12 +521,12 @@ mod tests {
         let level0_ref = heap.alloc(partition_id, level0).unwrap();
 
         // Test with Propagate
-        let mut ctx1 = GcTraceCtx::new(&mut heap, GcTraceRestrict::Collect(partition_id), true);
+        let mut ctx1 = GcTraceCtx::new(&mut heap, true);
         ctx1.trace(level0_ref.node_ptr(), GcTraceCtx::MARK_FUNC);
         assert_eq!(count_non_white_nodes(&heap, partition_id), 4);
 
         // Test with Continue
-        let mut ctx2 = GcTraceCtx::new(&mut heap, GcTraceRestrict::Collect(partition_id), true);
+        let mut ctx2 = GcTraceCtx::new(&mut heap, true);
         ctx2.trace(level0_ref.node_ptr(), GcTraceCtx::MARK_FUNC);
         assert_eq!(count_non_white_nodes(&heap, partition_id), 4);
     }
@@ -601,12 +565,12 @@ mod tests {
         let root_ref = heap.alloc(partition_id, root).unwrap();
 
         // Test with Propagate
-        let mut ctx1 = GcTraceCtx::new(&mut heap, GcTraceRestrict::Collect(partition_id), true);
+        let mut ctx1 = GcTraceCtx::new(&mut heap, true);
         ctx1.trace(root_ref.node_ptr(), GcTraceCtx::MARK_FUNC);
         assert_eq!(count_non_white_nodes(&heap, partition_id), 7);
 
         // Test with Continue
-        let mut ctx2 = GcTraceCtx::new(&mut heap, GcTraceRestrict::Collect(partition_id), true);
+        let mut ctx2 = GcTraceCtx::new(&mut heap, true);
         ctx2.trace(root_ref.node_ptr(), GcTraceCtx::MARK_FUNC);
         assert_eq!(count_non_white_nodes(&heap, partition_id), 7);
     }
@@ -654,12 +618,13 @@ mod tests {
         }
 
         // Test with Propagate
-        let mut ctx1 = GcTraceCtx::new(&mut heap, GcTraceRestrict::Collect(partition_id), true);
+        let mut ctx1 = GcTraceCtx::new(&mut heap, true);
         ctx1.trace(nodes[0].node_ptr(), GcTraceCtx::MARK_FUNC);
         let propagate_marked = count_non_white_nodes(&heap, partition_id);
 
         // Test with Continue
-        let mut ctx2 = GcTraceCtx::new(&mut heap, GcTraceRestrict::Collect(partition_id), true);
+        heap.reset_color_for_trace();
+        let mut ctx2 = GcTraceCtx::new(&mut heap, true);
         ctx2.trace(nodes[0].node_ptr(), GcTraceCtx::MARK_FUNC);
         let continue_marked = count_non_white_nodes(&heap, partition_id);
 
@@ -684,14 +649,15 @@ mod tests {
         }
 
         // Test with Propagate - should handle circular reference without infinite loop
-        let mut ctx1 = GcTraceCtx::new(&mut heap, GcTraceRestrict::Collect(partition_id), true);
+        let mut ctx1 = GcTraceCtx::new(&mut heap, true);
         ctx1.trace(node1.node_ptr(), GcTraceCtx::MARK_FUNC);
 
         // Both nodes should be marked
         assert_eq!(count_non_white_nodes(&heap, partition_id), 2);
 
         // Test with Continue
-        let mut ctx2 = GcTraceCtx::new(&mut heap, GcTraceRestrict::Collect(partition_id), true);
+        heap.reset_color_for_trace();
+        let mut ctx2 = GcTraceCtx::new(&mut heap, true);
         ctx2.trace(node1.node_ptr(), GcTraceCtx::MARK_FUNC);
         assert_eq!(count_non_white_nodes(&heap, partition_id), 2);
     }

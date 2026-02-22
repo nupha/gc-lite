@@ -8,7 +8,7 @@ use smallvec::SmallVec;
 use crate::{GcHead, GcHeap, node::GcNodeFlag};
 
 /// Partition ID
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GcPartitionId(pub u16);
 
 impl GcPartitionId {
@@ -39,6 +39,12 @@ impl GcPartitionId {
         let d = (depth as u16) & Self::DEPTH_MASK;
         let s = serial & Self::SERIAL_MASK;
         Self((d << Self::DEPTH_SHIFT) | s)
+    }
+}
+
+impl std::fmt::Debug for GcPartitionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:02}:{:04}", self.depth(), self.serial())
     }
 }
 
@@ -388,7 +394,7 @@ impl GcHeap {
 
                             self.update_mem_use(
                                 xref,
-                                (self.gc_types.type_info_list
+                                (self.node_dtypes.type_info_list
                                     [unsafe { this.as_ref().dtype() } as usize]
                                     .size as usize
                                     + std::mem::size_of::<GcHead>())

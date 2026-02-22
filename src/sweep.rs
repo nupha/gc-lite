@@ -4,7 +4,7 @@
 use std::ptr::NonNull;
 
 use crate::{
-    GcHeap, GcTraceRestrict,
+    GcHeap,
     node::{GcHead, GcTriColor},
     node_iterator::NodeLinkIter,
     partition::GcPartitionId,
@@ -31,7 +31,7 @@ impl GcHeap {
             let mut link1 = Some(link0);
             let mut freed_bytes = 0;
 
-            let pass_slice = self.gc_types.drop_passes;
+            let pass_slice = self.node_dtypes.drop_passes;
             for &pass in pass_slice {
                 let mut current = link1;
                 let mut prev: Option<NonNull<GcHead>> = None;
@@ -44,7 +44,7 @@ impl GcHeap {
                         current = this.as_mut().next;
 
                         let dtype = this.as_ref().dtype() as usize;
-                        let info = &self.gc_types.type_info_list[dtype];
+                        let info = &self.node_dtypes.type_info_list[dtype];
                         if predicate(this.as_mut()) && info.drop_pass == pass {
                             if let Some(mut p) = prev {
                                 p.as_mut().next = current;
@@ -98,7 +98,7 @@ impl GcHeap {
         on_dispose: impl Fn(&GcHeap, &GcHead),
     ) -> usize {
         if self.partition(partition_id).is_some() {
-            let mut ctx = GcTraceCtx::new(self, GcTraceRestrict::No, true);
+            let mut ctx = GcTraceCtx::new(self, true);
             ctx.trace_roots(partition_id, GcTraceCtx::MARK_FUNC);
             self.sweep(partition_id, Self::SWEEP_UNMARKED_FUNC, on_dispose)
         } else {
@@ -116,7 +116,7 @@ impl GcHeap {
         let mut link = Some(head);
         let mut freed_bytes = 0;
 
-        let pass_slice = self.gc_types.drop_passes;
+        let pass_slice = self.node_dtypes.drop_passes;
         for &pass in pass_slice {
             log::trace!(
                 "[dipose_all] pass {pass}, count={}",
@@ -134,7 +134,7 @@ impl GcHeap {
                     current = this.as_ref().next;
 
                     let dtype = this.as_ref().dtype() as usize;
-                    let info = &self.gc_types.type_info_list[dtype];
+                    let info = &self.node_dtypes.type_info_list[dtype];
                     if info.drop_pass == pass {
                         if let Some(mut p) = prev {
                             p.as_mut().next = current;

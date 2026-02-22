@@ -8,7 +8,7 @@ use crate::{
     gctype::GcTypeRegistry,
     node::{GcHead, GcTriColor},
     partition::{GcPartition, GcPartitionId},
-    trace::{GcTraceCtx, GcTraceRestrict},
+    trace::GcTraceCtx,
 };
 
 pub struct GcHeap {
@@ -16,8 +16,9 @@ pub struct GcHeap {
     pub(super) partitions: HashMap<GcPartitionId, GcPartition>,
     /// Weak reference list, each slot stores (version, GcHeader)
     pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
-    /// Static GC type information table
-    pub(crate) gc_types: &'static GcTypeRegistry,
+    /// Registered GC data type info
+    pub(super) node_dtypes: &'static GcTypeRegistry,
+
     /// User provided opaque raw pointer
     opaque: *mut u8,
 
@@ -62,7 +63,7 @@ impl GcHeap {
             partitions: HashMap::new(),
             weak_slots: Vec::new(),
             opaque: std::ptr::null_mut(),
-            gc_types: registry,
+            node_dtypes: registry,
 
             #[cfg(debug_assertions)]
             dbg_dropping_root_partition: None,
@@ -308,7 +309,7 @@ impl GcHeap {
             }
         }
 
-        let mut ctx = GcTraceCtx::new(self, GcTraceRestrict::Collect(partition_id), true);
+        let mut ctx = GcTraceCtx::new(self, true);
         ctx.trace_iter(stack.iter().copied(), GcTraceCtx::MARK_FUNC);
 
         let b = unsafe { node.as_ref().color() != GcTriColor::White };

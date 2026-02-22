@@ -19,7 +19,7 @@ pub use {
     helpers::{GcError, GcResult},
     node::{GcHead, GcNode, GcRef},
     partition::{GcPartition, GcPartitionId},
-    trace::{GcTracable, GcTraceCtx, GcTraceRestrict},
+    trace::{GcTracable, GcTraceCtx},
     weak::GcWeak,
 };
 

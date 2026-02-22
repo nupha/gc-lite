@@ -39,13 +39,22 @@ impl GcHead {
 impl GcHeap {
     /// add nodes relationship for directed reference: from `master` to `slave`
     pub fn bind(&mut self, master: NonNull<GcHead>, slave: NonNull<GcHead>) {
-        self.set_xref(unsafe { master.as_ref().scope_id() }, slave);
+        let xref = unsafe {
+            let x = master.as_ref().xref();
+            if x.is_null() {
+                master.as_ref().scope_id()
+            } else {
+                x
+            }
+        };
+
+        self.set_xref(xref, slave);
     }
 
     /// Updates the node's cross-reference partition to a more general ancestor.
     /// Returns true if node's xref was updated, false if not.
-    pub fn set_xref(&mut self, xref: GcPartitionId, mut node: NonNull<GcHead>) -> bool {
-        debug_assert!(self.partition(xref).is_some());
+    pub fn set_xref(&mut self, from_scope: GcPartitionId, mut node: NonNull<GcHead>) -> bool {
+        debug_assert!(self.partition(from_scope).is_some());
 
         let (node_pid, xref0) = unsafe {
             let n = node.as_ref();
@@ -55,12 +64,12 @@ impl GcHeap {
             node.as_ref()
         });
 
-        if xref == node_pid || xref == xref0 {
+        if from_scope == node_pid || from_scope == xref0 {
             return false;
         }
 
         // Find common parent of (from_partition, node_partition) as up
-        let mut up = self.common_parent2(xref, node_pid);
+        let mut up = self.common_parent2(from_scope, node_pid);
         debug_assert!(!up.is_null());
 
         if up == node_pid || up == xref0 {
@@ -69,7 +78,7 @@ impl GcHeap {
 
         if !xref0.is_null() {
             // Find common parent of (from_partition, xref0)
-            let up2 = self.common_parent2(xref, xref0);
+            let up2 = self.common_parent2(from_scope, xref0);
             debug_assert!(!up2.is_null());
 
             if up2 == xref0 {

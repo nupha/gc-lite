@@ -7,9 +7,7 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::{
-    GcHeap, GcPartitionId, GcTracable, GcTraceCtx, GcTraceRestrict, GcWeak, weak::GcWeakRawId,
-};
+use crate::{GcHeap, GcPartitionId, GcTracable, GcWeak, weak::GcWeakRawId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -78,7 +76,7 @@ impl std::fmt::Debug for GcHead {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("GcNode");
         s.field("ptr", &(self as *const Self))
-            .field("scope", &self.scope_id().0)
+            .field("scope", &self.scope_id())
             .field("color", &self.color());
 
         if !self.xref().is_null() {
@@ -101,25 +99,25 @@ impl std::fmt::Debug for GcHead {
 impl GcHead {
     /// Get gc node data type id
     #[inline(always)]
-    pub fn dtype(&self) -> u8 {
+    pub(crate) fn dtype(&self) -> u8 {
         ((self.attrs & 0xFF00) >> 8) as u8
     }
 
     /// Get the current TriColor state.
     #[inline(always)]
-    pub fn color(&self) -> GcTriColor {
+    pub(crate) fn color(&self) -> GcTriColor {
         // This should not fail if the internal state is managed correctly.
         GcTriColor::try_from(self.attrs & COLOR_MASK).unwrap()
     }
 
     /// Set the TriColor state, preserving other flags.
     #[inline(always)]
-    pub fn set_color(&mut self, color: GcTriColor) {
+    pub(crate) fn set_color(&mut self, color: GcTriColor) {
         self.attrs = (self.attrs & !COLOR_MASK) | (color as u32);
     }
 
     #[inline(always)]
-    pub fn flags(&self) -> GcNodeFlag {
+    pub(crate) fn flags(&self) -> GcNodeFlag {
         GcNodeFlag::from_bits_truncate(self.attrs as u8)
     }
 
@@ -149,7 +147,7 @@ impl GcHead {
 
     /// Check if a flag is present.
     #[inline(always)]
-    pub fn contains_flag(&self, flag: GcNodeFlag) -> bool {
+    pub(crate) fn contains_flag(&self, flag: GcNodeFlag) -> bool {
         (self.attrs & flag.bits() as u32) == flag.bits() as u32
     }
 
@@ -190,16 +188,8 @@ impl GcHead {
         unsafe { NonNull::from_ref(self).add(1).cast::<u8>() }
     }
 
-    /// Get direct referencing children nodes
-    pub fn gc_children(&self, heap: &mut GcHeap) -> Vec<NonNull<GcHead>> {
-        let mut ctx = GcTraceCtx::new(heap, GcTraceRestrict::No, false);
-        let dtype = self.dtype() as usize;
-        let info = &ctx.heap().gc_types.type_info_list[dtype];
-        (info.trace_fn)(NonNull::from_ref(self), &mut ctx);
-        ctx.take_traced_nodes()
-    }
-
     /// Get GcRef<T> from node. if node is not of type T, returns None
+    #[inline(always)]
     pub fn gc_ref<T: GcNode>(&self) -> Option<GcRef<T>> {
         if T::GC_TYPE_ID == self.dtype() {
             Some(GcRef::<T> {
@@ -393,15 +383,6 @@ impl GcHead {
                 "[O.o] bad node: {self:p}"
             );
             self.debug_assert_node_valid_simple();
-        }
-    }
-
-    pub fn debug_assert_node_tree_valid(&self, heap: &mut GcHeap) {
-        if !std::thread::panicking() {
-            let mut gcx = GcTraceCtx::new(heap, GcTraceRestrict::No, false);
-            gcx.trace(NonNull::from_ref(self), |n, _| unsafe {
-                n.as_ref().debug_assert_node_valid(heap);
-            });
         }
     }
 }

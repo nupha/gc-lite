@@ -151,7 +151,7 @@ impl GcHeap {
         }
 
         let dtype = hd.dtype() as usize;
-        let info = &self.gc_types.type_info_list[dtype];
+        let info = &self.node_dtypes.type_info_list[dtype];
         let gross_size = std::mem::size_of::<GcHead>() + info.size as usize;
 
         #[cfg(debug_assertions)]
