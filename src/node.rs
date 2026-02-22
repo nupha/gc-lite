@@ -48,8 +48,6 @@ bitflags::bitflags! {
         // bit 0, 1 are for TriColor
         /// is root node
         const ROOT = 1 << 2;
-        /// node has been traced? internal use
-        const TRACED = 1 << 3;
 
         #[cfg(debug_assertions)]
         const MAGIC_NUM = 1 << 7;
@@ -167,11 +165,6 @@ impl GcHead {
         } else {
             self.remove_flag(GcNodeFlag::ROOT);
         }
-    }
-
-    #[inline(always)]
-    pub fn is_traced(&self) -> bool {
-        self.contains_flag(GcNodeFlag::TRACED)
     }
 
     /// Get scope of node

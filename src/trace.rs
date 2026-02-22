@@ -108,14 +108,16 @@ impl<'a> GcTraceCtx<'a> {
 
             let pid = node.as_ref().scope_id();
 
-            if ignore_trace_flag || !node.as_ref().flags().contains(GcNodeFlag::TRACED) {
+            // Only process white nodes to prevent cycles and redundant work.
+            // The `ignore_trace_flag` is kept for API compatibility, but the primary
+            // tracing logic now relies on the tri-color state.
+            if ignore_trace_flag || node.as_ref().color() == GcTriColor::White {
                 if self.can_collect(pid) {
                     callback(node, self.heap.as_ref());
                 }
 
-                if !ignore_trace_flag {
-                    (*node.as_ptr()).set_flags(node.as_ref().flags().union(GcNodeFlag::TRACED));
-                }
+                // The TRACED flag is no longer set. The color change from White to Gray
+                // (done by the callback) now serves as the "traced" marker.
 
                 if self.can_trace(pid) {
                     // collect direct children nodes of `node`
@@ -213,9 +215,7 @@ impl GcHeap {
             for mut n in self.nodes(pid) {
                 unsafe {
                     n.as_mut().set_color(GcTriColor::White);
-                    let mut flags = n.as_ref().flags();
-                    flags.remove(GcNodeFlag::TRACED);
-                    n.as_mut().set_flags(flags);
+                    // The TRACED flag is obsolete; its role is replaced by the node's color.
                 }
             }
         }
@@ -248,8 +248,10 @@ impl GcHeap {
                 callback(this, parent);
             }
 
-            let f = this.as_ref().flags();
-            this.as_mut().set_flags(f.union(GcNodeFlag::TRACED));
+            // Mark the node as visited by changing its color. This replaces the TRACED flag.
+            if this.as_ref().color() == GcTriColor::White {
+                this.as_mut().set_color(GcTriColor::Gray);
+            }
 
             let heap = ctx.heap();
             let dtype = this.as_ref().gc_type() as usize;
@@ -258,7 +260,8 @@ impl GcHeap {
 
             let mut children = ctx.take_traced_nodes();
             while let Some(ch) = children.pop() {
-                if !ch.as_ref().is_traced() {
+                // Recurse only on unvisited (white) nodes.
+                if ch.as_ref().color() == GcTriColor::White {
                     Self::traverse_internal(Some(this), ch, ctx, filter, callback);
                 }
             }
@@ -274,8 +277,8 @@ impl GcHeap {
         filter: GcPartitionId,
         mut callback: impl FnMut(NonNull<GcHead>, Option<NonNull<GcHead>>),
     ) {
-        // clear nodes's traced flag for all scopes
-        self.clear_node_flags(GcNodeFlag::TRACED);
+        // Set all nodes to white to prepare for traversal.
+        self.prepare_for_trace();
         let mut ctx = GcTraceCtx::new(self, GcTraceRestrict::No, false);
         Self::traverse_internal(None, node, &mut ctx, filter, &mut callback);
     }
