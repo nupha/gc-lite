@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 use std::{cell::Cell, ptr::NonNull};
 
@@ -287,7 +287,7 @@ impl GcHeap {
     pub fn remove_partition(
         &mut self,
         partition_id: GcPartitionId,
-        on_migrate: impl Fn(&GcHeap, &GcHead, GcPartitionId),
+        on_promote: impl Fn(&GcHeap, &GcHead, GcPartitionId),
         on_dispose: impl Fn(&GcHeap, &GcHead),
     ) {
         let parent_id = if let Some(par) = self.partition(partition_id) {
@@ -306,7 +306,7 @@ impl GcHeap {
         self.load_descendants(partition_id, &mut scopes);
 
         // remove resursivly from leaves to partition
-        let call_on_migrate = !std::ptr::addr_eq(&on_migrate, &GcHeap::DUMMY_MIGRATE_CALLBACK);
+        let call_on_promote = !std::ptr::addr_eq(&on_promote, &GcHeap::DUMMY_MIGRATE_CALLBACK);
         let mut freed_bytes = 0;
 
         while let Some(pid) = scopes.pop() {
@@ -349,7 +349,7 @@ impl GcHeap {
 
             if let Some(mut par) = self.partitions.remove(&pid) {
                 if let Some(link0_head) = par.nodes.take() {
-                    // migrate xref nodes
+                    // promote xref nodes
                     let mut link1 = Some(link0_head);
                     let mut current = Some(link0_head);
                     let mut prev: Option<NonNull<GcHead>> = None;
@@ -359,7 +359,7 @@ impl GcHeap {
 
                         let xref = unsafe { this.as_ref().xref() };
                         if !xref.is_null() {
-                            log::trace!("[migrate] {:?} -> {xref:?}", unsafe { this.as_ref() });
+                            log::trace!("[promote] {:?} -> {xref:?}", unsafe { this.as_ref() });
                             debug_assert_ne!(xref, pid);
 
                             if let Some(p) = prev {
@@ -370,21 +370,23 @@ impl GcHeap {
                                 link1 = current;
                             }
 
-                            if call_on_migrate {
-                                on_migrate(self, unsafe { this.as_ref() }, xref);
+                            if call_on_promote {
+                                on_promote(self, unsafe { this.as_ref() }, xref);
                             }
 
                             // clear flags and attach to xref chain
                             unsafe {
-                                let mut f = this.as_ref().flags();
+                                let n = this.as_mut();
+                                let mut f = n.flags();
+
                                 f.remove(
                                     GcNodeFlag::ROOT | GcNodeFlag::MARKED | GcNodeFlag::TRACED,
                                 );
-                                this.as_mut().set_flags(f);
-                                this.as_mut().unset_scope_id();
-                                this.as_mut().next.take();
+                                n.set_flags(f);
+                                n.partition = 0;
+                                n.next.take();
                             }
-                            self.attach(xref, this);
+                            self.attach_node(xref, this);
 
                             self.update_mem_use(
                                 xref,

@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 use std::{
     marker::PhantomData,
@@ -141,11 +141,6 @@ impl GcHead {
     pub(crate) fn set_scope_id(&mut self, id: GcPartitionId) {
         debug_assert!(self.scope_id().is_null() || self.scope_id() == id);
         self.partition = (self.partition & 0xFFFF_0000) | id.0 as u32;
-    }
-
-    #[inline(always)]
-    pub(crate) fn unset_scope_id(&mut self) {
-        self.partition = self.partition & 0xFFFF_0000;
     }
 
     /// get node weakref info

@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 use std::{alloc::Layout, marker::PhantomData, ptr::NonNull};
 
@@ -112,7 +112,7 @@ impl GcHeap {
                     }
 
                     // Add to nodes link
-                    self.attach(scope, head);
+                    self.attach_node(scope, head);
                     // Update memory usage with rollup to parent partitions
                     self.update_mem_use(scope, gross_size as i32);
 

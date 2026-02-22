@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2025-2026 John Ray <996351336@qq.com>
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
 use std::{collections::HashMap, ptr::NonNull};
 
@@ -202,28 +202,23 @@ impl GcHeap {
     ///
     /// This method **DO NOT** increase partitions' mem_use.
     #[inline]
-    pub(crate) fn attach(&mut self, partition_id: GcPartitionId, mut node: NonNull<GcHead>) {
+    pub(crate) fn attach_node(&mut self, partition_id: GcPartitionId, mut node: NonNull<GcHead>) {
         debug_assert!(!partition_id.is_null());
 
         unsafe {
             debug_assert!(node.as_ref().scope_id().is_null());
             debug_assert!(node.as_ref().next.is_none());
-
-            let xref = node.as_ref().xref();
+            debug_assert!(node.as_ref().xref().is_null());
 
             node.as_mut().set_scope_id(partition_id);
-            if xref == partition_id {
-                node.as_mut().unset_xref();
-            } else if !xref.is_null() {
-                debug_assert!(self.common_parent2(xref, partition_id) != partition_id);
-                self.set_root_node(node, true);
-            }
-
-            let par = self.partitions.get_mut(&partition_id).unwrap();
-            let cur_head = par.nodes.take();
-            node.as_mut().next = cur_head;
-            par.nodes = Some(node);
         }
+
+        let par = self.partitions.get_mut(&partition_id).unwrap();
+        let link_head = par.nodes.take();
+        unsafe {
+            node.as_mut().next = link_head;
+        }
+        par.nodes = Some(node);
     }
 
     /// Set/unset a node to be root
