@@ -84,7 +84,8 @@ impl std::fmt::Debug for GcHead {
         if !self.xref().is_null() {
             s.field("xref", &self.xref().0);
         }
-        if let Some(w) = self.weak() {
+        if !self.weak_id.is_null() {
+            let w = self.weak_id;
             s.field("weakref", &format!("{}#{}", w.index(), w.version()));
         }
 
@@ -98,9 +99,9 @@ impl std::fmt::Debug for GcHead {
 }
 
 impl GcHead {
-    /// Get node gc data type id
+    /// Get gc node data type id
     #[inline(always)]
-    pub fn gc_type(&self) -> u8 {
+    pub fn dtype(&self) -> u8 {
         ((self.attrs & 0xFF00) >> 8) as u8
     }
 
@@ -180,15 +181,6 @@ impl GcHead {
         self.partition = (self.partition & 0xFFFF_0000) | id.0 as u32;
     }
 
-    /// get node weakref info
-    pub fn weak(&self) -> Option<GcWeakRawId> {
-        if self.weak_id.is_null() {
-            None
-        } else {
-            Some(self.weak_id)
-        }
-    }
-
     /// get raw pointer to payload data
     #[inline(always)]
     pub fn payload(&self) -> NonNull<u8> {
@@ -201,7 +193,7 @@ impl GcHead {
     /// Get direct referencing children nodes
     pub fn gc_children(&self, heap: &mut GcHeap) -> Vec<NonNull<GcHead>> {
         let mut ctx = GcTraceCtx::new(heap, GcTraceRestrict::No, false);
-        let dtype = self.gc_type() as usize;
+        let dtype = self.dtype() as usize;
         let info = &ctx.heap().gc_types.type_info_list[dtype];
         (info.trace_fn)(NonNull::from_ref(self), &mut ctx);
         ctx.take_traced_nodes()
@@ -209,7 +201,7 @@ impl GcHead {
 
     /// Get GcRef<T> from node. if node is not of type T, returns None
     pub fn gc_ref<T: GcNode>(&self) -> Option<GcRef<T>> {
-        if T::GC_TYPE_ID == self.gc_type() {
+        if T::GC_TYPE_ID == self.dtype() {
             Some(GcRef::<T> {
                 head_ptr: NonNull::from_ref(self),
                 _marker: PhantomData,
@@ -221,6 +213,7 @@ impl GcHead {
 }
 
 pub trait GcNode: GcTracable {
+    /// Node data type id
     const GC_TYPE_ID: u8;
 }
 
@@ -307,7 +300,7 @@ impl<T: GcNode> GcRef<T> {
                 .cast::<GcHead>()
         };
 
-        if T::GC_TYPE_ID == unsafe { node.as_ref().gc_type() } {
+        if T::GC_TYPE_ID == unsafe { node.as_ref().dtype() } {
             #[cfg(debug_assertions)]
             unsafe {
                 node.as_ref().debug_assert_node_valid(heap);

@@ -43,7 +43,7 @@ impl GcHeap {
 
                         current = this.as_mut().next;
 
-                        let dtype = this.as_ref().gc_type() as usize;
+                        let dtype = this.as_ref().dtype() as usize;
                         let info = &self.gc_types.type_info_list[dtype];
                         if predicate(this.as_mut()) && info.drop_pass == pass {
                             if let Some(mut p) = prev {
@@ -133,7 +133,7 @@ impl GcHeap {
 
                     current = this.as_ref().next;
 
-                    let dtype = this.as_ref().gc_type() as usize;
+                    let dtype = this.as_ref().dtype() as usize;
                     let info = &self.gc_types.type_info_list[dtype];
                     if info.drop_pass == pass {
                         if let Some(mut p) = prev {

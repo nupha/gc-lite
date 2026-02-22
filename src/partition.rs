@@ -389,7 +389,7 @@ impl GcHeap {
                             self.update_mem_use(
                                 xref,
                                 (self.gc_types.type_info_list
-                                    [unsafe { this.as_ref().gc_type() } as usize]
+                                    [unsafe { this.as_ref().dtype() } as usize]
                                     .size as usize
                                     + std::mem::size_of::<GcHead>())
                                     as i32,

@@ -93,7 +93,7 @@ mod xref_tests {
 
     use super::*;
     use crate::{
-        GcNode, GcRef,
+        GcRef,
         trace::{GcTracable, GcTraceCtx},
     };
 
