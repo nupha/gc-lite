@@ -11,16 +11,45 @@ use crate::{
     GcHeap, GcPartitionId, GcTracable, GcTraceCtx, GcTraceRestrict, GcWeak, weak::GcWeakRawId,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum GcTriColor {
+    White = 0b00,
+    Gray = 0b01,
+    Black = 0b10,
+}
+
+impl From<GcTriColor> for u32 {
+    fn from(color: GcTriColor) -> Self {
+        color as u32
+    }
+}
+
+impl TryFrom<u32> for GcTriColor {
+    type Error = &'static str;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            0b00 => Ok(GcTriColor::White),
+            0b01 => Ok(GcTriColor::Gray),
+            0b10 => Ok(GcTriColor::Black),
+            _ => Err("Invalid value for TriColor"),
+        }
+    }
+}
+
+const COLOR_MASK: u32 = 0b11;
+const FLAGS_ATTR_MASK: u32 = 0xFF;
+
 bitflags::bitflags! {
     #[repr(transparent)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct GcNodeFlag :u8 {
-        /// is marked
-        const MARKED = 1 << 0;
+        // bit 0, 1 are for TriColor
         /// is root node
-        const ROOT = 1 << 1;
+        const ROOT = 1 << 2;
         /// node has been traced? internal use
-        const TRACED = 1 << 2;
+        const TRACED = 1 << 3;
 
         #[cfg(debug_assertions)]
         const MAGIC_NUM = 1 << 7;
@@ -31,7 +60,8 @@ bitflags::bitflags! {
 pub struct GcHead {
     /// Attributes of node:
     /// * bit 8-15:  gc datatype id
-    /// * bit 0-7:   flags
+    /// * bit 2-7:   flags
+    /// * bit 0-1:   TriColor state
     pub(super) attrs: u32,
 
     /// XRef partition id (16bit) + Partition id (16bit)
@@ -50,13 +80,14 @@ impl std::fmt::Debug for GcHead {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("GcNode");
         s.field("ptr", &(self as *const Self))
-            .field("scope", &self.scope_id().0);
+            .field("scope", &self.scope_id().0)
+            .field("color", &self.color());
 
         if !self.xref().is_null() {
             s.field("xref", &self.xref().0);
         }
         if let Some(w) = self.weak() {
-            s.field("weak", &format!("{}#{}", w.index(), w.version()));
+            s.field("weakref", &format!("{}#{}", w.index(), w.version()));
         }
 
         #[cfg(debug_assertions)]
@@ -75,9 +106,22 @@ impl GcHead {
         ((self.attrs & 0xFF00) >> 8) as u8
     }
 
+    /// Get the current TriColor state.
+    #[inline(always)]
+    pub fn color(&self) -> GcTriColor {
+        // This should not fail if the internal state is managed correctly.
+        GcTriColor::try_from(self.attrs & COLOR_MASK).unwrap()
+    }
+
+    /// Set the TriColor state, preserving other flags.
+    #[inline(always)]
+    pub fn set_color(&mut self, color: GcTriColor) {
+        self.attrs = (self.attrs & !COLOR_MASK) | (color as u32);
+    }
+
     #[inline(always)]
     pub fn flags(&self) -> GcNodeFlag {
-        GcNodeFlag::from_bits_retain(self.attrs as u8)
+        GcNodeFlag::from_bits_truncate(self.attrs as u8)
     }
 
     #[inline(always)]
@@ -88,46 +132,46 @@ impl GcHead {
             "MAGIC_NUM flag is missing"
         );
 
-        self.attrs = (self.attrs & !0xFF) | (flags.bits() as u32);
+        self.attrs =
+            (self.attrs & !FLAGS_ATTR_MASK) | (flags.bits() as u32) | (self.attrs & COLOR_MASK);
     }
 
-    /// Check if marked
+    /// Add a flag.
     #[inline(always)]
-    pub fn is_marked(&self) -> bool {
-        self.flags().contains(GcNodeFlag::MARKED)
+    pub(crate) fn insert_flag(&mut self, flag: GcNodeFlag) {
+        self.attrs |= flag.bits() as u32;
     }
 
-    /// Set/clear mark flag
-    pub fn set_marked(&mut self, mark: bool) {
-        let mut f = self.flags();
-        if mark {
-            f.insert(GcNodeFlag::MARKED);
-        } else {
-            f.remove(GcNodeFlag::MARKED);
-        }
-        self.set_flags(f);
+    /// Remove a flag.
+    #[inline(always)]
+    pub(crate) fn remove_flag(&mut self, flag: GcNodeFlag) {
+        self.attrs &= !(flag.bits() as u32);
+    }
+
+    /// Check if a flag is present.
+    #[inline(always)]
+    pub fn contains_flag(&self, flag: GcNodeFlag) -> bool {
+        (self.attrs & flag.bits() as u32) == flag.bits() as u32
     }
 
     /// Check if root node
     #[inline(always)]
     pub fn is_root(&self) -> bool {
-        self.flags().contains(GcNodeFlag::ROOT)
+        self.contains_flag(GcNodeFlag::ROOT)
     }
 
     /// Set/clear root object flag
     pub(super) fn set_root(&mut self, is_root: bool) {
-        let mut f = self.flags();
         if is_root {
-            f.insert(GcNodeFlag::ROOT);
+            self.insert_flag(GcNodeFlag::ROOT);
         } else {
-            f.remove(GcNodeFlag::ROOT);
+            self.remove_flag(GcNodeFlag::ROOT);
         }
-        self.set_flags(f);
     }
 
     #[inline(always)]
     pub fn is_traced(&self) -> bool {
-        self.flags().contains(GcNodeFlag::TRACED)
+        self.contains_flag(GcNodeFlag::TRACED)
     }
 
     /// Get scope of node

@@ -4,12 +4,15 @@
 use std::ptr::NonNull;
 
 use crate::{
-    GcHeap, GcTraceRestrict, node::GcHead, node_iterator::NodeLinkIter, partition::GcPartitionId,
+    GcHeap, GcTraceRestrict,
+    node::{GcHead, GcTriColor},
+    node_iterator::NodeLinkIter,
+    partition::GcPartitionId,
     trace::GcTraceCtx,
 };
 
 impl GcHeap {
-    pub const SWEEP_UNMARKED_FUNC: fn(&GcHead) -> bool = |node| !node.is_marked();
+    pub const SWEEP_UNMARKED_FUNC: fn(&GcHead) -> bool = |node| node.color() == GcTriColor::White;
 
     /// optionally call `on_dispose` before a node is disposed
     pub fn sweep(

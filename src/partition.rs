@@ -379,9 +379,7 @@ impl GcHeap {
                                 let n = this.as_mut();
                                 let mut f = n.flags();
 
-                                f.remove(
-                                    GcNodeFlag::ROOT | GcNodeFlag::MARKED | GcNodeFlag::TRACED,
-                                );
+                                f.remove(GcNodeFlag::ROOT | GcNodeFlag::TRACED);
                                 n.set_flags(f);
                                 n.partition = 0;
                                 n.next.take();

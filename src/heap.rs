@@ -6,7 +6,7 @@ use std::{collections::HashMap, ptr::NonNull};
 use crate::{
     GcNode, GcRef,
     gctype::GcTypeRegistry,
-    node::{GcHead, GcNodeFlag},
+    node::{GcHead, GcTriColor},
     partition::{GcPartition, GcPartitionId},
     trace::{GcTraceCtx, GcTraceRestrict},
 };
@@ -311,9 +311,16 @@ impl GcHeap {
         let mut ctx = GcTraceCtx::new(self, GcTraceRestrict::Collect(partition_id), true);
         ctx.trace_iter(stack.iter().copied(), GcTraceCtx::MARK_FUNC);
 
-        let b = unsafe { node.as_ref().is_marked() };
+        let b = unsafe { node.as_ref().color() != GcTriColor::White };
 
-        self.clear_node_flags(GcNodeFlag::MARKED);
+        // Reset all nodes to white for the next GC cycle
+        for p_id in self.partition_ids() {
+            for mut n in self.nodes(p_id) {
+                unsafe {
+                    n.as_mut().set_color(GcTriColor::White);
+                }
+            }
+        }
 
         b
     }

@@ -5,7 +5,7 @@ use std::{collections::VecDeque, marker::PhantomData, ptr::NonNull};
 
 use crate::{
     GcHeap, GcNode, GcPartitionId, GcRef,
-    node::{GcHead, GcNodeFlag},
+    node::{GcHead, GcNodeFlag, GcTriColor},
 };
 
 pub unsafe trait GcTracable: 'static {
@@ -45,21 +45,21 @@ impl<'a> GcTraceCtx<'a> {
     #[allow(non_snake_case)]
     pub fn MARK_FUNC(mut h: NonNull<GcHead>, _: &GcHeap) {
         unsafe {
-            if !h.as_ref().is_marked() {
-                h.as_mut().set_marked(true);
+            if h.as_ref().color() == GcTriColor::White {
+                h.as_mut().set_color(GcTriColor::Gray);
             }
         }
     }
 
     /// create new trace ctx, optionally clear all nodes' visit and mark flags.
-    pub fn new(heap: &mut GcHeap, restrict: GcTraceRestrict, clear_flags: bool) -> Self {
+    pub fn new(heap: &mut GcHeap, restrict: GcTraceRestrict, prepare_trace: bool) -> Self {
         #[cfg(debug_assertions)]
         if let GcTraceRestrict::Collect(pid) | GcTraceRestrict::TraceCollect(pid) = restrict {
             debug_assert!(heap.partition(pid).is_some());
         }
 
-        if clear_flags {
-            heap.clear_node_flags(GcNodeFlag::MARKED | GcNodeFlag::TRACED);
+        if prepare_trace {
+            heap.prepare_for_trace();
         }
 
         GcTraceCtx {
@@ -78,20 +78,6 @@ impl<'a> GcTraceCtx<'a> {
     #[inline(always)]
     pub fn heap_mut(&mut self) -> &mut GcHeap {
         unsafe { self.heap.as_mut() }
-    }
-
-    #[inline(always)]
-    pub fn clear_marked_flag(&mut self) {
-        unsafe {
-            self.heap.as_mut().clear_node_flags(GcNodeFlag::MARKED);
-        }
-    }
-
-    #[inline(always)]
-    pub fn clear_traced_flag(&mut self) {
-        unsafe {
-            self.heap.as_mut().clear_node_flags(GcNodeFlag::TRACED);
-        }
     }
 
     #[inline(always)]
@@ -222,6 +208,19 @@ impl<'a> GcTraceCtx<'a> {
 }
 
 impl GcHeap {
+    pub fn prepare_for_trace(&mut self) {
+        for pid in self.partition_ids() {
+            for mut n in self.nodes(pid) {
+                unsafe {
+                    n.as_mut().set_color(GcTriColor::White);
+                    let mut flags = n.as_ref().flags();
+                    flags.remove(GcNodeFlag::TRACED);
+                    n.as_mut().set_flags(flags);
+                }
+            }
+        }
+    }
+
     pub fn clear_node_flags(&mut self, clear_mask: GcNodeFlag) {
         for pid in self.partition_ids() {
             unsafe {
@@ -431,13 +430,13 @@ mod tests {
     }
 
     /// Helper function to count marked nodes in a partition
-    fn count_marked_nodes(heap: &GcHeap, partition_id: GcPartitionId) -> usize {
+    fn count_non_white_nodes(heap: &GcHeap, partition_id: GcPartitionId) -> usize {
         let mut count = 0;
         if let Some(partition) = heap.partitions.get(&partition_id) {
             let mut current = partition.nodes;
             while let Some(node) = current {
                 unsafe {
-                    if node.as_ref().is_marked() {
+                    if node.as_ref().color() != GcTriColor::White {
                         count += 1;
                     }
                     current = node.as_ref().next;
@@ -494,11 +493,11 @@ mod tests {
         // check marks after tracing
         println!(
             "Marks after tracing: {}",
-            count_marked_nodes(&heap, partition_id)
+            count_non_white_nodes(&heap, partition_id)
         );
 
         // Verify all nodes are marked
-        assert_eq!(count_marked_nodes(&heap, partition_id), 3);
+        assert_eq!(count_non_white_nodes(&heap, partition_id), 3);
 
         // Verify all node IDs are present
         let ids = get_all_node_ids(&heap, partition_id);
@@ -527,7 +526,7 @@ mod tests {
         ctx.trace(root_ref.node_ptr(), GcTraceCtx::MARK_FUNC);
 
         // Verify all nodes are marked
-        assert_eq!(count_marked_nodes(&heap, partition_id), 3);
+        assert_eq!(count_non_white_nodes(&heap, partition_id), 3);
 
         // Verify pendings is empty after processing
         assert!(ctx.traced_nodes.is_empty());
@@ -557,12 +556,12 @@ mod tests {
         // Test with Propagate
         let mut ctx1 = GcTraceCtx::new(&mut heap, GcTraceRestrict::Collect(partition_id), true);
         ctx1.trace(level0_ref.node_ptr(), GcTraceCtx::MARK_FUNC);
-        assert_eq!(count_marked_nodes(&heap, partition_id), 4);
+        assert_eq!(count_non_white_nodes(&heap, partition_id), 4);
 
         // Test with Continue
         let mut ctx2 = GcTraceCtx::new(&mut heap, GcTraceRestrict::Collect(partition_id), true);
         ctx2.trace(level0_ref.node_ptr(), GcTraceCtx::MARK_FUNC);
-        assert_eq!(count_marked_nodes(&heap, partition_id), 4);
+        assert_eq!(count_non_white_nodes(&heap, partition_id), 4);
     }
 
     /// Test 4: Complex tree with multiple branches
@@ -601,12 +600,12 @@ mod tests {
         // Test with Propagate
         let mut ctx1 = GcTraceCtx::new(&mut heap, GcTraceRestrict::Collect(partition_id), true);
         ctx1.trace(root_ref.node_ptr(), GcTraceCtx::MARK_FUNC);
-        assert_eq!(count_marked_nodes(&heap, partition_id), 7);
+        assert_eq!(count_non_white_nodes(&heap, partition_id), 7);
 
         // Test with Continue
         let mut ctx2 = GcTraceCtx::new(&mut heap, GcTraceRestrict::Collect(partition_id), true);
         ctx2.trace(root_ref.node_ptr(), GcTraceCtx::MARK_FUNC);
-        assert_eq!(count_marked_nodes(&heap, partition_id), 7);
+        assert_eq!(count_non_white_nodes(&heap, partition_id), 7);
     }
 
     /// Test 5: Verify both algorithms produce same result
@@ -654,12 +653,12 @@ mod tests {
         // Test with Propagate
         let mut ctx1 = GcTraceCtx::new(&mut heap, GcTraceRestrict::Collect(partition_id), true);
         ctx1.trace(nodes[0].node_ptr(), GcTraceCtx::MARK_FUNC);
-        let propagate_marked = count_marked_nodes(&heap, partition_id);
+        let propagate_marked = count_non_white_nodes(&heap, partition_id);
 
         // Test with Continue
         let mut ctx2 = GcTraceCtx::new(&mut heap, GcTraceRestrict::Collect(partition_id), true);
         ctx2.trace(nodes[0].node_ptr(), GcTraceCtx::MARK_FUNC);
-        let continue_marked = count_marked_nodes(&heap, partition_id);
+        let continue_marked = count_non_white_nodes(&heap, partition_id);
 
         // Both algorithms should mark the same number of nodes
         assert_eq!(propagate_marked, continue_marked);
@@ -686,11 +685,11 @@ mod tests {
         ctx1.trace(node1.node_ptr(), GcTraceCtx::MARK_FUNC);
 
         // Both nodes should be marked
-        assert_eq!(count_marked_nodes(&heap, partition_id), 2);
+        assert_eq!(count_non_white_nodes(&heap, partition_id), 2);
 
         // Test with Continue
         let mut ctx2 = GcTraceCtx::new(&mut heap, GcTraceRestrict::Collect(partition_id), true);
         ctx2.trace(node1.node_ptr(), GcTraceCtx::MARK_FUNC);
-        assert_eq!(count_marked_nodes(&heap, partition_id), 2);
+        assert_eq!(count_non_white_nodes(&heap, partition_id), 2);
     }
 }
