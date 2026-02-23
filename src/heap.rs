@@ -6,7 +6,7 @@ use std::{collections::HashMap, ptr::NonNull};
 use crate::{
     GcNode, GcRef,
     gctype::GcTypeRegistry,
-    node::GcHead,
+    node::{GcHead, GcTriColor},
     partition::{GcPartition, GcPartitionId},
 };
 
@@ -53,7 +53,7 @@ impl GcHeap {
     //
     // default callbacks
     //
-    pub const DUMMY_MIGRATE_CALLBACK: fn(&GcHeap, &GcHead, GcPartitionId) = |_, _, _| {};
+    pub const DUMMY_PROMOTE_CALLBACK: fn(&GcHeap, &GcHead, GcPartitionId) = |_, _, _| {};
     pub const DUMMY_DISPOSE_CALLBACK: fn(&GcHeap, &GcHead) = |_, _| {};
 
     /// Create a new garbage collection heap with an explicit GC type registry

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{marker::PhantomData, ptr::NonNull};
+use std::{collections::VecDeque, marker::PhantomData, ptr::NonNull};
 
 use crate::{
     GcHeap, GcNode, GcPartitionId, GcRef,
@@ -21,7 +21,7 @@ pub unsafe trait GcTracable: 'static {
 }
 
 pub struct GcTraceCtx<'a> {
-    pub(crate) traced_nodes: Vec<NonNull<GcHead>>,
+    pub(crate) traced_nodes: VecDeque<NonNull<GcHead>>,
     opaque: *mut u8,
     _mark: PhantomData<&'a ()>,
 }
@@ -121,7 +121,7 @@ impl<'a> GcTraceCtx<'a> {
     /// Submit a node to collected list regardless its color state.
     pub fn add_node(&mut self, node: NonNull<GcHead>) {
         if !self.traced_nodes.contains(&node) {
-            self.traced_nodes.push(node);
+            self.traced_nodes.push_back(node);
         }
     }
 
@@ -139,16 +139,17 @@ impl<'a> GcTraceCtx<'a> {
     }
 
     /// take out collected nodes
+    #[deprecated]
     #[inline(always)]
     pub fn take_traced_nodes(&mut self) -> Vec<NonNull<GcHead>> {
-        std::mem::take(&mut self.traced_nodes)
+        std::mem::take(&mut self.traced_nodes).into()
     }
 }
 
 impl GcHeap {
     pub fn create_trace_ctx(&self) -> GcTraceCtx<'_> {
         GcTraceCtx {
-            traced_nodes: Vec::new(),
+            traced_nodes: VecDeque::new(),
             opaque: self.opaque(),
             _mark: PhantomData,
         }
@@ -163,6 +164,18 @@ impl GcHeap {
         }
     }
 
+    pub fn traverse_start(&mut self, partition_id: GcPartitionId) {
+        if let Some(par) = self.partitions.get_mut(&partition_id) {
+            let mut current = par.nodes;
+            while let Some(mut node) = current {
+                unsafe {
+                    current = node.as_ref().next;
+                    node.as_mut().set_traverse_visited(false);
+                }
+            }
+        }
+    }
+
     /// Traverses the subtree starting at `node` in depth-first order,
     /// invoking `callback` on each visited node with its optional parent.
     /// If `filter` is non-null, only nodes in the specified partition are visited.
@@ -172,49 +185,28 @@ impl GcHeap {
         filter: GcPartitionId,
         mut callback: impl FnMut(NonNull<GcHead>, Option<NonNull<GcHead>>),
     ) {
-        // Prepare colors for traversal
-        for pid in self.partition_ids() {
-            self.mark_restart(pid);
-        }
+        let mut stack: VecDeque<(NonNull<GcHead>, Option<NonNull<GcHead>>)> =
+            vec![(node, None)].into();
 
-        let mut stack: Vec<(NonNull<GcHead>, Option<NonNull<GcHead>>)> = Vec::new();
-        stack.push((node, None));
+        let mut gcx = self.create_trace_ctx();
 
-        while let Some((mut current, parent)) = stack.pop() {
+        while let Some((mut current, parent)) = stack.pop_front() {
             unsafe {
-                if current.as_ref().color() == GcTriColor::Black {
+                if current.as_ref().traverse_visited() {
                     continue;
                 }
+
+                current.as_mut().set_traverse_visited(true);
 
                 if filter.is_null() || filter == current.as_ref().scope_id() {
                     callback(current, parent);
                 }
 
-                current.as_mut().set_color(GcTriColor::Gray);
-
-                let mut gcx = self.create_trace_ctx();
                 self.trace_node(current, &mut gcx);
 
-                for child in gcx.take_traced_nodes() {
-                    if child.as_ref().color() != GcTriColor::Black {
-                        stack.push((child, Some(current)));
-                    }
-                }
-
-                current.as_mut().set_color(GcTriColor::Black);
-            }
-        }
-    }
-
-    pub fn clear_node_flags(&mut self, clear_mask: GcNodeFlag) {
-        for pid in self.partition_ids() {
-            unsafe {
-                for mut n in self.nodes(pid) {
-                    let f0 = n.as_ref().flags();
-                    let mut f = f0;
-                    f.remove(clear_mask);
-                    if f != f0 {
-                        n.as_mut().set_flags(f);
+                while let Some(child) = gcx.traced_nodes.pop_front() {
+                    if !child.as_ref().traverse_visited() {
+                        stack.push_back((child, Some(current)));
                     }
                 }
             }
@@ -636,7 +628,7 @@ mod tests {
         let marks1 = count_non_white_nodes(&heap, partition_id);
 
         // Reset colors and mark again with smaller step limit
-        heap.mark_restart(partition_id);
+        heap.mark_reset(partition_id);
         while !heap.mark(partition_id, 1) {}
         let marks2 = count_non_white_nodes(&heap, partition_id);
 
@@ -672,7 +664,7 @@ mod tests {
         );
 
         // Reset and mark again to ensure stability
-        heap.mark_restart(partition_id);
+        heap.mark_reset(partition_id);
         while !heap.mark(partition_id, 1) {}
         assert_eq!(count_non_white_nodes(&heap, partition_id), 2);
     }

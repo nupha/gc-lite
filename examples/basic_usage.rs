@@ -225,7 +225,7 @@ fn main() -> GcResult<()> {
     // Delete empty partition
     heap.remove_partition(
         empty_partition,
-        GcHeap::DUMMY_MIGRATE_CALLBACK,
+        GcHeap::DUMMY_PROMOTE_CALLBACK,
         GcHeap::DUMMY_DISPOSE_CALLBACK,
     );
     println!("  Deleted empty partition successfully");
@@ -233,7 +233,7 @@ fn main() -> GcResult<()> {
     // Delete non-empty partition
     heap.remove_partition(
         partition1,
-        GcHeap::DUMMY_MIGRATE_CALLBACK,
+        GcHeap::DUMMY_PROMOTE_CALLBACK,
         GcHeap::DUMMY_DISPOSE_CALLBACK,
     );
     println!("  Deleted non-empty partition successfully");

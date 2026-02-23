@@ -47,6 +47,9 @@ bitflags::bitflags! {
         /// is root node
         const ROOT = 1 << 2;
 
+        /// internal traversal visited flag
+        const TRAVERSE_VISITED = 1 << 3;
+
         #[cfg(debug_assertions)]
         const MAGIC_NUM = 1 << 7;
     }
@@ -169,6 +172,20 @@ impl GcHead {
             self.insert_flag(GcNodeFlag::ROOT);
         } else {
             self.remove_flag(GcNodeFlag::ROOT);
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn traverse_visited(&self) -> bool {
+        self.contains_flag(GcNodeFlag::TRAVERSE_VISITED)
+    }
+
+    #[inline(always)]
+    pub(super) fn set_traverse_visited(&mut self, visited: bool) {
+        if visited {
+            self.insert_flag(GcNodeFlag::TRAVERSE_VISITED);
+        } else {
+            self.remove_flag(GcNodeFlag::TRAVERSE_VISITED);
         }
     }
 

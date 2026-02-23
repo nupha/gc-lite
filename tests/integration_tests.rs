@@ -94,7 +94,7 @@ fn test_partition_removal() {
 
     heap.remove_partition(
         id,
-        GcHeap::DUMMY_MIGRATE_CALLBACK,
+        GcHeap::DUMMY_PROMOTE_CALLBACK,
         GcHeap::DUMMY_DISPOSE_CALLBACK,
     );
 
@@ -743,7 +743,7 @@ fn test_weak_reference_after_partition_removal() {
     // 删除partition
     heap.remove_partition(
         child_id,
-        GcHeap::DUMMY_MIGRATE_CALLBACK,
+        GcHeap::DUMMY_PROMOTE_CALLBACK,
         GcHeap::DUMMY_DISPOSE_CALLBACK,
     );
 

@@ -117,7 +117,7 @@ fn demonstrate_partition_management_errors() -> GcResult<()> {
     // Test removing non-existent partition (remove_partition doesn't return error, just silently fails)
     context.remove_partition(
         invalid_partition,
-        GcHeap::DUMMY_MIGRATE_CALLBACK,
+        GcHeap::DUMMY_PROMOTE_CALLBACK,
         GcHeap::DUMMY_DISPOSE_CALLBACK,
     );
     println!("  ✓ Removing non-existent partition silently fails");
@@ -140,7 +140,7 @@ fn demonstrate_partition_management_errors() -> GcResult<()> {
     // Try to delete non-empty partition (remove_partition will force cleanup)
     context.remove_partition(
         partition_id,
-        GcHeap::DUMMY_MIGRATE_CALLBACK,
+        GcHeap::DUMMY_PROMOTE_CALLBACK,
         GcHeap::DUMMY_DISPOSE_CALLBACK,
     );
     println!("  ✓ Successfully deleted non-empty partition (root objects were force cleaned)");

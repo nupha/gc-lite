@@ -71,7 +71,7 @@ pub struct GcPartition {
     /// A value of 0 means automatic GC is disabled
     pub(crate) gc_threshold: usize,
     /// Is in a marking cycle
-    pub(crate) marking: bool,
+    marking: bool,
 }
 
 impl GcPartition {
@@ -155,6 +155,16 @@ impl GcPartition {
             self.gc_threshold = threshold;
             threshold
         }
+    }
+
+    #[inline(always)]
+    pub const fn is_marking(&self) -> bool {
+        self.marking
+    }
+
+    #[inline(always)]
+    pub(crate) const fn set_marking(&mut self, marking: bool) {
+        self.marking = marking;
     }
 
     /// Get parent partition ID
@@ -321,8 +331,15 @@ impl GcHeap {
         self.load_descendants(partition_id, &mut scopes);
 
         // remove resursivly from leaves to partition
-        let call_on_promote = !std::ptr::addr_eq(&on_promote, &GcHeap::DUMMY_MIGRATE_CALLBACK);
+        let call_on_promote = !std::ptr::addr_eq(&on_promote, &GcHeap::DUMMY_PROMOTE_CALLBACK);
         let mut freed_bytes = 0;
+
+        // FIXME: clear all node's visit flag in all partitions - this is heavy.
+        // but this is the safe way to traverse every node in subtree
+        // this should be optimized
+        for pid in self.partition_ids() {
+            self.traverse_start(pid);
+        }
 
         while let Some(pid) = scopes.pop() {
             log::trace!("[close_scope] {pid:?}");
@@ -331,62 +348,36 @@ impl GcHeap {
             if let Some(par) = self.partitions.get_mut(&pid) {
                 let roots = std::mem::take(&mut par.root_nodes);
 
-                // self.mark_restart(pid);
+                for &xn in roots
+                    .iter()
+                    .filter(|n| unsafe { !n.as_ref().xref().is_null() })
+                {
+                    let xref = unsafe {
+                        debug_assert_eq!(xn.as_ref().scope_id(), pid); // O.o
+                        xn.as_ref().xref()
+                    };
 
-                // for &xn in roots
-                //     .iter()
-                //     .filter(|n| unsafe { !n.as_ref().xref().is_null() })
-                // {
-                //     let xref = unsafe {
-                //         debug_assert_eq!(xn.as_ref().scope_id(), pid); // O.o
-                //         xn.as_ref().xref()
-                //     };
+                    self.traverse_subtree(xn, GcPartitionId::NONE, {
+                        let hp = NonNull::from_ref(self);
 
-                //     self.add_gray_node(xn);
+                        move |mut n, _| unsafe {
+                            let xref0 = n.as_ref().xref();
 
-                //     let mut gcx = self.create_trace_ctx();
+                            let xref = if xref0.is_null() {
+                                hp.as_ref().common_parent2(xref, n.as_ref().scope_id())
+                            } else {
+                                hp.as_ref()
+                                    .common_parent3(xref, n.as_ref().scope_id(), xref0)
+                            };
+                            debug_assert!(!xref.is_null());
 
-                //     // trace solution 1
-                //     self.trace_node(xn, &mut gcx);
-
-                //     gcx.trace_callback(xn, |mut n, hp| unsafe {
-                //         let xref0 = n.as_ref().xref();
-
-                //         let xref2 = if xref0.is_null() {
-                //             hp.common_parent2(xref, n.as_ref().scope_id())
-                //         } else {
-                //             hp.common_parent3(xref, n.as_ref().scope_id(), xref0)
-                //         };
-                //         debug_assert!(!xref2.is_null());
-
-                //         if n.as_mut().set_xref(xref2) && n.as_ref().scope_id() != pid {
-                //             // xref was set. if node not in removing scope, mark the node as root node.
-                //             hp.set_root_node(n, true);
-                //         }
-                //     });
-
-                //     // trace solution 2
-                //     // self.traverse_subtree(xn, GcPartitionId::NONE, {
-                //     //     let hp = NonNull::from_ref(self);
-
-                //     //     move |mut n, _| unsafe {
-                //     //         let xref0 = n.as_ref().xref();
-
-                //     //         let xref = if xref0.is_null() {
-                //     //             hp.as_ref().common_parent2(xref, n.as_ref().scope_id())
-                //     //         } else {
-                //     //             hp.as_ref()
-                //     //                 .common_parent3(xref, n.as_ref().scope_id(), xref0)
-                //     //         };
-                //     //         debug_assert!(!xref.is_null());
-
-                //     //         if n.as_mut().set_xref(xref) && n.as_ref().scope_id() != pid {
-                //     //             // xref was set. if node not in removing scope, mark the node as root node.
-                //     //             (*hp.as_ptr()).set_root_node(n, true);
-                //     //         }
-                //     //     }
-                //     // });
-                // }
+                            if n.as_mut().set_xref(xref) && n.as_ref().scope_id() != pid {
+                                // xref was set. if node not in removing scope, mark the node as root node.
+                                (*hp.as_ptr()).set_root_node(n, true);
+                            }
+                        }
+                    });
+                }
             }
 
             if let Some(mut par) = self.partitions.remove(&pid)
@@ -420,10 +411,7 @@ impl GcHeap {
                         // clear flags and attach to xref chain
                         unsafe {
                             let n = this.as_mut();
-                            let mut f = n.flags();
-
-                            f.remove(GcNodeFlag::ROOT);
-                            n.set_flags(f);
+                            n.remove_flag(GcNodeFlag::ROOT);
                             n.partition = 0;
                             n.next.take();
                         }
@@ -704,7 +692,7 @@ mod tests {
         // Clean up
         heap.remove_partition(
             root_id,
-            GcHeap::DUMMY_MIGRATE_CALLBACK,
+            GcHeap::DUMMY_PROMOTE_CALLBACK,
             GcHeap::DUMMY_DISPOSE_CALLBACK,
         );
         assert!(heap.partition(root_id).is_none());
@@ -728,7 +716,7 @@ mod tests {
         // Clean up
         heap.remove_partition(
             id,
-            GcHeap::DUMMY_MIGRATE_CALLBACK,
+            GcHeap::DUMMY_PROMOTE_CALLBACK,
             GcHeap::DUMMY_DISPOSE_CALLBACK,
         );
     }
@@ -750,7 +738,7 @@ mod tests {
         // Clean up
         heap.remove_partition(
             id,
-            GcHeap::DUMMY_MIGRATE_CALLBACK,
+            GcHeap::DUMMY_PROMOTE_CALLBACK,
             GcHeap::DUMMY_DISPOSE_CALLBACK,
         );
     }
@@ -775,12 +763,12 @@ mod tests {
         // Clean up
         heap.remove_partition(
             p1,
-            GcHeap::DUMMY_MIGRATE_CALLBACK,
+            GcHeap::DUMMY_PROMOTE_CALLBACK,
             GcHeap::DUMMY_DISPOSE_CALLBACK,
         );
         heap.remove_partition(
             p4,
-            GcHeap::DUMMY_MIGRATE_CALLBACK,
+            GcHeap::DUMMY_PROMOTE_CALLBACK,
             GcHeap::DUMMY_DISPOSE_CALLBACK,
         );
     }
@@ -805,12 +793,12 @@ mod tests {
         // Clean up
         heap.remove_partition(
             p1,
-            GcHeap::DUMMY_MIGRATE_CALLBACK,
+            GcHeap::DUMMY_PROMOTE_CALLBACK,
             GcHeap::DUMMY_DISPOSE_CALLBACK,
         );
         heap.remove_partition(
             p7,
-            GcHeap::DUMMY_MIGRATE_CALLBACK,
+            GcHeap::DUMMY_PROMOTE_CALLBACK,
             GcHeap::DUMMY_DISPOSE_CALLBACK,
         );
     }
@@ -840,7 +828,7 @@ mod tests {
         // Clean up
         heap.remove_partition(
             p1,
-            GcHeap::DUMMY_MIGRATE_CALLBACK,
+            GcHeap::DUMMY_PROMOTE_CALLBACK,
             GcHeap::DUMMY_DISPOSE_CALLBACK,
         );
     }

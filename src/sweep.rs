@@ -12,6 +12,12 @@ use crate::{
 
 impl GcHeap {
     pub fn add_gray_node(&mut self, mut node: NonNull<GcHead>) {
+        debug_assert!(
+            self.partition_mut(unsafe { node.as_ref().scope_id() })
+                .unwrap()
+                .is_marking()
+        );
+
         match unsafe { node.as_ref().color() } {
             GcTriColor::White => unsafe {
                 node.as_mut().set_color(GcTriColor::Gray);
@@ -30,9 +36,9 @@ impl GcHeap {
         }
     }
 
-    pub fn mark_restart(&mut self, partition_id: GcPartitionId) {
+    pub fn mark_reset(&mut self, partition_id: GcPartitionId) {
         if let Some(par) = self.partition_mut(partition_id) {
-            par.marking = false;
+            par.set_marking(false);
             par.gray_list.clear();
             for mut n in par.nodes() {
                 unsafe {
@@ -46,9 +52,8 @@ impl GcHeap {
         let heap_ptr = self as *mut Self;
 
         if let Some(par) = self.partitions.get_mut(&partition_id) {
-            if !par.marking {
+            if !par.is_marking() {
                 // Start new marking cycle.
-                debug_assert!(par.gray_list.is_empty());
                 debug_assert!(
                     !par.nodes()
                         .any(|n| unsafe { n.as_ref().color() != GcTriColor::White }),
@@ -57,8 +62,9 @@ impl GcHeap {
                         .map(|n| unsafe { n.as_ref() })
                         .collect::<Vec<_>>()
                 );
+                debug_assert!(par.gray_list.is_empty());
 
-                par.marking = true;
+                par.set_marking(true);
 
                 // Add all root nodes to the gray list.
                 for n in par.root_nodes.iter() {
@@ -70,44 +76,50 @@ impl GcHeap {
                 }
             }
 
-            let mut steps = 0;
-            let mut gcx = unsafe { (*heap_ptr).create_trace_ctx() };
+            if max_steps > 0 {
+                let mut gcx = unsafe { (*heap_ptr).create_trace_ctx() };
+                let mut cnt = 0;
 
-            while let Some(mut node_ptr) = par.gray_list.pop() {
-                if steps >= max_steps {
-                    // Step limit reached, push back the node and return.
-                    par.gray_list.push(node_ptr);
-                    return false;
-                }
+                while let Some(mut node_ptr) = par.gray_list.pop() {
+                    let node = unsafe { node_ptr.as_mut() };
+                    debug_assert_eq!(node.scope_id(), partition_id);
 
-                let node = unsafe { node_ptr.as_mut() };
-                if node.color() != GcTriColor::Gray {
-                    // Already processed by a concurrent mutator, or some other logic.
-                    continue;
-                }
-
-                // Trace for children.
-                (self.node_dtypes.type_info_list[node.dtype() as usize].trace_fn)(
-                    node_ptr, &mut gcx,
-                );
-
-                for mut ch in gcx.traced_nodes.drain(..) {
-                    let child = unsafe { ch.as_mut() };
-                    if child.color() == GcTriColor::White {
-                        child.set_color(GcTriColor::Gray);
-                        let pid = child.scope_id();
-                        if pid == partition_id {
-                            par.gray_list.push(ch);
-                        } else if let Some(p) = unsafe { (*heap_ptr).partitions.get_mut(&pid) } {
-                            // put node to its partition's gray_list
-                            p.gray_list.push(ch);
+                    if node.color() == GcTriColor::Gray {
+                        if cnt >= max_steps {
+                            par.gray_list.push(node_ptr);
+                            return false;
                         }
+
+                        // Trace for children.
+                        (self.node_dtypes.type_info_list[node.dtype() as usize].trace_fn)(
+                            node_ptr, &mut gcx,
+                        );
+
+                        while let Some(mut ch) = gcx.traced_nodes.pop_front() {
+                            let child = unsafe { ch.as_mut() };
+                            let scope = child.scope_id();
+
+                            if scope == partition_id {
+                                if matches!(child.color(), GcTriColor::White | GcTriColor::Gray) {
+                                    child.set_color(GcTriColor::Gray);
+                                    par.gray_list.push(ch);
+                                }
+                            } else {
+                                let p2 = unsafe { (*heap_ptr).partition(scope).unwrap() };
+                                if p2.is_marking() {
+                                    unsafe {
+                                        (*heap_ptr).add_gray_node(ch);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Mark current node as black.
+                        node.set_color(GcTriColor::Black);
+
+                        cnt += 1;
                     }
                 }
-
-                // Mark current node as black.
-                node.set_color(GcTriColor::Black);
-                steps += 1;
             }
         }
 
@@ -121,8 +133,8 @@ impl GcHeap {
         on_dispose: impl Fn(&GcHeap, &GcHead),
     ) -> usize {
         if let Some(link0) = self.partition_mut(partition_id).and_then(|p| {
-            if p.marking && p.gray_list.is_empty() {
-                p.marking = false;
+            if p.is_marking() && p.gray_list.is_empty() {
+                p.set_marking(false);
                 p.nodes.take()
             } else {
                 None // mark cycle not done
@@ -133,7 +145,7 @@ impl GcHeap {
                 unsafe {
                     debug_assert!(
                         matches!(n.as_ref().color(), GcTriColor::Black | GcTriColor::White),
-                        "sweep node must be black or white: {:?}",
+                        "sweep node must be either black or white: {:?}",
                         n.as_ref()
                     );
                 }
