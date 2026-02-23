@@ -116,6 +116,12 @@ impl GcHead {
         self.attrs = (self.attrs & !COLOR_MASK) | (color as u32);
     }
 
+    /// Set White color, preserving other flags.
+    #[inline(always)]
+    pub fn reset_color(&mut self) {
+        self.set_color(GcTriColor::White);
+    }
+
     #[inline(always)]
     pub(crate) fn flags(&self) -> GcNodeFlag {
         GcNodeFlag::from_bits_truncate(self.attrs as u8)

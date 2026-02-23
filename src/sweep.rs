@@ -22,8 +22,7 @@ impl GcHeap {
         on_dispose: impl Fn(&GcHeap, &GcHead),
     ) -> usize {
         if let Some(link0) = self
-            .partitions
-            .get_mut(&partition_id)
+            .partition_mut(partition_id)
             .and_then(|p| p.nodes.take())
         {
             let call_on_dispose = !std::ptr::addr_eq(&on_dispose, &Self::DUMMY_DISPOSE_CALLBACK);
@@ -31,8 +30,7 @@ impl GcHeap {
             let mut link1 = Some(link0);
             let mut freed_bytes = 0;
 
-            let pass_slice = self.node_dtypes.drop_passes;
-            for &pass in pass_slice {
+            for &pass in self.node_dtypes.drop_passes {
                 let mut current = link1;
                 let mut prev: Option<NonNull<GcHead>> = None;
 
@@ -61,10 +59,10 @@ impl GcHeap {
 
                             // If root node: remove from root list
                             if is_root
-                                && let Some(p) = self.partitions.get_mut(&partition_id)
-                                && let Some(i) = p.root_nodes.iter().position(|&x| x == this)
+                                && let Some(par) = self.partition_mut(partition_id)
+                                && let Some(i) = par.root_nodes.iter().position(|&x| x == this)
                             {
-                                p.root_nodes.swap_remove(i);
+                                par.root_nodes.swap_remove(i);
                             }
                         } else {
                             prev = Some(this);
@@ -78,7 +76,7 @@ impl GcHeap {
             }
 
             // update node link for partition
-            if let Some(p) = self.partitions.get_mut(&partition_id) {
+            if let Some(p) = self.partition_mut(partition_id) {
                 p.nodes = link1;
             }
             // Decrease partitions memory usage

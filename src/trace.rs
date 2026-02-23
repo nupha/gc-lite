@@ -27,10 +27,12 @@ pub struct GcTraceCtx<'a> {
 }
 
 impl<'a> GcTraceCtx<'a> {
+    pub(crate) const DUMMY_TRACE_CALLBACK: fn(NonNull<GcHead>, &mut GcHeap) = |_, _| {};
+
     /// create new trace ctx, optionally clear all nodes' visit and mark flags.
     pub fn new(heap: &mut GcHeap, reset_color: bool) -> Self {
         if reset_color {
-            heap.reset_color_for_trace();
+            heap.reset_all_nodes_color();
         }
 
         Self {
@@ -51,21 +53,26 @@ impl<'a> GcTraceCtx<'a> {
     }
 
     /// Apply callback on `node`, and optionally collect direct children nodes
-    fn apply1(&mut self, mut node: NonNull<GcHead>) {
+    fn apply1(
+        &mut self,
+        mut node: NonNull<GcHead>,
+        callback: impl Fn(NonNull<GcHead>, &mut GcHeap),
+    ) {
         unsafe {
-            #[cfg(debug_assertions)]
-            node.as_ref().debug_assert_node_valid(self.heap.as_ref()); // O.o
+            // #[cfg(debug_assertions)]
+            // node.as_ref().debug_assert_node_valid(self.heap.as_ref());
 
             match node.as_ref().color() {
                 GcTriColor::White => {
+                    callback(node, self.heap.as_mut());
                     node.as_mut().set_color(GcTriColor::Gray);
                     self.add_node(node);
                 }
                 GcTriColor::Gray => {
                     // trace direct children nodes, then mark as black
+                    node.as_mut().set_color(GcTriColor::Black);
                     (self.heap().node_dtypes.type_info_list[node.as_ref().dtype() as usize]
                         .trace_fn)(node, self);
-                    node.as_mut().set_color(GcTriColor::Black);
                 }
                 GcTriColor::Black => {
                     #[cfg(debug_assertions)]
@@ -80,16 +87,24 @@ impl<'a> GcTraceCtx<'a> {
 
     /// Trace single `node` recursively for all descendant nodes,
     /// apply `callback` on each of them.
-    pub fn trace(&mut self, node: NonNull<GcHead>) {
+    pub(crate) fn trace_callback(
+        &mut self,
+        node: NonNull<GcHead>,
+        callback: impl Fn(NonNull<GcHead>, &mut GcHeap),
+    ) {
         if unsafe { node.as_ref().color() } != GcTriColor::Black {
-            self.apply1(node);
+            self.apply1(node, &callback);
 
             while let Some(ch) = self.traced_nodes.pop_front() {
                 if unsafe { ch.as_ref().color() } != GcTriColor::Black {
-                    self.apply1(ch);
+                    self.apply1(ch, &callback);
                 }
             }
         }
+    }
+
+    pub fn trace(&mut self, node: NonNull<GcHead>) {
+        self.trace_callback(node, Self::DUMMY_TRACE_CALLBACK);
     }
 
     /// Trace multiple nodes recursively.
@@ -100,18 +115,15 @@ impl<'a> GcTraceCtx<'a> {
     }
 
     pub fn trace_roots(&mut self, partition_id: GcPartitionId) {
-        if let Some(p) = self.heap().partitions.get(&partition_id) {
-            let roots = p.root_nodes.clone();
-            for root in roots {
-                self.trace(root);
-            }
+        if let Some(par) = unsafe { self.heap.as_ref().partition(partition_id) } {
+            self.trace_iter(par.root_nodes.iter().copied());
         }
     }
 
     pub fn commit(&mut self) {
         while let Some(n) = self.traced_nodes.pop_front() {
             if unsafe { n.as_ref().color() } != GcTriColor::Black {
-                self.apply1(n);
+                self.apply1(n, Self::DUMMY_TRACE_CALLBACK);
             }
         }
     }
@@ -136,9 +148,10 @@ impl<'a> GcTraceCtx<'a> {
             node.as_ref().debug_assert_node_valid(self.heap.as_ref()); // O.o
         }
 
-        if !self.traced_nodes.iter().any(|&n| n == node) {
-            self.traced_nodes.push_back(node);
-        }
+        // if !self.traced_nodes.iter().any(|&n| n == node) {
+        //     self.traced_nodes.push_back(node);
+        // }
+        self.traced_nodes.push_back(node);
     }
 
     /// Submit nodes to collected list
@@ -157,7 +170,7 @@ impl<'a> GcTraceCtx<'a> {
 
 impl GcHeap {
     /// reset all node's color state to White
-    fn reset_color_for_trace(&mut self) {
+    fn reset_all_nodes_color(&mut self) {
         for pid in self.partition_ids() {
             for mut n in self.nodes(pid) {
                 unsafe {
@@ -185,30 +198,35 @@ impl GcHeap {
     fn traverse_internal(
         parent: Option<NonNull<GcHead>>,
         mut this: NonNull<GcHead>,
-        ctx: &mut GcTraceCtx,
+        gcx: &mut GcTraceCtx,
         filter: GcPartitionId,
         callback: &mut impl FnMut(NonNull<GcHead>, Option<NonNull<GcHead>>),
     ) {
         unsafe {
-            if filter.is_null() || filter == this.as_ref().scope_id() {
-                callback(this, parent);
+            match this.as_ref().color() {
+                GcTriColor::White => {
+                    if filter.is_null() || filter == this.as_ref().scope_id() {
+                        callback(this, parent);
+                    }
+                    this.as_mut().set_color(GcTriColor::Gray);
+                }
+                GcTriColor::Gray => {}
+                GcTriColor::Black => {
+                    return;
+                }
             }
 
-            // Mark the node as visited by changing its color. This replaces the TRACED flag.
-            if this.as_ref().color() == GcTriColor::White {
-                this.as_mut().set_color(GcTriColor::Gray);
-            }
-
-            let heap = ctx.heap();
+            let heap = gcx.heap();
             let dtype = this.as_ref().dtype() as usize;
             let info = &heap.node_dtypes.type_info_list[dtype];
-            (info.trace_fn)(this, ctx);
 
-            let mut children = ctx.take_traced_nodes();
+            (info.trace_fn)(this, gcx);
+            this.as_mut().set_color(GcTriColor::Black);
+
+            let mut children = gcx.take_traced_nodes();
             while let Some(ch) = children.pop() {
-                // Recurse only on unvisited (white) nodes.
-                if ch.as_ref().color() == GcTriColor::White {
-                    Self::traverse_internal(Some(this), ch, ctx, filter, callback);
+                if ch.as_ref().color() != GcTriColor::Black {
+                    Self::traverse_internal(Some(this), ch, gcx, filter, callback);
                 }
             }
         }
@@ -224,62 +242,62 @@ impl GcHeap {
         mut callback: impl FnMut(NonNull<GcHead>, Option<NonNull<GcHead>>),
     ) {
         // Set all nodes to white to prepare for traversal.
-        self.reset_color_for_trace();
-        let mut ctx = GcTraceCtx::new(self, false);
-        Self::traverse_internal(None, node, &mut ctx, filter, &mut callback);
+        self.reset_all_nodes_color();
+        let mut gcx = GcTraceCtx::new(self, false);
+        Self::traverse_internal(None, node, &mut gcx, filter, &mut callback);
     }
 
-    /// Collects all nodes in the subtree starting at `node`.
-    /// If `filter` is non-null, only nodes in the specified partition are returned.
-    pub fn collect_subtree_nodes(
-        &mut self,
-        node: NonNull<GcHead>,
-        filter: GcPartitionId,
-    ) -> Vec<NonNull<GcHead>> {
-        let mut nodes = Vec::new();
-        self.traverse_subtree(node, filter, |n, _p| {
-            nodes.push(n);
-        });
-        nodes
-    }
+    // /// Collects all nodes in the subtree starting at `node`.
+    // /// If `filter` is non-null, only nodes in the specified partition are returned.
+    // pub fn collect_subtree_nodes(
+    //     &mut self,
+    //     node: NonNull<GcHead>,
+    //     filter: GcPartitionId,
+    // ) -> Vec<NonNull<GcHead>> {
+    //     let mut nodes = Vec::new();
+    //     self.traverse_subtree(node, filter, |n, _p| {
+    //         nodes.push(n);
+    //     });
+    //     nodes
+    // }
 
-    /// Collects all edges (parent, child) pairs in the subtree starting at `node`.
-    /// If `filter` is non-null, only edges within the specified partition are returned.
-    pub fn collect_subtree_edges(
-        &mut self,
-        node: NonNull<GcHead>,
-        filter: GcPartitionId,
-    ) -> Vec<(NonNull<GcHead>, NonNull<GcHead>)> {
-        let mut edges = Vec::new();
-        self.traverse_subtree(node, filter, |n, p| {
-            if let Some(parent) = p {
-                edges.push((parent, n));
-            }
-        });
-        edges
-    }
+    // /// Collects all edges (parent, child) pairs in the subtree starting at `node`.
+    // /// If `filter` is non-null, only edges within the specified partition are returned.
+    // pub fn collect_subtree_edges(
+    //     &mut self,
+    //     node: NonNull<GcHead>,
+    //     filter: GcPartitionId,
+    // ) -> Vec<(NonNull<GcHead>, NonNull<GcHead>)> {
+    //     let mut edges = Vec::new();
+    //     self.traverse_subtree(node, filter, |n, p| {
+    //         if let Some(parent) = p {
+    //             edges.push((parent, n));
+    //         }
+    //     });
+    //     edges
+    // }
 
-    /// Collects both nodes and edges of the subtree starting at `node`.
-    /// Returns `(nodes, edges)`; `edges` are (parent, child) pairs.
-    /// If `filter` is non-null, only data in the specified partition are collected.
-    pub fn collect_subtree(
-        &mut self,
-        node: NonNull<GcHead>,
-        filter: GcPartitionId,
-    ) -> (
-        Vec<NonNull<GcHead>>,
-        Vec<(NonNull<GcHead>, NonNull<GcHead>)>,
-    ) {
-        let mut nodes = Vec::new();
-        let mut edges = Vec::new();
-        self.traverse_subtree(node, filter, |n, p| {
-            nodes.push(n);
-            if let Some(parent) = p {
-                edges.push((parent, n));
-            }
-        });
-        (nodes, edges)
-    }
+    // /// Collects both nodes and edges of the subtree starting at `node`.
+    // /// Returns `(nodes, edges)`; `edges` are (parent, child) pairs.
+    // /// If `filter` is non-null, only data in the specified partition are collected.
+    // pub fn collect_subtree(
+    //     &mut self,
+    //     node: NonNull<GcHead>,
+    //     filter: GcPartitionId,
+    // ) -> (
+    //     Vec<NonNull<GcHead>>,
+    //     Vec<(NonNull<GcHead>, NonNull<GcHead>)>,
+    // ) {
+    //     let mut nodes = Vec::new();
+    //     let mut edges = Vec::new();
+    //     self.traverse_subtree(node, filter, |n, p| {
+    //         nodes.push(n);
+    //         if let Some(parent) = p {
+    //             edges.push((parent, n));
+    //         }
+    //     });
+    //     (nodes, edges)
+    // }
 }
 
 macro_rules! impl_dummy_trace_for_primitive {
@@ -605,7 +623,7 @@ mod tests {
         let propagate_marked = count_non_white_nodes(&heap, partition_id);
 
         // Test with Continue
-        heap.reset_color_for_trace();
+        heap.reset_all_nodes_color();
         let mut ctx2 = GcTraceCtx::new(&mut heap, true);
         ctx2.trace(nodes[0].node_ptr());
         let continue_marked = count_non_white_nodes(&heap, partition_id);
@@ -638,7 +656,7 @@ mod tests {
         assert_eq!(count_non_white_nodes(&heap, partition_id), 2);
 
         // Test with Continue
-        heap.reset_color_for_trace();
+        heap.reset_all_nodes_color();
         let mut ctx2 = GcTraceCtx::new(&mut heap, true);
         ctx2.trace(node1.node_ptr());
         assert_eq!(count_non_white_nodes(&heap, partition_id), 2);

@@ -319,8 +319,8 @@ impl GcHeap {
             log::trace!("[close_scope] {pid:?}");
 
             // fix xref tree recursively
-            if let Some(partition) = self.partitions.get_mut(&pid) {
-                let roots = std::mem::take(&mut partition.root_nodes);
+            if let Some(par) = self.partitions.get_mut(&pid) {
+                let roots = std::mem::take(&mut par.root_nodes);
                 for &xn in roots
                     .iter()
                     .filter(|n| unsafe { !n.as_ref().xref().is_null() })
@@ -330,6 +330,30 @@ impl GcHeap {
                         xn.as_ref().xref()
                     };
 
+                    // trace solution 1
+                    // for mut n in self.nodes(pid) {
+                    //     unsafe {
+                    //         n.as_mut().reset_color();
+                    //     }
+                    // }
+                    // let mut gcx = GcTraceCtx::new(self, false);
+                    // gcx.trace_callback(xn, |mut n, hp| unsafe {
+                    //     let xref0 = n.as_ref().xref();
+
+                    //     let xref2 = if xref0.is_null() {
+                    //         hp.common_parent2(xref, n.as_ref().scope_id())
+                    //     } else {
+                    //         hp.common_parent3(xref, n.as_ref().scope_id(), xref0)
+                    //     };
+                    //     debug_assert!(!xref2.is_null());
+
+                    //     if n.as_mut().set_xref(xref2) && n.as_ref().scope_id() != pid {
+                    //         // xref was set. if node not in removing scope, mark the node as root node.
+                    //         hp.set_root_node(n, true);
+                    //     }
+                    // });
+
+                    // trace solution 2
                     self.traverse_subtree(xn, GcPartitionId::NONE, {
                         let hp = NonNull::from_ref(self);
 

@@ -39,6 +39,12 @@ impl GcHead {
 impl GcHeap {
     /// add nodes relationship for directed reference: from `master` to `slave`
     pub fn bind(&mut self, master: NonNull<GcHead>, slave: NonNull<GcHead>) {
+        #[cfg(debug_assertions)]
+        unsafe {
+            master.as_ref().debug_assert_node_valid(self);
+            slave.as_ref().debug_assert_node_valid(self);
+        }
+
         let xref = unsafe {
             let x = master.as_ref().xref();
             if x.is_null() {
