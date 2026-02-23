@@ -203,8 +203,8 @@ fn main() -> GcResult<()> {
 
     // Establish references between nodes
     {
-        node1.add_child(node2);
-        node2.add_child(node1);
+        node1.with_mut(&mut heap, |n| n.add_child(node2));
+        node2.with_mut(&mut heap, |n| n.add_child(node1));
     }
 
     println!("  Created node1: {}", node1.deref());

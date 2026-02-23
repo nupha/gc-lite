@@ -140,8 +140,8 @@ pub fn gc_type_table_internal(input: TokenStream) -> TokenStream {
             const GC_TYPE_ID: u8 = #ids;
 
             #[inline(always)]
-            fn gc_head_ptr(&self) -> std::ptr::NonNull<#crate_path::GcHead> {
-                unsafe { #crate_path::GcRef::<Self>::from_ref_unchecked(self).node_ptr() }
+            fn gc_ref(&self) -> #crate_path::GcRef<Self> {
+                unsafe { #crate_path::GcRef::<Self>::from_ref_unchecked(self)  }
             }
         }
 

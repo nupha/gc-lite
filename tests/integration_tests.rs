@@ -606,8 +606,8 @@ fn test_circular_reference_handling() {
     let mut node2 = heap.alloc(id, TestNode::new(2)).unwrap();
 
     // Create circular reference
-    node1.add_child(node2);
-    node2.add_child(node1);
+    node1.with_mut(&mut heap, |n| n.add_child(node2));
+    node2.with_mut(&mut heap, |n| n.add_child(node1));
 
     // Set both as roots - they should be preserved
     heap.set_root(node1, true);

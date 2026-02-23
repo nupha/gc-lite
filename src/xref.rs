@@ -37,26 +37,6 @@ impl GcHead {
 }
 
 impl GcHeap {
-    /// add nodes relationship for directed reference: from `master` to `slave`
-    pub fn bind(&mut self, master: NonNull<GcHead>, slave: NonNull<GcHead>) {
-        #[cfg(debug_assertions)]
-        unsafe {
-            master.as_ref().debug_assert_node_valid(self);
-            slave.as_ref().debug_assert_node_valid(self);
-        }
-
-        let xref = unsafe {
-            let x = master.as_ref().xref();
-            if x.is_null() {
-                master.as_ref().scope_id()
-            } else {
-                x
-            }
-        };
-
-        self.set_xref(xref, slave);
-    }
-
     /// Updates the node's cross-reference partition to a more general ancestor.
     /// Returns true if node's xref was updated, false if not.
     pub fn set_xref(&mut self, from_scope: GcPartitionId, mut node: NonNull<GcHead>) -> bool {
@@ -104,8 +84,6 @@ impl GcHeap {
 
 #[cfg(test)]
 mod xref_tests {
-    use std::ops::DerefMut;
-
     use super::*;
     use crate::{
         GcRef,
@@ -306,7 +284,7 @@ mod xref_tests {
         let master_b1 = alloc_node(&mut heap, b1_id);
         let mut node = alloc_node(&mut heap, a1_id);
 
-        node.deref_mut().children.push(master_a2);
+        node.with_mut(&mut heap, |n| n.children.push(master_a2));
 
         unsafe {
             (*node.head_ptr.as_ptr()).set_xref(a_id);

@@ -6,9 +6,8 @@ use std::{collections::HashMap, ptr::NonNull};
 use crate::{
     GcNode, GcRef,
     gctype::GcTypeRegistry,
-    node::{GcHead, GcTriColor},
+    node::GcHead,
     partition::{GcPartition, GcPartitionId},
-    trace::GcTraceCtx,
 };
 
 pub struct GcHeap {
@@ -271,7 +270,8 @@ impl GcHeap {
     /// # 返回值
     /// - `true`: 如果从任意起始节点开始，通过追踪引用关系能找到目标节点
     /// - `false`: 如果从所有起始节点都无法追踪到目标节点
-    pub fn is_node_reachable(
+    #[deprecated(note = "not used")]
+    pub(crate) fn is_node_reachable(
         &mut self,
         node: NonNull<GcHead>,
         starts: impl Iterator<Item = NonNull<GcHead>>,
@@ -285,11 +285,12 @@ impl GcHeap {
 
         let partition_id = unsafe { node.as_ref().scope_id() };
 
-        // 用于记录已访问的节点，避免循环引用导致的无限递归
-        let mut visited = HashSet::new();
+        // 记录已访问节点，避免循环引用导致的无限遍历
+        let mut visited: HashSet<NonNull<GcHead>> = HashSet::new();
         // 使用栈进行深度优先搜索
         let mut stack: Vec<NonNull<GcHead>> = Vec::new();
 
+        // 初始化起始节点
         for start in starts {
             if start == node {
                 return true;
@@ -298,27 +299,31 @@ impl GcHeap {
                 continue;
             }
 
-            if unsafe { start.as_ref().scope_id() } == partition_id {
+            if unsafe { start.as_ref().scope_id() } == partition_id && visited.insert(start) {
                 stack.push(start);
-                visited.insert(start);
             }
         }
 
-        let mut ctx = GcTraceCtx::new(self, true);
-        ctx.trace_iter(stack.iter().copied());
+        let mut gcx = self.create_trace_ctx();
 
-        let b = unsafe { node.as_ref().color() != GcTriColor::White };
+        // 基于直接子节点追踪进行图遍历
+        while let Some(current) = stack.pop() {
+            // 收集 current 的直接子节点
+            gcx.traced_nodes.clear();
+            self.trace_node(current, &mut gcx);
 
-        // Reset all nodes to white for the next GC cycle
-        for p_id in self.partition_ids() {
-            for mut n in self.nodes(p_id) {
-                unsafe {
-                    n.as_mut().set_color(GcTriColor::White);
+            for child in gcx.take_traced_nodes() {
+                if child == node {
+                    return true;
+                }
+
+                if unsafe { child.as_ref().scope_id() } == partition_id && visited.insert(child) {
+                    stack.push(child);
                 }
             }
         }
 
-        b
+        false
     }
 
     /// Update memory usage with rollup to parent partitions
@@ -356,7 +361,7 @@ impl GcHeap {
 
 #[cfg(test)]
 mod heap_tests {
-    use crate::trace::GcTracable;
+    use crate::{GcTraceCtx, trace::GcTracable};
 
     use super::*;
 

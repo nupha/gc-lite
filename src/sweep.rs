@@ -8,25 +8,138 @@ use crate::{
     node::{GcHead, GcTriColor},
     node_iterator::NodeLinkIter,
     partition::GcPartitionId,
-    trace::GcTraceCtx,
 };
 
 impl GcHeap {
-    pub const SWEEP_UNMARKED_FUNC: fn(&GcHead) -> bool = |node| node.color() == GcTriColor::White;
+    pub fn add_gray_node(&mut self, mut node: NonNull<GcHead>) {
+        match unsafe { node.as_ref().color() } {
+            GcTriColor::White => unsafe {
+                node.as_mut().set_color(GcTriColor::Gray);
+            },
+            GcTriColor::Gray => {}
+            GcTriColor::Black => {
+                return;
+            }
+        }
+
+        let pid = unsafe { node.as_ref().scope_id() };
+        if let Some(par) = self.partition_mut(pid)
+            && !par.gray_list.contains(&node)
+        {
+            par.gray_list.push(node);
+        }
+    }
+
+    pub fn mark_restart(&mut self, partition_id: GcPartitionId) {
+        if let Some(par) = self.partition_mut(partition_id) {
+            par.marking = false;
+            par.gray_list.clear();
+            for mut n in par.nodes() {
+                unsafe {
+                    n.as_mut().set_color(GcTriColor::White);
+                }
+            }
+        }
+    }
+
+    pub fn mark(&mut self, partition_id: GcPartitionId, max_steps: usize) -> bool {
+        let heap_ptr = self as *mut Self;
+
+        if let Some(par) = self.partitions.get_mut(&partition_id) {
+            if !par.marking {
+                // Start new marking cycle.
+                debug_assert!(par.gray_list.is_empty());
+                debug_assert!(
+                    !par.nodes()
+                        .any(|n| unsafe { n.as_ref().color() != GcTriColor::White }),
+                    "all nodes should be white: {:?}",
+                    par.nodes()
+                        .map(|n| unsafe { n.as_ref() })
+                        .collect::<Vec<_>>()
+                );
+
+                par.marking = true;
+
+                // Add all root nodes to the gray list.
+                for n in par.root_nodes.iter() {
+                    let mut root = *n;
+                    unsafe {
+                        root.as_mut().set_color(GcTriColor::Gray);
+                    }
+                    par.gray_list.push(root);
+                }
+            }
+
+            let mut steps = 0;
+            let mut gcx = unsafe { (*heap_ptr).create_trace_ctx() };
+
+            while let Some(mut node_ptr) = par.gray_list.pop() {
+                if steps >= max_steps {
+                    // Step limit reached, push back the node and return.
+                    par.gray_list.push(node_ptr);
+                    return false;
+                }
+
+                let node = unsafe { node_ptr.as_mut() };
+                if node.color() != GcTriColor::Gray {
+                    // Already processed by a concurrent mutator, or some other logic.
+                    continue;
+                }
+
+                // Trace for children.
+                (self.node_dtypes.type_info_list[node.dtype() as usize].trace_fn)(
+                    node_ptr, &mut gcx,
+                );
+
+                for mut ch in gcx.traced_nodes.drain(..) {
+                    let child = unsafe { ch.as_mut() };
+                    if child.color() == GcTriColor::White {
+                        child.set_color(GcTriColor::Gray);
+                        let pid = child.scope_id();
+                        if pid == partition_id {
+                            par.gray_list.push(ch);
+                        } else if let Some(p) = unsafe { (*heap_ptr).partitions.get_mut(&pid) } {
+                            // put node to its partition's gray_list
+                            p.gray_list.push(ch);
+                        }
+                    }
+                }
+
+                // Mark current node as black.
+                node.set_color(GcTriColor::Black);
+                steps += 1;
+            }
+        }
+
+        true
+    }
 
     /// optionally call `on_dispose` before a node is disposed
     pub fn sweep(
         &mut self,
         partition_id: GcPartitionId,
-        predicate: impl Fn(&GcHead) -> bool,
         on_dispose: impl Fn(&GcHeap, &GcHead),
     ) -> usize {
-        if let Some(link0) = self
-            .partition_mut(partition_id)
-            .and_then(|p| p.nodes.take())
-        {
-            let call_on_dispose = !std::ptr::addr_eq(&on_dispose, &Self::DUMMY_DISPOSE_CALLBACK);
+        if let Some(link0) = self.partition_mut(partition_id).and_then(|p| {
+            if p.marking && p.gray_list.is_empty() {
+                p.marking = false;
+                p.nodes.take()
+            } else {
+                None // mark cycle not done
+            }
+        }) {
+            #[cfg(debug_assertions)]
+            for n in NodeLinkIter::new(Some(link0)) {
+                unsafe {
+                    debug_assert!(
+                        matches!(n.as_ref().color(), GcTriColor::Black | GcTriColor::White),
+                        "sweep node must be black or white: {:?}",
+                        n.as_ref()
+                    );
+                }
+            }
 
+            let call_on_dispose = !std::ptr::addr_eq(&on_dispose, &Self::DUMMY_DISPOSE_CALLBACK);
             let mut link1 = Some(link0);
             let mut freed_bytes = 0;
 
@@ -41,9 +154,11 @@ impl GcHeap {
 
                         current = this.as_mut().next;
 
-                        let dtype = this.as_ref().dtype() as usize;
-                        let info = &self.node_dtypes.type_info_list[dtype];
-                        if predicate(this.as_mut()) && info.drop_pass == pass {
+                        let drop_pass = self.node_dtypes.type_info_list
+                            [this.as_ref().dtype() as usize]
+                            .drop_pass;
+
+                        if drop_pass == pass && this.as_ref().color() == GcTriColor::White {
                             if let Some(mut p) = prev {
                                 p.as_mut().next = current;
                             } else {
@@ -75,12 +190,31 @@ impl GcHeap {
                 }
             }
 
-            // update node link for partition
-            if let Some(p) = self.partition_mut(partition_id) {
+            debug_assert!(
+                self.partition_mut(partition_id)
+                    .unwrap()
+                    .gray_list
+                    .is_empty()
+            );
+
+            // update remainder node link of partition
+            if link1.is_some() {
+                // reset nodes to white color
+                for mut n in NodeLinkIter::new(link1) {
+                    unsafe {
+                        debug_assert_eq!(n.as_ref().color(), GcTriColor::Black);
+                        n.as_mut().set_color(GcTriColor::White);
+                    }
+                }
+
+                let p = self.partition_mut(partition_id).unwrap();
                 p.nodes = link1;
             }
+
             // Decrease partitions memory usage
-            self.update_mem_use(partition_id, -(freed_bytes as i32));
+            if freed_bytes != 0 {
+                self.update_mem_use(partition_id, -(freed_bytes as i32));
+            }
 
             freed_bytes
         } else {
@@ -95,13 +229,15 @@ impl GcHeap {
         partition_id: GcPartitionId,
         on_dispose: impl Fn(&GcHeap, &GcHead),
     ) -> usize {
-        if self.partition(partition_id).is_some() {
-            let mut ctx = GcTraceCtx::new(self, true);
-            ctx.trace_roots(partition_id);
-            self.sweep(partition_id, Self::SWEEP_UNMARKED_FUNC, on_dispose)
-        } else {
-            0
+        if self.partition(partition_id).is_none() {
+            return 0;
         }
+
+        // Mark phase: incrementally process gray list until all reachable nodes are marked
+        while !self.mark(partition_id, 64) {}
+
+        // Sweep phase: reclaim unmarked (white) nodes
+        self.sweep(partition_id, on_dispose)
     }
 
     /// Dispose all nodes along chain
@@ -168,7 +304,7 @@ mod sweep_test {
     use super::*;
     use crate::GcRef;
 
-    use crate::trace::GcTracable;
+    use crate::trace::{GcTracable, GcTraceCtx};
 
     #[derive(Debug)]
     struct MyI32(i32);
@@ -210,42 +346,31 @@ mod sweep_test {
         nodes
     }
 
-    /// Test basic sweep_with functionality
+    /// Test basic sweep functionality
     #[test]
     fn test_sweep_with_basic() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_root_partition(4096);
 
-        let _objects: Vec<GcRef<MyI32>> = (0..5)
+        let objects: Vec<GcRef<MyI32>> = (0..5)
             .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
             .collect();
 
-        // Verify we have 5 nodes
+        for (i, obj) in objects.iter().enumerate() {
+            if i % 2 == 1 {
+                heap.set_root(*obj, true);
+            }
+        }
+
         assert_eq!(count_nodes_in_partition(&heap, partition_id), 5);
 
-        // Create a predicate that removes objects with even values
-        let removed = heap.sweep(
-            partition_id,
-            |node| {
-                unsafe {
-                    let payload_ptr =
-                        (node as *const GcHead as *const u8).add(std::mem::size_of::<GcHead>());
-                    let value = (*(payload_ptr as *const MyI32)).0;
-                    value % 2 == 0 // Remove even numbers
-                }
-            },
-            |_, n| {
-                println!("dispose node: {n:?}");
-            },
-        );
+        while !heap.mark(partition_id, 64) {}
 
-        // Should have removed 3 objects (0, 2, 4 are even)
+        let removed = heap.sweep(partition_id, |_, _| {});
         assert!(removed > 0, "Should have freed some bytes");
 
-        // Verify we have 2 nodes left (1 and 3)
         assert_eq!(count_nodes_in_partition(&heap, partition_id), 2);
 
-        // Verify the remaining nodes have odd values
         let remaining_nodes = get_all_nodes_in_partition(&heap, partition_id);
         for node in remaining_nodes {
             unsafe {
@@ -262,20 +387,16 @@ mod sweep_test {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_root_partition(4096);
 
-        let _objects: Vec<GcRef<MyI32>> = (0..5)
+        let objects: Vec<GcRef<MyI32>> = (0..5)
             .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
             .collect();
 
-        // Mark first 3 objects (0, 1, 2) for removal
-        let removed = heap.sweep(
-            partition_id,
-            |node| {
-                let payload_ptr = node.payload().cast::<MyI32>();
-                let value = unsafe { (*payload_ptr.as_ptr()).0 };
-                value < 3 // Remove values 0, 1, 2
-            },
-            GcHeap::DUMMY_DISPOSE_CALLBACK,
-        );
+        heap.set_root(objects[3], true);
+        heap.set_root(objects[4], true);
+
+        while !heap.mark(partition_id, 64) {}
+
+        let removed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
 
         assert!(removed > 0, "Should have freed some bytes");
 
@@ -321,14 +442,11 @@ mod sweep_test {
             .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
             .collect();
 
-        // Remove all nodes
-        let removed = heap.sweep(
-            partition_id,
-            |_| true,
-            |_, n| {
-                println!("dispose {n:?}");
-            },
-        );
+        while !heap.mark(partition_id, 64) {}
+
+        let removed = heap.sweep(partition_id, |_, n| {
+            println!("dispose {n:?}");
+        });
 
         assert!(removed > 0, "Should have freed some bytes");
 
@@ -349,20 +467,19 @@ mod sweep_test {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_root_partition(4096);
 
-        let _objects: Vec<GcRef<MyI32>> = (0..5)
+        let objects: Vec<GcRef<MyI32>> = (0..5)
             .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
             .collect();
 
-        // Remove only middle node (value 2)
-        let removed = heap.sweep(
-            partition_id,
-            |node| unsafe {
-                let payload_ptr = node.payload().cast::<MyI32>();
-                let value = (*payload_ptr.as_ptr()).0;
-                value == 2
-            },
-            GcHeap::DUMMY_DISPOSE_CALLBACK,
-        );
+        for (i, obj) in objects.iter().enumerate() {
+            if i != 2 {
+                heap.set_root(*obj, true);
+            }
+        }
+
+        while !heap.mark(partition_id, 64) {}
+
+        let removed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
 
         assert!(removed > 0, "Should have freed some bytes");
 
@@ -398,10 +515,8 @@ mod sweep_test {
             .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
             .collect();
 
-        // Mark first object as root
         heap.set_root(root_obj, true);
 
-        // Verify root list contains the object
         assert!(
             heap.partitions
                 .get(&partition_id)
@@ -410,16 +525,14 @@ mod sweep_test {
                 .contains(&root_obj.head_ptr)
         );
 
-        // Remove the root object
-        let removed = heap.sweep(
-            partition_id,
-            |node| unsafe {
-                let payload_ptr = node.payload().cast::<MyI32>();
-                let value = (*payload_ptr.as_ptr()).0;
-                value == 0
-            },
-            GcHeap::DUMMY_DISPOSE_CALLBACK,
-        );
+        heap.set_root(root_obj, false);
+        for obj in &_objects {
+            heap.set_root(*obj, true);
+        }
+
+        while !heap.mark(partition_id, 64) {}
+
+        let removed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
 
         assert!(removed > 0, "Should have freed some bytes");
 
@@ -443,8 +556,9 @@ mod sweep_test {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_root_partition(4096);
 
-        // No objects allocated, sweep should return 0
-        let removed = heap.sweep(partition_id, |_| true, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        while !heap.mark(partition_id, 64) {}
+
+        let removed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
         assert_eq!(removed, 0, "Should return 0 for empty partition");
     }
 
@@ -454,12 +568,7 @@ mod sweep_test {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let non_existent_partition = GcPartitionId(9999);
 
-        // Non-existent partition should return 0
-        let removed = heap.sweep(
-            non_existent_partition,
-            |_| true,
-            GcHeap::DUMMY_DISPOSE_CALLBACK,
-        );
+        let removed = heap.sweep(non_existent_partition, GcHeap::DUMMY_DISPOSE_CALLBACK);
         assert_eq!(removed, 0, "Should return 0 for non-existent partition");
     }
 }

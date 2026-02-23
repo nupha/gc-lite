@@ -212,18 +212,35 @@ pub trait GcNode: GcTracable {
     /// Node data type id
     const GC_TYPE_ID: u8;
 
+    fn gc_ref(&self) -> GcRef<Self>
+    where
+        Self: std::marker::Sized;
+
     /// get gc node head info pointer
-    fn gc_head_ptr(&self) -> NonNull<GcHead>;
+    // fn gc_head_ptr(&self) -> NonNull<GcHead>;
+    #[inline(always)]
+    fn gc_head_ptr(&self) -> std::ptr::NonNull<GcHead>
+    where
+        Self: std::marker::Sized,
+    {
+        self.gc_ref().node_ptr()
+    }
 
     /// get gc node head info
     #[inline(always)]
-    fn gc_head(&self) -> &GcHead {
+    fn gc_head(&self) -> &GcHead
+    where
+        Self: std::marker::Sized,
+    {
         unsafe { self.gc_head_ptr().as_ref() }
     }
 
     /// get gc node head info
     #[inline(always)]
-    fn gc_head_mut(&mut self) -> &mut GcHead {
+    fn gc_head_mut(&mut self) -> &mut GcHead
+    where
+        Self: std::marker::Sized,
+    {
         unsafe { self.gc_head_ptr().as_mut() }
     }
 }
@@ -245,9 +262,10 @@ impl<T: GcNode> Deref for GcRef<T> {
 }
 
 impl<T: GcNode> DerefMut for GcRef<T> {
+    /// FIXME: DerefMut breaks gc node write barrier. This should be disabled.
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { self.head_ptr.as_ref().payload().cast::<T>().as_mut() }
+        unsafe { self.head_ptr.as_mut().payload().cast::<T>().as_mut() }
     }
 }
 
@@ -346,6 +364,20 @@ impl<T: GcNode> GcRef<T> {
         }
     }
 
+    pub fn with_mut<F, R>(&mut self, heap: &mut GcHeap, mutator: F) -> R
+    where
+        F: FnOnce(&mut T) -> R,
+    {
+        let head = unsafe { self.head_ptr.as_mut() };
+        if head.color() == GcTriColor::Black {
+            head.set_color(GcTriColor::Gray);
+            heap.add_gray_node(self.head_ptr);
+        }
+
+        let value = unsafe { head.payload().cast::<T>().as_mut() };
+        mutator(value)
+    }
+
     #[inline]
     pub fn as_ptr(&self) -> NonNull<T> {
         unsafe { self.head_ptr.as_ref().payload().cast::<T>() }
@@ -363,6 +395,7 @@ impl<T: GcNode> GcRef<T> {
     }
 
     /// get node raw pointer
+    #[deprecated(note = "this may break write barrier. this is unsafe.")]
     #[inline(always)]
     pub fn node_ptr(&self) -> NonNull<GcHead> {
         self.head_ptr
@@ -373,11 +406,40 @@ impl<T: GcNode> GcRef<T> {
     pub fn node_info(&self) -> &GcHead {
         unsafe { self.head_ptr.as_ref() }
     }
+}
 
-    /// get node info mut
-    #[inline(always)]
-    pub fn node_info_mut(&mut self) -> &mut GcHead {
-        unsafe { self.head_ptr.as_mut() }
+impl GcHeap {
+    /// bind nodes relationship for directed reference: from `master` to `slave`.
+    /// will perform cross scope reference update and tri-color marking.
+    pub fn bind(&mut self, master: NonNull<GcHead>, slave: NonNull<GcHead>) {
+        #[cfg(debug_assertions)]
+        unsafe {
+            master.as_ref().debug_assert_node_valid(self);
+            slave.as_ref().debug_assert_node_valid(self);
+        }
+
+        if unsafe { master.as_ref().scope_id() != slave.as_ref().scope_id() } {
+            // update cross scope reference
+            let xref = unsafe {
+                let x = master.as_ref().xref();
+                if x.is_null() {
+                    master.as_ref().scope_id()
+                } else {
+                    x
+                }
+            };
+            self.set_xref(xref, slave);
+        } else {
+            // tri-color marking
+            unsafe {
+                if matches!(
+                    (master.as_ref().color(), slave.as_ref().color()),
+                    (GcTriColor::Black, GcTriColor::White | GcTriColor::Gray)
+                ) {
+                    self.add_gray_node(slave);
+                }
+            }
+        }
     }
 }
 

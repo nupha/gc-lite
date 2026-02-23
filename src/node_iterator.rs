@@ -3,7 +3,7 @@
 
 use std::ptr::NonNull;
 
-use crate::{GcPartitionId, heap::GcHeap, node::GcHead};
+use crate::{GcPartition, GcPartitionId, heap::GcHeap, node::GcHead};
 
 /// Iterate along node link chain
 #[repr(transparent)]
@@ -38,5 +38,12 @@ impl GcHeap {
     #[inline]
     pub fn nodes(&self, partition_id: GcPartitionId) -> NodeLinkIter<'_> {
         NodeLinkIter::new(self.partitions.get(&partition_id).and_then(|p| p.nodes))
+    }
+}
+
+impl GcPartition {
+    #[inline]
+    pub fn nodes(&self) -> NodeLinkIter<'_> {
+        NodeLinkIter::new(self.nodes)
     }
 }

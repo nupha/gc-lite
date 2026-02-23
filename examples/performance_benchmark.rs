@@ -117,13 +117,13 @@ fn benchmark_complex_graphs() {
                 for j in 1..=5 {
                     if i + j < size {
                         let n = nodes[i + j];
-                        nodes[i].neighbors.push(n);
+                        nodes[i].with_mut(&mut context, |node| node.neighbors.push(n));
                     }
                 }
                 // Every 10 nodes form a cycle
                 if i % 10 == 0 && i + 9 < size {
                     let n = nodes[i];
-                    nodes[i + 9].neighbors.push(n);
+                    nodes[i + 9].with_mut(&mut context, |node| node.neighbors.push(n));
                 }
             }
         }

@@ -5,7 +5,10 @@ use std::{cell::Cell, ptr::NonNull};
 
 use smallvec::SmallVec;
 
-use crate::{GcHead, GcHeap, node::GcNodeFlag};
+use crate::{
+    GcHead, GcHeap,
+    node::{GcNodeFlag, GcTriColor},
+};
 
 /// Partition ID
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -58,6 +61,8 @@ pub struct GcPartition {
     pub(crate) nodes: Option<NonNull<GcHead>>,
     /// root nodes in this partition
     pub(crate) root_nodes: SmallVec<[NonNull<GcHead>; 8]>,
+    /// nodes to be traced in this partition
+    pub(crate) gray_list: Vec<NonNull<GcHead>>,
     /// Current memory usage
     pub(crate) memory_used: usize,
     /// Memory usage limit, 0 for unlimited
@@ -65,6 +70,8 @@ pub struct GcPartition {
     /// Garbage collection threshold (triggers automatic GC when memory usage reaches this byte count)
     /// A value of 0 means automatic GC is disabled
     pub(crate) gc_threshold: usize,
+    /// Is in a marking cycle
+    pub(crate) marking: bool,
 }
 
 impl GcPartition {
@@ -77,6 +84,8 @@ impl GcPartition {
             gc_threshold: 0, // Default threshold is 0 bytes (disable automatic GC)
             nodes: None,
             root_nodes: SmallVec::new(),
+            gray_list: Vec::new(),
+            marking: false,
         }
     }
 
@@ -321,60 +330,63 @@ impl GcHeap {
             // fix xref tree recursively
             if let Some(par) = self.partitions.get_mut(&pid) {
                 let roots = std::mem::take(&mut par.root_nodes);
-                for &xn in roots
-                    .iter()
-                    .filter(|n| unsafe { !n.as_ref().xref().is_null() })
-                {
-                    let xref = unsafe {
-                        debug_assert_eq!(xn.as_ref().scope_id(), pid); // O.o
-                        xn.as_ref().xref()
-                    };
 
-                    // trace solution 1
-                    // for mut n in self.nodes(pid) {
-                    //     unsafe {
-                    //         n.as_mut().reset_color();
-                    //     }
-                    // }
-                    // let mut gcx = GcTraceCtx::new(self, false);
-                    // gcx.trace_callback(xn, |mut n, hp| unsafe {
-                    //     let xref0 = n.as_ref().xref();
+                // self.mark_restart(pid);
 
-                    //     let xref2 = if xref0.is_null() {
-                    //         hp.common_parent2(xref, n.as_ref().scope_id())
-                    //     } else {
-                    //         hp.common_parent3(xref, n.as_ref().scope_id(), xref0)
-                    //     };
-                    //     debug_assert!(!xref2.is_null());
+                // for &xn in roots
+                //     .iter()
+                //     .filter(|n| unsafe { !n.as_ref().xref().is_null() })
+                // {
+                //     let xref = unsafe {
+                //         debug_assert_eq!(xn.as_ref().scope_id(), pid); // O.o
+                //         xn.as_ref().xref()
+                //     };
 
-                    //     if n.as_mut().set_xref(xref2) && n.as_ref().scope_id() != pid {
-                    //         // xref was set. if node not in removing scope, mark the node as root node.
-                    //         hp.set_root_node(n, true);
-                    //     }
-                    // });
+                //     self.add_gray_node(xn);
 
-                    // trace solution 2
-                    self.traverse_subtree(xn, GcPartitionId::NONE, {
-                        let hp = NonNull::from_ref(self);
+                //     let mut gcx = self.create_trace_ctx();
 
-                        move |mut n, _| unsafe {
-                            let xref0 = n.as_ref().xref();
+                //     // trace solution 1
+                //     self.trace_node(xn, &mut gcx);
 
-                            let xref = if xref0.is_null() {
-                                hp.as_ref().common_parent2(xref, n.as_ref().scope_id())
-                            } else {
-                                hp.as_ref()
-                                    .common_parent3(xref, n.as_ref().scope_id(), xref0)
-                            };
-                            debug_assert!(!xref.is_null());
+                //     gcx.trace_callback(xn, |mut n, hp| unsafe {
+                //         let xref0 = n.as_ref().xref();
 
-                            if n.as_mut().set_xref(xref) && n.as_ref().scope_id() != pid {
-                                // xref was set. if node not in removing scope, mark the node as root node.
-                                (*hp.as_ptr()).set_root_node(n, true);
-                            }
-                        }
-                    });
-                }
+                //         let xref2 = if xref0.is_null() {
+                //             hp.common_parent2(xref, n.as_ref().scope_id())
+                //         } else {
+                //             hp.common_parent3(xref, n.as_ref().scope_id(), xref0)
+                //         };
+                //         debug_assert!(!xref2.is_null());
+
+                //         if n.as_mut().set_xref(xref2) && n.as_ref().scope_id() != pid {
+                //             // xref was set. if node not in removing scope, mark the node as root node.
+                //             hp.set_root_node(n, true);
+                //         }
+                //     });
+
+                //     // trace solution 2
+                //     // self.traverse_subtree(xn, GcPartitionId::NONE, {
+                //     //     let hp = NonNull::from_ref(self);
+
+                //     //     move |mut n, _| unsafe {
+                //     //         let xref0 = n.as_ref().xref();
+
+                //     //         let xref = if xref0.is_null() {
+                //     //             hp.as_ref().common_parent2(xref, n.as_ref().scope_id())
+                //     //         } else {
+                //     //             hp.as_ref()
+                //     //                 .common_parent3(xref, n.as_ref().scope_id(), xref0)
+                //     //         };
+                //     //         debug_assert!(!xref.is_null());
+
+                //     //         if n.as_mut().set_xref(xref) && n.as_ref().scope_id() != pid {
+                //     //             // xref was set. if node not in removing scope, mark the node as root node.
+                //     //             (*hp.as_ptr()).set_root_node(n, true);
+                //     //         }
+                //     //     }
+                //     // });
+                // }
             }
 
             if let Some(mut par) = self.partitions.remove(&pid)
