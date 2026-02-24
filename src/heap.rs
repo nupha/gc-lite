@@ -272,9 +272,12 @@ impl GcHeap {
     pub fn protect_nodes(&self, nodes: &[NonNull<GcHead>]) -> GcNodeGuard<'_> {
         let mut lst = SmallVec::<[NonNull<GcHead>; 8]>::new();
 
+        let heap_ptr = self as *const Self as *mut Self;
+
         for n in nodes {
             let mut node = *n;
             unsafe {
+                (*heap_ptr).mark_protected_node(node);
                 node.as_mut().inc_protect_count();
             }
             lst.push(node);
@@ -282,6 +285,7 @@ impl GcHeap {
 
         GcNodeGuard {
             nodes: lst,
+            heap: heap_ptr,
             _mark: PhantomData,
         }
     }
@@ -391,6 +395,7 @@ impl GcHeap {
 
 pub struct GcNodeGuard<'a> {
     nodes: SmallVec<[NonNull<GcHead>; 8]>,
+    heap: *mut GcHeap,
     _mark: PhantomData<&'a ()>,
 }
 
@@ -409,6 +414,7 @@ impl<'a> GcNodeGuard<'a> {
     pub fn add(&mut self, mut node: NonNull<GcHead>) {
         if !self.nodes.contains(&node) {
             unsafe {
+                (*self.heap).mark_protected_node(node);
                 node.as_mut().inc_protect_count();
                 self.nodes.push(node);
             }

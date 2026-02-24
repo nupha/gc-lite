@@ -31,12 +31,23 @@ impl GcHeap {
         }
     }
 
+    pub(super) fn mark_protected_node(&mut self, node_ptr: NonNull<GcHead>) {
+        let node = unsafe { node_ptr.as_ref() };
+
+        if node.color() == GcTriColor::White {
+            let scope = node.scope_id();
+            let par = self.partition(scope).unwrap();
+            if par.is_marking() {
+                self.add_gray_node(node_ptr);
+            }
+        }
+    }
+
     pub fn mark(&mut self, partition_id: GcPartitionId, max_steps: usize) -> bool {
         let heap_ptr = self as *mut Self;
 
         if let Some(par) = self.partitions.get_mut(&partition_id) {
             if !par.is_marking() {
-                // Start new marking cycle.
                 debug_assert!(par.gray_list.is_empty());
 
                 for mut n in par.nodes() {
@@ -46,13 +57,26 @@ impl GcHeap {
                 }
                 par.set_marking(true);
 
-                // Add all root nodes to the gray list.
                 for n in par.root_nodes.iter() {
                     let mut root = *n;
                     unsafe {
                         root.as_mut().set_color(GcTriColor::Gray);
                     }
                     par.gray_list.push(root);
+                }
+
+                for mut n in NodeLinkIter::new(par.nodes) {
+                    unsafe {
+                        if n.as_ref().is_protected() {
+                            let node = n.as_mut();
+                            if matches!(node.color(), GcTriColor::White | GcTriColor::Gray) {
+                                node.set_color(GcTriColor::Gray);
+                                if !par.gray_list.contains(&n) {
+                                    par.gray_list.push(n);
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -197,8 +221,8 @@ impl GcHeap {
                 for n in NodeLinkIter::new(link1) {
                     unsafe {
                         debug_assert!(
-                            n.as_ref().color() == GcTriColor::Black || n.as_ref().is_protected(),
-                            "remainder nodes should be black, or protected"
+                            n.as_ref().color() == GcTriColor::Black,
+                            "live nodes should be black only"
                         );
                     }
                 }
