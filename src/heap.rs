@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{collections::HashMap, ptr::NonNull};
+use std::{collections::HashMap, marker::PhantomData, ptr::NonNull};
 
 use crate::{
     GcNode, GcRef,
@@ -266,6 +266,16 @@ impl GcHeap {
             .any(|p| p == node)
     }
 
+    pub fn protect_nodes<'a>(&'a self, nodes: &'a [NonNull<GcHead>]) -> GcNodeGuard<'a> {
+        for &node in nodes {
+            let mut n = node;
+            unsafe {
+                n.as_mut().inc_protect_count();
+            }
+        }
+        GcNodeGuard { nodes }
+    }
+
     /// 检测一个节点是否从指定的起始节点开始能被追踪到
     ///
     /// # 参数
@@ -361,6 +371,21 @@ impl GcHeap {
         }
 
         res
+    }
+}
+
+pub struct GcNodeGuard<'a> {
+    nodes: &'a [NonNull<GcHead>],
+}
+
+impl<'heap> Drop for GcNodeGuard<'heap> {
+    fn drop(&mut self) {
+        for n in self.nodes {
+            let mut node = *n;
+            unsafe {
+                node.as_mut().dec_protect_count();
+            }
+        }
     }
 }
 
@@ -480,5 +505,66 @@ mod heap_tests {
             !heap.is_node_reachable(node_d.head_ptr, starts),
             "D should not be reachable from A"
         );
+    }
+
+    #[test]
+    fn test_protect_count_and_guard_lifecycle() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition(4096);
+
+        let node: GcRef<Node> = heap
+            .alloc(
+                partition_id,
+                Node {
+                    next: None,
+                    value: 1,
+                },
+            )
+            .unwrap();
+
+        let head = node.head_ptr;
+
+        unsafe {
+            assert_eq!(head.as_ref().protect_count(), 0);
+        }
+
+        {
+            let nn = [head];
+            let _g1 = heap.protect_nodes(&nn);
+            unsafe {
+                assert_eq!(head.as_ref().protect_count(), 1);
+            }
+        }
+
+        unsafe {
+            assert_eq!(head.as_ref().protect_count(), 0);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "GcHead protect count overflow")]
+    fn test_protect_count_overflow_panics() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition(4096);
+
+        let node: GcRef<Node> = heap
+            .alloc(
+                partition_id,
+                Node {
+                    next: None,
+                    value: 1,
+                },
+            )
+            .unwrap();
+
+        let mut head = node.head_ptr;
+
+        unsafe {
+            let h = head.as_mut();
+            for _ in 0..7 {
+                h.inc_protect_count();
+            }
+            h.inc_protect_count();
+        }
     }
 }

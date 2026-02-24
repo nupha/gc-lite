@@ -37,18 +37,18 @@ impl TryFrom<u32> for GcTriColor {
 }
 
 const COLOR_MASK: u32 = 0b11;
-const FLAGS_ATTR_MASK: u32 = 0xFF;
+const PROTECT_COUNT_SHIFT: u32 = 2;
+const PROTECT_COUNT_MASK: u32 = 0b111 << PROTECT_COUNT_SHIFT;
 
 bitflags::bitflags! {
     #[repr(transparent)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct GcNodeFlag :u8 {
-        // bit 0, 1 are for TriColor
         /// is root node
-        const ROOT = 1 << 2;
+        const ROOT = 1 << 5;
 
         /// internal traversal visited flag
-        const TRAVERSE_VISITED = 1 << 3;
+        const TRAVERSE_VISITED = 1 << 6;
 
         #[cfg(debug_assertions)]
         const MAGIC_NUM = 1 << 7;
@@ -58,8 +58,11 @@ bitflags::bitflags! {
 /// GC node info
 pub struct GcHead {
     /// Attributes of node:
+    /// * bit 24-31: debug sentinel (debug build)
+    /// * bit 16-23: reserved
     /// * bit 8-15:  gc datatype id
-    /// * bit 2-7:   flags
+    /// * bit 5-7:   flags
+    /// * bit 2-4:   protect count (1-7 means protected)
     /// * bit 0-1:   TriColor state
     pub(super) attrs: u32,
 
@@ -119,10 +122,37 @@ impl GcHead {
         self.attrs = (self.attrs & !COLOR_MASK) | (color as u32);
     }
 
-    /// Set White color, preserving other flags.
     #[inline(always)]
-    pub fn reset_color(&mut self) {
-        self.set_color(GcTriColor::White);
+    pub(crate) fn protect_count(&self) -> u8 {
+        ((self.attrs & PROTECT_COUNT_MASK) >> PROTECT_COUNT_SHIFT) as u8
+    }
+
+    #[inline(always)]
+    fn set_protect_count(&mut self, count: u8) {
+        debug_assert!(count <= 7);
+        let count = (count as u32) << PROTECT_COUNT_SHIFT;
+        self.attrs = (self.attrs & !PROTECT_COUNT_MASK) | count;
+    }
+
+    #[inline(always)]
+    pub(crate) fn inc_protect_count(&mut self) {
+        let count = self.protect_count();
+        if count >= 7 {
+            panic!("GcHead protect count overflow");
+        }
+        self.set_protect_count(count + 1);
+    }
+
+    #[inline(always)]
+    pub(crate) fn dec_protect_count(&mut self) {
+        let count = self.protect_count();
+        debug_assert!(count > 0);
+        self.set_protect_count(count - 1);
+    }
+
+    #[inline(always)]
+    pub(crate) fn is_protected(&self) -> bool {
+        self.protect_count() > 0
     }
 
     #[inline(always)]
@@ -416,7 +446,7 @@ impl<T: GcNode> GcRef<T> {
 impl GcHeap {
     /// bind nodes relationship for directed reference: from `master` to `slave`.
     /// will perform cross scope reference update and tri-color marking.
-    pub fn bind(&mut self, master: NonNull<GcHead>, slave: NonNull<GcHead>) {
+    pub fn bind(&mut self, master: NonNull<GcHead>, mut slave: NonNull<GcHead>) {
         #[cfg(debug_assertions)]
         unsafe {
             master.as_ref().debug_assert_node_valid(self);
@@ -429,7 +459,15 @@ impl GcHeap {
                 (master.as_ref().color(), slave.as_ref().color()),
                 (GcTriColor::Black, GcTriColor::White | GcTriColor::Gray)
             ) {
-                self.add_gray_node(slave);
+                slave.as_mut().set_color(GcTriColor::Gray);
+
+                if self
+                    .partition(slave.as_ref().scope_id())
+                    .unwrap()
+                    .is_marking()
+                {
+                    self.add_gray_node(slave);
+                }
             }
         }
 

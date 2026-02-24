@@ -37,16 +37,13 @@ impl GcHeap {
         if let Some(par) = self.partitions.get_mut(&partition_id) {
             if !par.is_marking() {
                 // Start new marking cycle.
-                debug_assert!(
-                    !par.nodes()
-                        .any(|n| unsafe { n.as_ref().color() != GcTriColor::White }),
-                    "all nodes should be white: {:?}",
-                    par.nodes()
-                        .map(|n| unsafe { n.as_ref() })
-                        .collect::<Vec<_>>()
-                );
                 debug_assert!(par.gray_list.is_empty());
 
+                for mut n in par.nodes() {
+                    unsafe {
+                        n.as_mut().set_color(GcTriColor::White);
+                    }
+                }
                 par.set_marking(true);
 
                 // Add all root nodes to the gray list.
@@ -152,8 +149,10 @@ impl GcHeap {
                         let drop_pass = self.node_dtypes.type_info_list
                             [this.as_ref().dtype() as usize]
                             .drop_pass;
+                        let is_white = this.as_ref().color() == GcTriColor::White;
+                        let is_protected = this.as_ref().is_protected();
 
-                        if drop_pass == pass && this.as_ref().color() == GcTriColor::White {
+                        if drop_pass == pass && is_white && !is_protected {
                             if let Some(mut p) = prev {
                                 p.as_mut().next = current;
                             } else {
@@ -194,11 +193,13 @@ impl GcHeap {
 
             // update remainder node link of partition
             if link1.is_some() {
-                // reset remainder nodes to white color
-                for mut n in NodeLinkIter::new(link1) {
+                #[cfg(debug_assertions)]
+                for n in NodeLinkIter::new(link1) {
                     unsafe {
-                        debug_assert_eq!(n.as_ref().color(), GcTriColor::Black);
-                        n.as_mut().set_color(GcTriColor::White);
+                        debug_assert!(
+                            n.as_ref().color() == GcTriColor::Black || n.as_ref().is_protected(),
+                            "remainder nodes should be black, or protected"
+                        );
                     }
                 }
 

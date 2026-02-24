@@ -15,7 +15,7 @@ mod xref;
 
 pub use {
     gctype::{GcTypeInfo, GcTypeRegistry, drop_fn as gctype_drop, trace_fn as gctype_trace},
-    heap::GcHeap,
+    heap::{GcHeap, GcNodeGuard},
     helpers::{GcError, GcResult},
     node::{GcHead, GcNode, GcRef},
     partition::{GcPartition, GcPartitionId},
