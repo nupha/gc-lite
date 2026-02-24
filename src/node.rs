@@ -130,18 +130,6 @@ impl GcHead {
         GcNodeFlag::from_bits_truncate(self.attrs as u8)
     }
 
-    #[inline(always)]
-    pub(crate) fn set_flags(&mut self, flags: GcNodeFlag) {
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            flags.contains(GcNodeFlag::MAGIC_NUM),
-            "MAGIC_NUM flag is missing"
-        );
-
-        self.attrs =
-            (self.attrs & !FLAGS_ATTR_MASK) | (flags.bits() as u32) | (self.attrs & COLOR_MASK);
-    }
-
     /// Add a flag.
     #[inline(always)]
     pub(crate) fn insert_flag(&mut self, flag: GcNodeFlag) {
@@ -229,12 +217,12 @@ pub trait GcNode: GcTracable {
     /// Node data type id
     const GC_TYPE_ID: u8;
 
+    /// get gc ref
     fn gc_ref(&self) -> GcRef<Self>
     where
         Self: std::marker::Sized;
 
-    /// get gc node head info pointer
-    // fn gc_head_ptr(&self) -> NonNull<GcHead>;
+    /// get gc node head pointer
     #[inline(always)]
     fn gc_head_ptr(&self) -> std::ptr::NonNull<GcHead>
     where
