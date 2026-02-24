@@ -3,6 +3,8 @@
 
 use std::{collections::HashMap, marker::PhantomData, ptr::NonNull};
 
+use smallvec::SmallVec;
+
 use crate::{
     GcNode, GcRef,
     gctype::GcTypeRegistry,
@@ -266,14 +268,27 @@ impl GcHeap {
             .any(|p| p == node)
     }
 
-    pub fn protect_nodes<'a>(&'a self, nodes: &'a [NonNull<GcHead>]) -> GcNodeGuard<'a> {
-        for &node in nodes {
-            let mut n = node;
+    #[must_use]
+    pub fn protect_nodes(&self, nodes: &[NonNull<GcHead>]) -> GcNodeGuard<'_> {
+        let mut lst = SmallVec::<[NonNull<GcHead>; 8]>::new();
+
+        for n in nodes {
+            let mut node = *n;
             unsafe {
-                n.as_mut().inc_protect_count();
+                node.as_mut().inc_protect_count();
             }
+            lst.push(node);
         }
-        GcNodeGuard { nodes }
+
+        GcNodeGuard {
+            nodes: lst,
+            _mark: PhantomData,
+        }
+    }
+
+    #[must_use]
+    pub fn protect_node(&self, node: NonNull<GcHead>) -> GcNodeGuard<'_> {
+        self.protect_nodes(&[node])
     }
 
     /// 检测一个节点是否从指定的起始节点开始能被追踪到
@@ -375,15 +390,27 @@ impl GcHeap {
 }
 
 pub struct GcNodeGuard<'a> {
-    nodes: &'a [NonNull<GcHead>],
+    nodes: SmallVec<[NonNull<GcHead>; 8]>,
+    _mark: PhantomData<&'a ()>,
 }
 
-impl<'heap> Drop for GcNodeGuard<'heap> {
+impl<'a> Drop for GcNodeGuard<'a> {
     fn drop(&mut self) {
-        for n in self.nodes {
-            let mut node = *n;
+        for mut node in self.nodes.drain(..) {
             unsafe {
                 node.as_mut().dec_protect_count();
+            }
+        }
+    }
+}
+
+impl<'a> GcNodeGuard<'a> {
+    /// add an extra node to protector
+    pub fn add(&mut self, mut node: NonNull<GcHead>) {
+        if !self.nodes.contains(&node) {
+            unsafe {
+                node.as_mut().inc_protect_count();
+                self.nodes.push(node);
             }
         }
     }
@@ -529,8 +556,7 @@ mod heap_tests {
         }
 
         {
-            let nn = [head];
-            let _g1 = heap.protect_nodes(&nn);
+            let _g1 = heap.protect_nodes(&[head]);
             unsafe {
                 assert_eq!(head.as_ref().protect_count(), 1);
             }
