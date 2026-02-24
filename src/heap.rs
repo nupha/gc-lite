@@ -217,22 +217,27 @@ impl GcHeap {
     }
 
     /// Set/unset a node to be root
-    pub fn set_root_node(&mut self, mut node: NonNull<GcHead>, is_root: bool) {
-        unsafe {
-            node.as_mut().set_root(is_root);
+    pub fn set_root_node(&mut self, mut node_ptr: NonNull<GcHead>, is_root: bool) {
+        let node = unsafe { node_ptr.as_mut() };
 
-            let pid = node.as_ref().scope_id();
-            if let Some(partition) = self.partitions.get_mut(&pid) {
-                if is_root {
-                    // Add to partition's root object list
-                    if !partition.root_nodes.contains(&node) {
-                        partition.root_nodes.push(node);
-                    }
-                } else {
-                    // Remove from partition's root object list
-                    if let Some(pos) = partition.root_nodes.iter().position(|&r| r == node) {
-                        partition.root_nodes.swap_remove(pos);
-                    }
+        if node.is_root() != is_root {
+            node.set_root(is_root);
+
+            let pid = node.scope_id();
+            let par = self.partition_mut(pid).unwrap();
+            if is_root {
+                // Add to partition's root object list
+                debug_assert!(!par.root_nodes.contains(&node_ptr));
+                par.root_nodes.push(node_ptr);
+
+                if par.is_marking() && node.color() != GcTriColor::Black {
+                    par.add_gray_node(node_ptr);
+                }
+            } else {
+                // Remove from partition's root object list
+                debug_assert!(par.root_nodes.contains(&node_ptr));
+                if let Some(i) = par.root_nodes.iter().position(|&n| n == node_ptr) {
+                    par.root_nodes.swap_remove(i);
                 }
             }
         }
@@ -386,7 +391,7 @@ mod heap_tests {
     #[test]
     fn test_is_node_reachable() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_root_partition(4096);
+        let partition_id = heap.create_partition(4096);
 
         // 创建三个节点：A -> B -> C
         let node_c: GcRef<Node> = heap

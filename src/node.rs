@@ -435,6 +435,16 @@ impl GcHeap {
             slave.as_ref().debug_assert_node_valid(self);
         }
 
+        // tri-color marking
+        unsafe {
+            if matches!(
+                (master.as_ref().color(), slave.as_ref().color()),
+                (GcTriColor::Black, GcTriColor::White | GcTriColor::Gray)
+            ) {
+                self.add_gray_node(slave);
+            }
+        }
+
         if unsafe { master.as_ref().scope_id() != slave.as_ref().scope_id() } {
             // update cross scope reference
             let xref = unsafe {
@@ -446,16 +456,6 @@ impl GcHeap {
                 }
             };
             self.set_xref(xref, slave);
-        } else {
-            // tri-color marking
-            unsafe {
-                if matches!(
-                    (master.as_ref().color(), slave.as_ref().color()),
-                    (GcTriColor::Black, GcTriColor::White | GcTriColor::Gray)
-                ) {
-                    self.add_gray_node(slave);
-                }
-            }
         }
     }
 }

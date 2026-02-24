@@ -7,6 +7,7 @@ use crate::{GcHead, GcHeap, GcPartitionId};
 
 impl GcHead {
     /// Get cross scope reference
+    #[deprecated]
     pub fn xref(&self) -> GcPartitionId {
         let p = (self.partition >> 16) as u16;
         GcPartitionId(p)
@@ -18,6 +19,7 @@ impl GcHead {
     ///
     /// * true if node has xref set
     /// * false if node has xref unset
+    #[deprecated]
     pub(crate) fn set_xref(&mut self, xref: GcPartitionId) -> bool {
         if !xref.is_null() && xref != self.scope_id() {
             log::trace!("[set_xref] {xref:?} -> {self:?}");
@@ -30,6 +32,7 @@ impl GcHead {
     }
 
     /// Unset cross scope reference
+    #[deprecated]
     #[inline(always)]
     pub fn unset_xref(&mut self) {
         self.set_xref(GcPartitionId::NONE);
@@ -37,9 +40,19 @@ impl GcHead {
 }
 
 impl GcHeap {
+    #[deprecated]
+    pub const fn set_xref(&mut self, from_scope: GcPartitionId, mut node: NonNull<GcHead>) -> bool {
+        false
+    }
+
     /// Updates the node's cross-reference partition to a more general ancestor.
     /// Returns true if node's xref was updated, false if not.
-    pub fn set_xref(&mut self, from_scope: GcPartitionId, mut node: NonNull<GcHead>) -> bool {
+    #[deprecated]
+    pub(crate) fn set_xref_v0(
+        &mut self,
+        from_scope: GcPartitionId,
+        mut node: NonNull<GcHead>,
+    ) -> bool {
         debug_assert!(self.partition(from_scope).is_some());
 
         let (node_pid, xref0) = unsafe {
@@ -79,224 +92,5 @@ impl GcHeap {
 
         self.set_root_node(node, true);
         true
-    }
-}
-
-#[cfg(test)]
-mod xref_tests {
-    use super::*;
-    use crate::{
-        GcRef,
-        trace::{GcTracable, GcTraceCtx},
-    };
-
-    #[derive(Debug)]
-    struct TestNode {
-        children: Vec<GcRef<TestNode>>,
-    }
-
-    unsafe impl GcTracable for TestNode {
-        fn trace(&self, tr: &mut GcTraceCtx) {
-            for ch in &self.children {
-                tr.add(*ch);
-            }
-        }
-    }
-
-    crate::gc_type_register! {
-        TestNode, drop_pass = 0;
-    }
-
-    fn alloc_node(heap: &mut GcHeap, pid: GcPartitionId) -> GcRef<TestNode> {
-        heap.alloc(
-            pid,
-            TestNode {
-                children: Vec::new(),
-            },
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn test_bind_sets_xref_to_common_parent_no_existing_xref() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-
-        let root_id = heap.create_root_partition(4096);
-        let a_id = heap.create_sub_partition(root_id);
-        let b_id = heap.create_sub_partition(root_id);
-
-        let master = alloc_node(&mut heap, a_id);
-        let slave = alloc_node(&mut heap, b_id);
-
-        unsafe { (*slave.head_ptr.as_ptr()).unset_xref() };
-
-        unsafe {
-            assert_eq!(slave.head_ptr.as_ref().xref(), GcPartitionId::NONE);
-        }
-
-        heap.bind(master.head_ptr, slave.head_ptr);
-
-        unsafe {
-            assert_eq!(slave.head_ptr.as_ref().xref(), root_id);
-            assert!(slave.head_ptr.as_ref().is_root());
-        }
-        heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
-    }
-
-    #[test]
-    fn test_bind_no_change_same_partition() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-
-        let root_id = heap.create_root_partition(4096);
-        let a_id = heap.create_sub_partition(root_id);
-
-        let master = alloc_node(&mut heap, a_id);
-        let slave = alloc_node(&mut heap, a_id);
-
-        unsafe {
-            assert_eq!(slave.head_ptr.as_ref().xref(), GcPartitionId::NONE);
-        }
-
-        heap.bind(master.head_ptr, slave.head_ptr);
-
-        unsafe {
-            assert_eq!(slave.head_ptr.as_ref().xref(), GcPartitionId::NONE);
-            assert!(!slave.head_ptr.as_ref().is_root());
-        }
-        heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
-    }
-
-    #[test]
-    fn test_set_xref_elevates_lower_existing_xref() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-
-        let root_id = heap.create_root_partition(4096);
-        let a_id = heap.create_sub_partition(root_id);
-        let a_child = heap.create_sub_partition(a_id);
-        let b_id = heap.create_sub_partition(root_id);
-
-        let master = alloc_node(&mut heap, a_id);
-        let slave = alloc_node(&mut heap, b_id);
-
-        unsafe { (*slave.head_ptr.as_ptr()).set_xref(a_child) };
-
-        unsafe {
-            assert_eq!(slave.head_ptr.as_ref().xref(), a_child);
-        }
-
-        heap.bind(master.head_ptr, slave.head_ptr);
-
-        unsafe {
-            assert_eq!(slave.head_ptr.as_ref().xref(), a_id);
-            assert!(slave.head_ptr.as_ref().is_root());
-        }
-        heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
-    }
-
-    #[test]
-    fn test_set_xref_no_regression_when_existing_xref_higher() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-
-        let root_id = heap.create_root_partition(4096);
-        let a_id = heap.create_sub_partition(root_id);
-        let b_id = heap.create_sub_partition(root_id);
-
-        let master = alloc_node(&mut heap, a_id);
-        let slave = alloc_node(&mut heap, b_id);
-
-        unsafe { (*slave.head_ptr.as_ptr()).set_xref(root_id) };
-
-        unsafe {
-            assert_eq!(slave.head_ptr.as_ref().xref(), root_id);
-        }
-
-        heap.bind(master.head_ptr, slave.head_ptr);
-
-        unsafe {
-            assert_eq!(slave.head_ptr.as_ref().xref(), root_id);
-            assert!(!slave.head_ptr.as_ref().is_root());
-        }
-        heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
-    }
-
-    #[test]
-    fn test_set_xref_same_partition_no_update() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-
-        let root_id = heap.create_root_partition(4096);
-        let a_id = heap.create_sub_partition(root_id);
-
-        let node = alloc_node(&mut heap, a_id);
-
-        unsafe {
-            (*node.head_ptr.as_ptr()).set_xref(root_id);
-            assert_eq!(node.head_ptr.as_ref().xref(), root_id);
-        }
-
-        let updated = heap.set_xref(a_id, node.head_ptr);
-        assert!(!updated);
-
-        unsafe {
-            assert_eq!(node.head_ptr.as_ref().xref(), root_id);
-            assert!(!node.head_ptr.as_ref().is_root());
-        }
-        heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
-    }
-
-    #[test]
-    fn test_set_xref_from_is_lower_no_update() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-
-        let root_id = heap.create_root_partition(4096);
-        let node_pid = heap.create_sub_partition(root_id);
-        let from_pid = heap.create_sub_partition(node_pid);
-
-        let node = alloc_node(&mut heap, node_pid);
-
-        unsafe { (*node.head_ptr.as_ptr()).set_xref(root_id) };
-
-        unsafe {
-            assert_eq!(node.head_ptr.as_ref().xref(), root_id);
-        }
-
-        let updated = heap.set_xref(from_pid, node.head_ptr);
-        assert!(!updated);
-
-        unsafe {
-            assert_eq!(node.head_ptr.as_ref().xref(), root_id);
-            assert!(!node.head_ptr.as_ref().is_root());
-        }
-        heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
-    }
-
-    #[test]
-    fn test_multiple_bind_converges_to_common_parent() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-
-        let root_id = heap.create_root_partition(4096);
-        let a_id = heap.create_sub_partition(root_id);
-        let b_id = heap.create_sub_partition(root_id);
-        let a1_id = heap.create_sub_partition(a_id);
-        let a2_id = heap.create_sub_partition(a_id);
-        let b1_id = heap.create_sub_partition(b_id);
-
-        let master_a2 = alloc_node(&mut heap, a2_id);
-        let master_b1 = alloc_node(&mut heap, b1_id);
-        let mut node = alloc_node(&mut heap, a1_id);
-
-        node.with_mut(&mut heap, |n| n.children.push(master_a2));
-
-        unsafe {
-            (*node.head_ptr.as_ptr()).set_xref(a_id);
-            assert_eq!(node.head_ptr.as_ref().xref(), a_id);
-        }
-
-        heap.bind(master_b1.head_ptr, node.head_ptr);
-
-        unsafe {
-            assert_eq!(node.head_ptr.as_ref().xref(), root_id);
-            assert!(node.head_ptr.as_ref().is_root());
-        }
-        heap.drop_partition(root_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     }
 }

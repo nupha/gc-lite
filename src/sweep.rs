@@ -11,28 +11,11 @@ use crate::{
 };
 
 impl GcHeap {
-    pub fn add_gray_node(&mut self, mut node: NonNull<GcHead>) {
-        debug_assert!(
+    pub fn add_gray_node(&mut self, node: NonNull<GcHead>) {
+        if unsafe { node.as_ref().color() } != GcTriColor::Black {
             self.partition_mut(unsafe { node.as_ref().scope_id() })
                 .unwrap()
-                .is_marking()
-        );
-
-        match unsafe { node.as_ref().color() } {
-            GcTriColor::White => unsafe {
-                node.as_mut().set_color(GcTriColor::Gray);
-            },
-            GcTriColor::Gray => {}
-            GcTriColor::Black => {
-                return;
-            }
-        }
-
-        let pid = unsafe { node.as_ref().scope_id() };
-        if let Some(par) = self.partition_mut(pid)
-            && !par.gray_list.contains(&node)
-        {
-            par.gray_list.push(node);
+                .add_gray_node(node);
         }
     }
 
@@ -126,7 +109,7 @@ impl GcHeap {
         true
     }
 
-    /// optionally call `on_dispose` before a node is disposed
+    /// dispose white nodes in the partition
     pub fn sweep(
         &mut self,
         partition_id: GcPartitionId,
@@ -211,7 +194,7 @@ impl GcHeap {
 
             // update remainder node link of partition
             if link1.is_some() {
-                // reset nodes to white color
+                // reset remainder nodes to white color
                 for mut n in NodeLinkIter::new(link1) {
                     unsafe {
                         debug_assert_eq!(n.as_ref().color(), GcTriColor::Black);
@@ -362,7 +345,7 @@ mod sweep_test {
     #[test]
     fn test_sweep_with_basic() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_root_partition(4096);
+        let partition_id = heap.create_partition(4096);
 
         let objects: Vec<GcRef<MyI32>> = (0..5)
             .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
@@ -397,7 +380,7 @@ mod sweep_test {
     #[test]
     fn test_sweep_with_chain_head_removal() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_root_partition(4096);
+        let partition_id = heap.create_partition(4096);
 
         let objects: Vec<GcRef<MyI32>> = (0..5)
             .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
@@ -448,7 +431,7 @@ mod sweep_test {
     #[test]
     fn test_sweep_with_all_chain_head_removal() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_root_partition(4096);
+        let partition_id = heap.create_partition(4096);
 
         let _objects: Vec<GcRef<MyI32>> = (0..3)
             .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
@@ -477,7 +460,7 @@ mod sweep_test {
     #[test]
     fn test_sweep_with_middle_node_removal() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_root_partition(4096);
+        let partition_id = heap.create_partition(4096);
 
         let objects: Vec<GcRef<MyI32>> = (0..5)
             .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
@@ -520,7 +503,7 @@ mod sweep_test {
     #[test]
     fn test_sweep_with_root_node_removal() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_root_partition(4096);
+        let partition_id = heap.create_partition(4096);
 
         let root_obj = heap.alloc(partition_id, MyI32(0)).unwrap();
         let _objects: Vec<GcRef<MyI32>> = (1..3)
@@ -566,7 +549,7 @@ mod sweep_test {
     #[test]
     fn test_sweep_with_empty_partition() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_root_partition(4096);
+        let partition_id = heap.create_partition(4096);
 
         while !heap.mark(partition_id, 64) {}
 

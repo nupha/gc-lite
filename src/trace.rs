@@ -3,10 +3,7 @@
 
 use std::{collections::VecDeque, marker::PhantomData, ptr::NonNull};
 
-use crate::{
-    GcHeap, GcNode, GcPartitionId, GcRef,
-    node::{GcHead, GcNodeFlag, GcTriColor},
-};
+use crate::{GcHeap, GcNode, GcPartitionId, GcRef, node::GcHead};
 
 pub unsafe trait GcTracable: 'static {
     /// Collect directly referenced children gc nodes
@@ -16,7 +13,7 @@ pub unsafe trait GcTracable: 'static {
     fn gc_children(&self, heap: &GcHeap) -> Vec<NonNull<GcHead>> {
         let mut gcx = heap.create_trace_ctx();
         self.trace(&mut gcx);
-        gcx.take_traced_nodes()
+        gcx.traced_nodes.into()
     }
 }
 
@@ -31,92 +28,6 @@ impl<'a> GcTraceCtx<'a> {
     pub const fn opaque(&self) -> *mut u8 {
         self.opaque
     }
-
-    // /// create new trace ctx, optionally clear all nodes' visit and mark flags.
-    // pub fn new(heap: &mut GcHeap, reset_color: bool) -> Self {
-    //     if reset_color {
-    //         heap.reset_all_nodes_color();
-    //     }
-    //     Self::new_internal(NonNull::from_ref(heap))
-    // }
-
-    // #[inline(always)]
-    // pub fn heap(&self) -> &GcHeap {
-    //     unsafe { self.heap.as_ref() }
-    // }
-
-    // #[inline(always)]
-    // pub fn heap_mut(&mut self) -> &mut GcHeap {
-    //     unsafe { self.heap.as_mut() }
-    // }
-
-    // /// Apply callback on `node`, and optionally collect direct children nodes
-    // fn apply1(
-    //     &mut self,
-    //     mut node: NonNull<GcHead>,
-    //     callback: impl Fn(NonNull<GcHead>, &mut GcHeap),
-    // ) {
-    //     unsafe {
-    //         // #[cfg(debug_assertions)]
-    //         // node.as_ref().debug_assert_node_valid(self.heap.as_ref());
-
-    //         match node.as_ref().color() {
-    //             GcTriColor::White => {
-    //                 callback(node, self.heap.as_mut());
-    //                 node.as_mut().set_color(GcTriColor::Gray);
-    //                 self.add_node(node);
-    //             }
-    //             GcTriColor::Gray => {
-    //                 // trace direct children nodes, then mark as black
-    //                 node.as_mut().set_color(GcTriColor::Black);
-    //                 (self.heap().node_dtypes.type_info_list[node.as_ref().dtype() as usize]
-    //                     .trace_fn)(node, self);
-    //             }
-    //             GcTriColor::Black => {
-    //                 // Already traced, do nothing
-    //             }
-    //         }
-    //     }
-    // }
-
-    // /// Trace single `node` recursively for all descendant nodes,
-    // /// apply `callback` on each of them.
-    // pub(crate) fn trace(&mut self, node: NonNull<GcHead>) {
-    //     if unsafe { node.as_ref().color() } != GcTriColor::Black {
-    //         self.apply1(node, &callback);
-
-    //         while let Some(ch) = self.traced_nodes.pop() {
-    //             if unsafe { ch.as_ref().color() } != GcTriColor::Black {
-    //                 self.apply1(ch, &callback);
-    //             }
-    //         }
-    //     }
-    // }
-
-    // pub fn trace(&mut self, node: NonNull<GcHead>) {
-    //     self.trace_callback(node, Self::DUMMY_TRACE_CALLBACK);
-    // }
-
-    // /// Trace multiple nodes recursively.
-    // pub fn trace_iter(&mut self, iter: impl Iterator<Item = NonNull<GcHead>>) {
-    //     for n in iter {
-    //         self.trace(n);
-    //     }
-    // }
-
-    // pub fn trace_roots(&mut self, partition_id: GcPartitionId) {
-    //     if let Some(par) = unsafe { self.heap.as_ref().partition(partition_id) } {
-    //         self.trace_iter(par.root_nodes.iter().copied());
-    //     }
-    // }
-
-    // pub fn commit(&mut self) {
-    //     while let Some(n) = self.traced_nodes.pop() {
-    //         if unsafe { n.as_ref().color() } != GcTriColor::Black {
-    //             self.apply1(n, Self::DUMMY_TRACE_CALLBACK);
-    //         }
-    //     }
-    // }
 
     /// Submit a node to collected list regardless its color state.
     pub fn add_node(&mut self, node: NonNull<GcHead>) {
@@ -158,20 +69,18 @@ impl GcHeap {
     /// Trace direct children of a node into the given trace context
     pub fn trace_node(&self, node: NonNull<GcHead>, gcx: &mut GcTraceCtx) {
         unsafe {
-            let dtype = node.as_ref().dtype() as usize;
-            let info = &self.node_dtypes.type_info_list[dtype];
-            (info.trace_fn)(node, gcx);
+            (self
+                .node_dtypes
+                .type_info_list
+                .get_unchecked(node.as_ref().dtype() as usize)
+                .trace_fn)(node, gcx);
         }
     }
 
     pub fn traverse_start(&mut self, partition_id: GcPartitionId) {
-        if let Some(par) = self.partitions.get_mut(&partition_id) {
-            let mut current = par.nodes;
-            while let Some(mut node) = current {
-                unsafe {
-                    current = node.as_ref().next;
-                    node.as_mut().set_traverse_visited(false);
-                }
+        for mut node in self.nodes(partition_id) {
+            unsafe {
+                node.as_mut().set_traverse_visited(false);
             }
         }
     }
@@ -192,6 +101,9 @@ impl GcHeap {
 
         while let Some((mut current, parent)) = stack.pop_front() {
             unsafe {
+                #[cfg(debug_assertions)]
+                current.as_ref().debug_assert_node_valid(self);
+
                 if current.as_ref().traverse_visited() {
                     continue;
                 }
@@ -373,7 +285,7 @@ unsafe impl GcTracable for &'static String {
 mod tests {
 
     use super::*;
-    use crate::{GcHeap, GcRef};
+    use crate::{GcHeap, GcRef, node::GcTriColor};
 
     /// Test node structure for tracing tests
     #[derive(Debug)]
@@ -454,7 +366,7 @@ mod tests {
     #[test]
     fn test_trace_propagate_simple_tree() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_root_partition(4096);
+        let partition_id = heap.create_partition(4096);
 
         // Create a simple tree: root -> child1, child2
         let child1 = heap.alloc(partition_id, TestNode::new(1)).unwrap();
@@ -494,7 +406,7 @@ mod tests {
     #[test]
     fn test_trace_continue_simple_tree() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_root_partition(4096);
+        let partition_id = heap.create_partition(4096);
 
         // Create a simple tree: root -> child1, child2
         let child1 = heap.alloc(partition_id, TestNode::new(1)).unwrap();
@@ -517,7 +429,7 @@ mod tests {
     #[test]
     fn test_trace_deep_nested_tree() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_root_partition(8192);
+        let partition_id = heap.create_partition(8192);
 
         // Create a deep tree: level0 -> level1 -> level2 -> level3
         let level3 = heap.alloc(partition_id, TestNode::new(3)).unwrap();
@@ -544,7 +456,7 @@ mod tests {
     #[test]
     fn test_trace_complex_tree() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_root_partition(16384);
+        let partition_id = heap.create_partition(16384);
 
         // Create a complex tree:
         //        root
@@ -583,7 +495,7 @@ mod tests {
     #[test]
     fn test_trace_algorithms_equivalence() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_root_partition(8192);
+        let partition_id = heap.create_partition(8192);
 
         // Create a tree with 10 nodes in a balanced structure
         let mut nodes = Vec::new();
@@ -641,7 +553,7 @@ mod tests {
     #[test]
     fn test_trace_circular_reference() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_root_partition(4096);
+        let partition_id = heap.create_partition(4096);
 
         // Create two nodes that reference each other
         let mut node1 = heap.alloc(partition_id, TestNode::new(1)).unwrap();
