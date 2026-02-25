@@ -150,10 +150,11 @@ impl GcHeap {
                         let drop_pass = self.node_dtypes.type_info_list
                             [this.as_ref().dtype() as usize]
                             .drop_pass;
-                        let is_white = this.as_ref().color() == GcTriColor::White;
-                        let is_protected = this.as_ref().is_protected();
 
-                        if drop_pass == pass && is_white && !is_protected {
+                        if drop_pass == pass
+                            && this.as_ref().color() == GcTriColor::White
+                            && !this.as_ref().is_protected()
+                        {
                             if let Some(mut p) = prev {
                                 p.as_mut().next = current;
                             } else {
@@ -198,8 +199,8 @@ impl GcHeap {
                 for n in NodeLinkIter::new(link1) {
                     unsafe {
                         debug_assert!(
-                            n.as_ref().color() == GcTriColor::Black,
-                            "live nodes should be black only"
+                            n.as_ref().color() == GcTriColor::Black || n.as_ref().is_protected(),
+                            "live nodes should be black or protected"
                         );
                     }
                 }
