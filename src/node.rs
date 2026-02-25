@@ -128,6 +128,11 @@ impl GcHead {
     }
 
     #[inline(always)]
+    pub(crate) fn is_protected(&self) -> bool {
+        (self.attrs & PROTECT_COUNT_MASK) != 0
+    }
+
+    #[inline(always)]
     fn set_protect_count(&mut self, count: u8) {
         debug_assert!(count <= 7);
         let count = (count as u32) << PROTECT_COUNT_SHIFT;
@@ -135,24 +140,23 @@ impl GcHead {
     }
 
     #[inline(always)]
-    pub(crate) fn inc_protect_count(&mut self) {
-        let count = self.protect_count();
+    pub(super) fn inc_protect_count(&mut self) -> u8 {
+        let mut count = self.protect_count();
         if count >= 7 {
             panic!("GcHead protect count overflow");
         }
-        self.set_protect_count(count + 1);
+        count += 1;
+        self.set_protect_count(count);
+        count
     }
 
     #[inline(always)]
-    pub(crate) fn dec_protect_count(&mut self) {
-        let count = self.protect_count();
+    pub(super) fn dec_protect_count(&mut self) -> u8 {
+        let mut count = self.protect_count();
         debug_assert!(count > 0);
-        self.set_protect_count(count - 1);
-    }
-
-    #[inline(always)]
-    pub(crate) fn is_protected(&self) -> bool {
-        self.protect_count() > 0
+        count -= 1;
+        self.set_protect_count(count);
+        count
     }
 
     #[inline(always)]

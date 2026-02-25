@@ -224,23 +224,23 @@ impl GcHeap {
 
         if node.is_root() != is_root {
             node.set_root(is_root);
+            let par = self.partition_mut(node.scope_id()).unwrap();
 
-            let pid = node.scope_id();
-            let par = self.partition_mut(pid).unwrap();
             if is_root {
                 // Add to partition's root object list
-                debug_assert!(!par.root_nodes.contains(&node_ptr));
-                par.root_nodes.push(node_ptr);
-
-                if par.is_marking() && node.color() != GcTriColor::Black {
-                    par.add_gray_node(node_ptr);
+                if !par.root_nodes.contains(&node_ptr) {
+                    par.root_nodes.push(node_ptr);
+                    if par.is_marking() && node.color() != GcTriColor::Black {
+                        par.add_gray_node(node_ptr);
+                    }
+                } else {
+                    #[cfg(debug_assertions)]
+                    debug_assert!(node.is_protected());
                 }
-            } else {
-                // Remove from partition's root object list
-                debug_assert!(par.root_nodes.contains(&node_ptr));
-                if let Some(i) = par.root_nodes.iter().position(|&n| n == node_ptr) {
-                    par.root_nodes.swap_remove(i);
-                }
+            } else if !node.is_protected() {
+                // Remove from partition's root nodes list
+                let i = par.root_nodes.iter().position(|&n| n == node_ptr).unwrap();
+                par.root_nodes.swap_remove(i);
             }
         }
     }
@@ -268,19 +268,28 @@ impl GcHeap {
             .any(|p| p == node)
     }
 
+    fn protect_node1(&mut self, mut n: NonNull<GcHead>) {
+        let node = unsafe { n.as_mut() };
+
+        if node.inc_protect_count() == 1 && !node.is_root() {
+            let par = self.partition_mut(node.scope_id()).unwrap();
+            par.root_nodes.push(n);
+            if par.is_marking() && node.color() == GcTriColor::White {
+                par.add_gray_node(n);
+            }
+        }
+    }
+
     #[must_use]
     pub fn protect_nodes(&self, nodes: &[NonNull<GcHead>]) -> GcNodeGuard<'_> {
         let mut lst = SmallVec::<[NonNull<GcHead>; 8]>::new();
-
         let heap_ptr = self as *const Self as *mut Self;
 
-        for n in nodes {
-            let mut node = *n;
+        for &n in nodes {
             unsafe {
-                (*heap_ptr).mark_protected_node(node);
-                node.as_mut().inc_protect_count();
+                (*heap_ptr).protect_node1(n);
             }
-            lst.push(node);
+            lst.push(n);
         }
 
         GcNodeGuard {
@@ -410,14 +419,13 @@ impl<'a> Drop for GcNodeGuard<'a> {
 }
 
 impl<'a> GcNodeGuard<'a> {
-    /// add an extra node to protector
-    pub fn add(&mut self, mut node: NonNull<GcHead>) {
+    /// add an extra node to guard
+    pub fn add(&mut self, node: NonNull<GcHead>) {
         if !self.nodes.contains(&node) {
             unsafe {
-                (*self.heap).mark_protected_node(node);
-                node.as_mut().inc_protect_count();
-                self.nodes.push(node);
+                (*self.heap).protect_node1(node);
             }
+            self.nodes.push(node);
         }
     }
 }

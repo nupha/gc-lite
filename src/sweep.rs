@@ -31,18 +31,6 @@ impl GcHeap {
         }
     }
 
-    pub(super) fn mark_protected_node(&mut self, node_ptr: NonNull<GcHead>) {
-        let node = unsafe { node_ptr.as_ref() };
-
-        if node.color() == GcTriColor::White {
-            let scope = node.scope_id();
-            let par = self.partition(scope).unwrap();
-            if par.is_marking() {
-                self.add_gray_node(node_ptr);
-            }
-        }
-    }
-
     pub fn mark(&mut self, partition_id: GcPartitionId, max_steps: usize) -> bool {
         let heap_ptr = self as *mut Self;
 
@@ -63,20 +51,6 @@ impl GcHeap {
                         root.as_mut().set_color(GcTriColor::Gray);
                     }
                     par.gray_list.push(root);
-                }
-
-                for mut n in NodeLinkIter::new(par.nodes) {
-                    unsafe {
-                        if n.as_ref().is_protected() {
-                            let node = n.as_mut();
-                            if matches!(node.color(), GcTriColor::White | GcTriColor::Gray) {
-                                node.set_color(GcTriColor::Gray);
-                                if !par.gray_list.contains(&n) {
-                                    par.gray_list.push(n);
-                                }
-                            }
-                        }
-                    }
                 }
             }
 
