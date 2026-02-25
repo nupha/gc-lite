@@ -158,9 +158,9 @@ impl GcHeap {
     pub(crate) fn attach_node(&mut self, partition_id: GcPartitionId, mut node: NonNull<GcHead>) {
         debug_assert!(!partition_id.is_null());
         let n = unsafe { node.as_mut() };
-        debug_assert!(n.scope_id().is_null());
+        debug_assert!(n.partition_id().is_null());
         debug_assert!(n.next.is_none());
-        n.set_scope_id(partition_id);
+        n.set_partition_id(partition_id);
 
         let par = self.partitions.get_mut(&partition_id).unwrap();
         n.next = par.nodes.take();
@@ -173,7 +173,7 @@ impl GcHeap {
 
         if node.is_root() != is_root {
             node.set_root(is_root);
-            let par = self.partition_mut(node.scope_id()).unwrap();
+            let par = self.partition_mut(node.partition_id()).unwrap();
 
             if is_root {
                 // Add to partition's root object list
@@ -213,7 +213,7 @@ impl GcHeap {
 
     /// Check if `node` was allocated in this heap
     pub fn contains(&self, node: NonNull<GcHead>) -> bool {
-        self.nodes(unsafe { node.as_ref().scope_id() })
+        self.nodes(unsafe { node.as_ref().partition_id() })
             .any(|p| p == node)
     }
 
@@ -221,7 +221,7 @@ impl GcHeap {
         let node = unsafe { n.as_mut() };
 
         if node.inc_protect_count() == 1 && !node.is_root() {
-            let par = self.partition_mut(node.scope_id()).unwrap();
+            let par = self.partition_mut(node.partition_id()).unwrap();
             par.root_nodes.push(n);
             if par.is_marking() && node.color() == GcTriColor::White {
                 par.add_gray_node(n);
@@ -322,7 +322,7 @@ impl<'a> Drop for GcNodeGuard<'a> {
 
             if count == 0 && !n.is_root() {
                 let heap = unsafe { &mut *self.heap };
-                if let Some(par) = heap.partition_mut(n.scope_id())
+                if let Some(par) = heap.partition_mut(n.partition_id())
                     && let Some(i) = par.root_nodes.iter().position(|&x| x == node)
                 {
                     par.root_nodes.swap_remove(i);

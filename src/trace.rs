@@ -47,11 +47,9 @@ impl<'a> GcTraceCtx<'a> {
         self.add_node(gc_ref.head_ptr);
     }
 
-    /// take out collected nodes
-    #[deprecated]
     #[inline(always)]
-    pub fn take_traced_nodes(&mut self) -> Vec<NonNull<GcHead>> {
-        std::mem::take(&mut self.traced_nodes).into()
+    pub fn next_node(&mut self) -> Option<NonNull<GcHead>> {
+        self.traced_nodes.pop_front()
     }
 }
 
@@ -83,10 +81,10 @@ impl GcHeap {
         }
     }
 
-    /// Traverses the subtree starting at `node` in depth-first order,
+    /// Traverses the node tree starting at `node` in depth-first order,
     /// invoking `callback` on each visited node with its optional parent.
     /// If `filter` is non-null, only nodes in the specified partition are visited.
-    pub fn traverse_subtree(
+    pub fn traverse(
         &mut self,
         node: NonNull<GcHead>,
         filter: GcPartitionId,
@@ -108,7 +106,7 @@ impl GcHeap {
 
                 current.as_mut().set_traverse_visited(true);
 
-                if filter.is_null() || filter == current.as_ref().scope_id() {
+                if filter.is_null() || filter == current.as_ref().partition_id() {
                     callback(current, parent);
                 }
 
@@ -122,110 +120,6 @@ impl GcHeap {
             }
         }
     }
-
-    // fn traverse_internal(
-    //     parent: Option<NonNull<GcHead>>,
-    //     mut this: NonNull<GcHead>,
-    //     gcx: &mut GcTraceCtx,
-    //     filter: GcPartitionId,
-    //     callback: &mut impl FnMut(NonNull<GcHead>, Option<NonNull<GcHead>>),
-    // ) {
-    //     unsafe {
-    //         match this.as_ref().color() {
-    //             GcTriColor::White => {
-    //                 if filter.is_null() || filter == this.as_ref().scope_id() {
-    //                     callback(this, parent);
-    //                 }
-    //                 this.as_mut().set_color(GcTriColor::Gray);
-    //             }
-    //             GcTriColor::Gray => {}
-    //             GcTriColor::Black => {
-    //                 return;
-    //             }
-    //         }
-
-    //         let heap = gcx.heap();
-    //         let dtype = this.as_ref().dtype() as usize;
-    //         let info = &heap.node_dtypes.type_info_list[dtype];
-
-    //         (info.trace_fn)(this, gcx);
-    //         this.as_mut().set_color(GcTriColor::Black);
-
-    //         let mut children = gcx.take_traced_nodes();
-    //         while let Some(ch) = children.pop() {
-    //             if ch.as_ref().color() != GcTriColor::Black {
-    //                 Self::traverse_internal(Some(this), ch, gcx, filter, callback);
-    //             }
-    //         }
-    //     }
-    // }
-
-    // /// Traverses the subtree starting at `node` in depth-first order,
-    // /// invoking `callback` on each visited node with its optional parent.
-    // /// If `filter` is non-null, only nodes in the specified partition are visited.
-    // pub fn traverse_subtree(
-    //     &mut self,
-    //     node: NonNull<GcHead>,
-    //     filter: GcPartitionId,
-    //     mut callback: impl FnMut(NonNull<GcHead>, Option<NonNull<GcHead>>),
-    // ) {
-    //     // Set all nodes to white to prepare for traversal.
-    //     self.reset_all_nodes_color();
-    //     let mut gcx = GcTraceCtx::new(self, false);
-    //     Self::traverse_internal(None, node, &mut gcx, filter, &mut callback);
-    // }
-
-    // /// Collects all nodes in the subtree starting at `node`.
-    // /// If `filter` is non-null, only nodes in the specified partition are returned.
-    // pub fn collect_subtree_nodes(
-    //     &mut self,
-    //     node: NonNull<GcHead>,
-    //     filter: GcPartitionId,
-    // ) -> Vec<NonNull<GcHead>> {
-    //     let mut nodes = Vec::new();
-    //     self.traverse_subtree(node, filter, |n, _p| {
-    //         nodes.push(n);
-    //     });
-    //     nodes
-    // }
-
-    // /// Collects all edges (parent, child) pairs in the subtree starting at `node`.
-    // /// If `filter` is non-null, only edges within the specified partition are returned.
-    // pub fn collect_subtree_edges(
-    //     &mut self,
-    //     node: NonNull<GcHead>,
-    //     filter: GcPartitionId,
-    // ) -> Vec<(NonNull<GcHead>, NonNull<GcHead>)> {
-    //     let mut edges = Vec::new();
-    //     self.traverse_subtree(node, filter, |n, p| {
-    //         if let Some(parent) = p {
-    //             edges.push((parent, n));
-    //         }
-    //     });
-    //     edges
-    // }
-
-    // /// Collects both nodes and edges of the subtree starting at `node`.
-    // /// Returns `(nodes, edges)`; `edges` are (parent, child) pairs.
-    // /// If `filter` is non-null, only data in the specified partition are collected.
-    // pub fn collect_subtree(
-    //     &mut self,
-    //     node: NonNull<GcHead>,
-    //     filter: GcPartitionId,
-    // ) -> (
-    //     Vec<NonNull<GcHead>>,
-    //     Vec<(NonNull<GcHead>, NonNull<GcHead>)>,
-    // ) {
-    //     let mut nodes = Vec::new();
-    //     let mut edges = Vec::new();
-    //     self.traverse_subtree(node, filter, |n, p| {
-    //         nodes.push(n);
-    //         if let Some(parent) = p {
-    //             edges.push((parent, n));
-    //         }
-    //     });
-    //     (nodes, edges)
-    // }
 }
 
 macro_rules! impl_dummy_trace_for_primitive {

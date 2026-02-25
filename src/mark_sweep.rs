@@ -13,7 +13,7 @@ use crate::{
 impl GcHeap {
     pub fn add_gray_node(&mut self, node: NonNull<GcHead>) {
         if unsafe { node.as_ref().color() } != GcTriColor::Black {
-            self.partition_mut(unsafe { node.as_ref().scope_id() })
+            self.partition_mut(unsafe { node.as_ref().partition_id() })
                 .unwrap()
                 .add_gray_node(node);
         }
@@ -60,7 +60,7 @@ impl GcHeap {
 
                 while let Some(mut node_ptr) = par.gray_list.pop() {
                     let node = unsafe { node_ptr.as_mut() };
-                    debug_assert_eq!(node.scope_id(), partition_id);
+                    debug_assert_eq!(node.partition_id(), partition_id);
 
                     if node.color() == GcTriColor::Gray {
                         if cnt >= max_steps {
@@ -79,14 +79,14 @@ impl GcHeap {
                             #[cfg(debug_assertions)]
                             child.debug_assert_node_valid_simple();
 
-                            let scope = child.scope_id();
-                            if scope == partition_id {
+                            let pid = child.partition_id();
+                            if pid == partition_id {
                                 if matches!(child.color(), GcTriColor::White | GcTriColor::Gray) {
                                     child.set_color(GcTriColor::Gray);
                                     par.gray_list.push(ch);
                                 }
                             } else {
-                                let p2 = unsafe { (*heap_ptr).partition(scope).unwrap() };
+                                let p2 = unsafe { (*heap_ptr).partition(pid).unwrap() };
                                 if p2.is_marking() {
                                     unsafe {
                                         (*heap_ptr).add_gray_node(ch);

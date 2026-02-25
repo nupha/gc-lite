@@ -21,7 +21,7 @@ impl GcHead {
     /// * false if node has xref unset
     #[deprecated]
     pub(crate) fn set_xref(&mut self, xref: GcPartitionId) -> bool {
-        if !xref.is_null() && xref != self.scope_id() {
+        if !xref.is_null() && xref != self.partition_id() {
             log::trace!("[set_xref] {xref:?} -> {self:?}");
             self.partition = (self.partition & 0x0000_FFFF) | ((xref.0 as u32) << 16);
             true

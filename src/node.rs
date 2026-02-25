@@ -82,7 +82,7 @@ impl std::fmt::Debug for GcHead {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("GcNode");
         s.field("ptr", &(self as *const Self))
-            .field("partition", &self.scope_id())
+            .field("partition", &self.partition_id())
             .field("color", &self.color());
 
         if !self.xref().is_null() {
@@ -211,16 +211,15 @@ impl GcHead {
         }
     }
 
-    /// Get scope of node
+    /// Get node's partition id
     #[inline(always)]
-    pub fn scope_id(&self) -> GcPartitionId {
+    pub fn partition_id(&self) -> GcPartitionId {
         GcPartitionId((self.partition & 0x0000_FFFF) as u16)
     }
 
-    /// Set scope ID
     #[inline(always)]
-    pub(crate) fn set_scope_id(&mut self, id: GcPartitionId) {
-        debug_assert!(self.scope_id().is_null() || self.scope_id() == id);
+    pub(crate) fn set_partition_id(&mut self, id: GcPartitionId) {
+        debug_assert!(self.partition_id().is_null() || self.partition_id() == id);
         self.partition = (self.partition & 0xFFFF_0000) | id.0 as u32;
     }
 
@@ -466,7 +465,7 @@ impl GcHeap {
                 slave.as_mut().set_color(GcTriColor::Gray);
 
                 if self
-                    .partition(slave.as_ref().scope_id())
+                    .partition(slave.as_ref().partition_id())
                     .unwrap()
                     .is_marking()
                 {
@@ -475,12 +474,12 @@ impl GcHeap {
             }
         }
 
-        if unsafe { master.as_ref().scope_id() != slave.as_ref().scope_id() } {
+        if unsafe { master.as_ref().partition_id() != slave.as_ref().partition_id() } {
             // update cross scope reference
             let xref = unsafe {
                 let x = master.as_ref().xref();
                 if x.is_null() {
-                    master.as_ref().scope_id()
+                    master.as_ref().partition_id()
                 } else {
                     x
                 }
