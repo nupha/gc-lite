@@ -15,11 +15,7 @@ use crate::{
 pub struct GcPartitionId(pub u16);
 
 impl GcPartitionId {
-    const DEPTH_SHIFT: u16 = 10;
-    const DEPTH_MASK: u16 = 0b11_1111;
-    const SERIAL_MASK: u16 = 0x03FF;
-
-    /// Special partition ID representing no parent (null value)
+    /// Special partition ID representing no partition (null value)
     pub const NONE: Self = Self(0);
 
     #[inline(always)]
@@ -27,39 +23,37 @@ impl GcPartitionId {
         self.0 == 0
     }
 
-    #[inline(always)]
-    pub const fn depth(self) -> u8 {
-        ((self.0 >> Self::DEPTH_SHIFT) & Self::DEPTH_MASK) as u8
-    }
-
+    /// Get the underlying serial number of this partition (low 10 bits).
     #[inline(always)]
     pub const fn serial(self) -> u16 {
-        self.0 & Self::SERIAL_MASK
+        self.0 & 0x03ff
+    }
+
+    /// Get depth encoded in this id (high 6 bits).
+    #[inline(always)]
+    pub const fn depth(self) -> u8 {
+        (self.0 >> 10) as u8
     }
 
     #[inline(always)]
-    pub(crate) const fn from_depth_serial(depth: u8, serial: u16) -> Self {
-        let d = (depth as u16) & Self::DEPTH_MASK;
-        let s = serial & Self::SERIAL_MASK;
-        Self((d << Self::DEPTH_SHIFT) | s)
+    pub(crate) const fn from_serial(serial: u16) -> Self {
+        Self::from_depth_serial(0, serial)
+    }
+
+    #[inline(always)]
+    pub const fn from_depth_serial(depth: u8, serial: u16) -> Self {
+        Self(((depth as u16) << 10) | (serial & 0x03ff))
     }
 }
 
 impl std::fmt::Debug for GcPartitionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:02}:{:04}", self.depth(), self.serial())
+        write!(f, "{:04}", self.serial())
     }
 }
 
 #[derive(Debug)]
 pub struct GcPartition {
-    /// Parent partition ID, GcPartitionId::NONE (0) means no parent (root partition)
-    #[deprecated]
-    pub(crate) parent: GcPartitionId,
-    /// Child partition IDs
-    #[deprecated]
-    pub(crate) children: SmallVec<[GcPartitionId; 4]>,
-
     /// link of nodes in this partition
     pub(crate) nodes: Option<NonNull<GcHead>>,
     /// root nodes in this partition
@@ -68,6 +62,10 @@ pub struct GcPartition {
     pub(crate) gray_list: Vec<NonNull<GcHead>>,
     /// Is in a marking cycle
     marking: bool,
+    /// Parent partition id, NONE for root
+    pub(crate) parent: GcPartitionId,
+    /// Child partition ids
+    pub(crate) children: SmallVec<[GcPartitionId; 4]>,
 
     /// Current memory usage
     pub(crate) memory_used: usize,
@@ -79,10 +77,8 @@ pub struct GcPartition {
 }
 
 impl GcPartition {
-    fn new(memory_limit: usize, parent: GcPartitionId) -> Self {
+    fn new(memory_limit: usize) -> Self {
         Self {
-            parent,
-            children: SmallVec::new(),
             memory_used: 0,
             memory_limit,
             gc_threshold: 0, // Default threshold is 0 bytes (disable automatic GC)
@@ -90,6 +86,8 @@ impl GcPartition {
             root_nodes: SmallVec::new(),
             gray_list: Vec::new(),
             marking: false,
+            parent: GcPartitionId::NONE,
+            children: SmallVec::new(),
         }
     }
 
@@ -162,6 +160,21 @@ impl GcPartition {
     }
 
     #[inline(always)]
+    pub fn is_root(&self) -> bool {
+        self.parent.is_null()
+    }
+
+    #[inline(always)]
+    pub fn parent(&self) -> GcPartitionId {
+        self.parent
+    }
+
+    #[inline(always)]
+    pub fn children(&self) -> &[GcPartitionId] {
+        &self.children
+    }
+
+    #[inline(always)]
     pub const fn is_marking(&self) -> bool {
         self.marking
     }
@@ -188,49 +201,6 @@ impl GcPartition {
             self.gray_list.push(node);
         }
     }
-
-    /// Get parent partition ID
-    #[inline(always)]
-    pub fn parent(&self) -> GcPartitionId {
-        self.parent
-    }
-
-    /// Get child partition IDs
-    #[inline(always)]
-    pub fn children(&self) -> &[GcPartitionId] {
-        &self.children
-    }
-
-    /// Check if this is a root partition (no parent)
-    #[inline(always)]
-    pub fn is_root(&self) -> bool {
-        self.parent == GcPartitionId::NONE
-    }
-
-    #[inline(always)]
-    pub fn has_child(&self) -> bool {
-        self.children.is_empty()
-    }
-}
-
-pub struct GcPartitionParentIter<'a> {
-    heap: &'a GcHeap,
-    current: GcPartitionId,
-}
-
-impl<'a> Iterator for GcPartitionParentIter<'a> {
-    type Item = GcPartitionId;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if !self.current.is_null() {
-            let p = self.current;
-            debug_assert!(self.heap.partition(p).is_some(), "{p:?}");
-            self.current = self.heap.partition(p).unwrap().parent;
-            Some(p)
-        } else {
-            None
-        }
-    }
 }
 
 impl GcHeap {
@@ -247,19 +217,16 @@ impl GcHeap {
         memory_limit: Option<usize>,
         parent: GcPartitionId,
     ) -> GcPartitionId {
-        const MAX_DEPTH: u8 = 63;
         const MAX_SERIAL: u16 = 1023;
 
         thread_local! {
             static NEXT_PARTITION_SERIAL: Cell<u16> = const { Cell::new(1) };
         }
 
-        let depth = if parent.is_null() {
+        let depth: u8 = if parent.is_null() {
             0
         } else {
-            let d = parent.depth().saturating_add(1);
-            debug_assert!(d <= MAX_DEPTH);
-            d
+            parent.depth().saturating_add(1)
         };
 
         let id = NEXT_PARTITION_SERIAL.with(|next_serial| {
@@ -270,11 +237,12 @@ impl GcHeap {
             let start = serial;
 
             loop {
-                let conflict = self.partitions.keys().any(|pid| pid.serial() == serial);
+                let candidate = GcPartitionId::from_depth_serial(depth, serial);
+                let conflict = self.partitions.keys().any(|pid| pid.0 == candidate.0);
                 if !conflict {
                     let next = if serial >= MAX_SERIAL { 1 } else { serial + 1 };
                     next_serial.set(next);
-                    return GcPartitionId::from_depth_serial(depth, serial);
+                    return candidate;
                 }
 
                 serial = if serial >= MAX_SERIAL { 1 } else { serial + 1 };
@@ -284,17 +252,17 @@ impl GcHeap {
             }
         });
 
-        // If parent is specified, add this partition to parent's children
-        if !parent.is_null()
-            && let Some(parent_partition) = self.partitions.get_mut(&parent)
-        {
-            parent_partition.children.push(id);
-        }
-
-        let partition = GcPartition::new(memory_limit.unwrap_or(0), parent);
+        let mut partition = GcPartition::new(memory_limit.unwrap_or(0));
+        partition.parent = parent;
         self.partitions.insert(id, partition);
 
-        log::trace!("[new_scope] {id:?} : {parent:?}");
+        if !parent.is_null() {
+            if let Some(par) = self.partitions.get_mut(&parent) {
+                par.children.push(id);
+            }
+        }
+
+        log::trace!("[new_scope] {id:?}");
 
         id
     }
@@ -310,23 +278,18 @@ impl GcHeap {
         self.create_partition_internal(Some(memory_limit), GcPartitionId::NONE)
     }
 
-    /// Create a new sub-partition under the specified parent partition
-    ///
-    /// # Parameters
-    /// - `parent`: Parent partition ID
-    ///
-    /// # Returns
-    /// The ID of the newly created sub-partition
-    #[deprecated]
+    /// Create a new sub-partition under given parent
     pub fn create_sub_partition(&mut self, parent: GcPartitionId) -> GcPartitionId {
         self.create_partition_internal(None, parent)
     }
 
     /// Note: `since` is not included in result vec
     fn load_descendants(&self, since: GcPartitionId, lst: &mut SmallVec<[GcPartitionId; 8]>) {
-        for &ch in self.partition(since).unwrap().children() {
-            lst.push(ch);
-            self.load_descendants(ch, lst);
+        if let Some(par) = self.partition(since) {
+            for &ch in par.children() {
+                lst.push(ch);
+                self.load_descendants(ch, lst);
+            }
         }
     }
 
@@ -484,15 +447,6 @@ impl GcHeap {
         self.partitions.get_mut(&partition_id)
     }
 
-    pub fn partition_parent_iter(&self, partition_id: GcPartitionId) -> GcPartitionParentIter<'_> {
-        GcPartitionParentIter {
-            heap: self,
-            current: self
-                .partition(partition_id)
-                .map_or(GcPartitionId::NONE, |p| p.parent),
-        }
-    }
-
     /// Get all partition IDs
     pub fn partition_ids(&self) -> Vec<GcPartitionId> {
         self.partitions.keys().copied().collect()
@@ -520,23 +474,19 @@ impl GcHeap {
     /// # Returns
     /// The nearest common parent partition ID, or `GcPartitionId::NONE` if no common ancestor
     pub fn common_parent2(&self, p1: GcPartitionId, p2: GcPartitionId) -> GcPartitionId {
-        // Edge cases
         if p1 == GcPartitionId::NONE || p2 == GcPartitionId::NONE {
             return GcPartitionId::NONE;
         } else if p1 == p2 {
             return p1;
         }
 
-        // Get depths
         let d1 = p1.depth() as usize;
         let d2 = p2.depth() as usize;
 
-        // Align nodes to the same depth - the minimum
         let dmin = d1.min(d2);
         let mut a = p1;
         let mut b = p2;
 
-        // Move deeper node up to dmin depth
         let mut da = d1;
         while da > dmin {
             match self.partition(a) {
@@ -558,7 +508,6 @@ impl GcHeap {
             }
         }
 
-        // Now both nodes are at the same depth, move up together until they meet
         while a != b {
             match (self.partition(a), self.partition(b)) {
                 (Some(pa), Some(pb)) => {
@@ -587,30 +536,25 @@ impl GcHeap {
         p2: GcPartitionId,
         p3: GcPartitionId,
     ) -> GcPartitionId {
-        // Edge cases
         if p1 == GcPartitionId::NONE || p2 == GcPartitionId::NONE || p3 == GcPartitionId::NONE {
             return GcPartitionId::NONE;
         }
 
-        // If any two are equal, reduce to two-node case
         if p1 == p2 {
             return self.common_parent2(p1, p3);
         } else if p1 == p3 || p2 == p3 {
             return self.common_parent2(p1, p2);
         }
 
-        // Get depths
         let d1 = p1.depth() as usize;
         let d2 = p2.depth() as usize;
         let d3 = p3.depth() as usize;
 
-        // Align nodes to the same depth - the minimum
         let dmin = d1.min(d2).min(d3);
         let mut a = p1;
         let mut b = p2;
         let mut c = p3;
 
-        // Move nodes up to dmin depth
         let mut da = d1;
         while da > dmin {
             match self.partition(a) {
@@ -642,7 +586,6 @@ impl GcHeap {
             }
         }
 
-        // Now all nodes are at the same depth, move up together until they meet
         while a != b || a != c {
             match (self.partition(a), self.partition(b), self.partition(c)) {
                 (Some(pa), Some(pb), Some(pc)) => {

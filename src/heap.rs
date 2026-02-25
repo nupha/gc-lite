@@ -115,35 +115,6 @@ impl GcHeap {
         }
     }
 
-    /// Check if the given partition ID is an ancestor of the specified partition
-    ///
-    /// # Parameters
-    /// - `this`: The target partition to check
-    /// - `ancestor`: The potential ancestor partition ID
-    ///
-    /// # Returns
-    /// `true` if `ancestor` is an ancestor of `this`, `false` otherwise
-    pub fn is_ancestor_of(&self, this: GcPartitionId, ancestor: GcPartitionId) -> bool {
-        debug_assert_ne!(this, GcPartitionId::NONE);
-        debug_assert_ne!(ancestor, GcPartitionId::NONE);
-
-        let mut current_id = this;
-        while current_id != GcPartitionId::NONE {
-            if current_id == ancestor {
-                return true;
-            } else if let Some(p) = self.partitions.get(&current_id) {
-                current_id = p.parent;
-            } else {
-                #[cfg(debug_assertions)]
-                unreachable!();
-                #[cfg(not(debug_assertions))]
-                break;
-            }
-        }
-
-        false
-    }
-
     pub fn drop_partition(
         &mut self,
         partition_id: GcPartitionId,
@@ -167,15 +138,12 @@ impl GcHeap {
             i += 1;
 
             if let Some(mut partition) = self.partitions.remove(&current_id) {
-                // Add children to the drop list
                 to_drop.extend_from_slice(&partition.children);
 
-                // Dispose all nodes in the current partition
                 if let Some(head) = partition.nodes.take() {
                     freed_bytes += self.dispose_all_nodes(head, &on_dispose);
                 }
 
-                // Remove from parent's children list
                 if !partition.parent.is_null()
                     && let Some(up) = self.partitions.get_mut(&partition.parent)
                     && let Some(i) = up.children.iter().position(|&id| id == current_id)
@@ -304,14 +272,29 @@ impl GcHeap {
         self.protect_nodes(&[node])
     }
 
+    /// Check if the given partition ID is an ancestor of the specified partition
+    pub fn is_ancestor_of(&self, this: GcPartitionId, ancestor: GcPartitionId) -> bool {
+        debug_assert_ne!(this, GcPartitionId::NONE);
+        debug_assert_ne!(ancestor, GcPartitionId::NONE);
+
+        let mut current_id = this;
+        while current_id != GcPartitionId::NONE {
+            if current_id == ancestor {
+                return true;
+            } else if let Some(p) = self.partitions.get(&current_id) {
+                current_id = p.parent;
+            } else {
+                #[cfg(debug_assertions)]
+                unreachable!();
+                #[cfg(not(debug_assertions))]
+                break;
+            }
+        }
+
+        false
+    }
+
     /// Update memory usage with rollup to parent partitions
-    ///
-    /// # Parameters
-    /// - `id`: Partition ID
-    /// - `delta`: Size change (positive to add, negative to subtract)
-    ///
-    /// # Returns
-    /// Updated memory usage of the specified partition
     pub(crate) fn update_mem_use(&mut self, id: GcPartitionId, delta: i32) -> usize {
         let mut cur_id = id;
         let mut res = 0;
