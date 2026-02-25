@@ -48,8 +48,8 @@ impl<'a> GcTraceCtx<'a> {
     }
 
     #[inline(always)]
-    pub fn next_node(&mut self) -> Option<NonNull<GcHead>> {
-        self.traced_nodes.pop_front()
+    pub fn take_nodes(&mut self) -> Vec<NonNull<GcHead>> {
+        std::mem::take(&mut self.traced_nodes).into()
     }
 }
 

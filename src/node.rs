@@ -495,6 +495,10 @@ impl GcHead {
         self.dbg_string = str;
     }
 
+    pub fn debug_dbg_string(&self) -> &std::borrow::Cow<'static, str> {
+        &self.dbg_string
+    }
+
     pub fn debug_assert_node_valid_simple(&self) {
         if !std::thread::panicking() {
             debug_assert!(
