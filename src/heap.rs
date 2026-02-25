@@ -19,7 +19,7 @@ pub struct GcHeap {
     /// Partition management
     pub(super) partitions: HashMap<GcPartitionId, GcPartition>,
     /// stacked node guards
-    pub(crate) simple_guard_stack: SmallVec<[GcNodeGuard<'static>; 8]>,
+    pub(crate) alloc_guard_stack: SmallVec<[GcNodeGuard<'static>; 8]>,
     /// Weak reference list, each slot stores (version, GcHeader)
     pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
 
@@ -37,7 +37,7 @@ impl Drop for GcHeap {
         // heap world is gone, dealloc all nodes live in it, regardless their status.
         log::trace!("[heap::drop]");
 
-        for mut g in self.simple_guard_stack.drain(..) {
+        for mut g in self.alloc_guard_stack.drain(..) {
             unsafe {
                 g.abort();
             }
@@ -69,7 +69,7 @@ impl GcHeap {
             weak_slots: Vec::new(),
             opaque: std::ptr::null_mut(),
             node_dtypes: registry,
-            simple_guard_stack: SmallVec::new(),
+            alloc_guard_stack: SmallVec::new(),
 
             #[cfg(debug_assertions)]
             dbg_dropping_root_partition: None,
@@ -234,19 +234,19 @@ impl GcHeap {
     #[must_use]
     pub fn protect_nodes(&self, nodes: &[NonNull<GcHead>]) -> GcNodeGuard<'_> {
         let mut lst = SmallVec::<[NonNull<GcHead>; 8]>::new();
-        let heap_ptr = self as *const Self as *mut Self;
+        let mut heap_ptr = NonNull::from_ref(self); // as *const Self as *mut Self;
 
         for &n in nodes {
             unsafe {
-                (*heap_ptr).full_protect_node(n);
+                heap_ptr.as_mut().full_protect_node(n);
             }
             lst.push(n);
         }
 
         GcNodeGuard {
-            simple: false,
             nodes: lst,
             heap: heap_ptr,
+            simple: false,
             _mark: PhantomData,
         }
     }
@@ -278,39 +278,42 @@ impl GcHeap {
 
     pub fn open_alloc_guard(&mut self) {
         let sg = GcNodeGuard {
-            simple: true,
             nodes: SmallVec::new(),
-            heap: self as *mut GcHeap,
+            heap: NonNull::from_ref(self),
+            simple: false,
             _mark: PhantomData,
         };
-        self.simple_guard_stack.push(sg);
+        self.alloc_guard_stack.push(sg);
     }
 
     pub fn close_alloc_guard(&mut self) {
-        self.simple_guard_stack.pop();
+        self.alloc_guard_stack.pop();
     }
 
-    /// get current simple node guard
+    /// get current alloc guard
     #[inline(always)]
-    pub(crate) fn current_simple_guard(&mut self) -> Option<&mut GcNodeGuard<'static>> {
-        self.simple_guard_stack.last_mut()
+    pub(crate) fn current_alloc_guard(&mut self) -> Option<&mut GcNodeGuard<'static>> {
+        self.alloc_guard_stack.last_mut()
     }
 
     /// with current node guard
-    pub fn with_current_simple_guard<R, F: FnOnce(&mut GcNodeGuard) -> R>(
+    pub fn with_current_alloc_guard<R, F: FnOnce(&mut GcNodeGuard) -> R>(
         &mut self,
         f: F,
     ) -> Option<R> {
-        self.simple_guard_stack.last_mut().map(f)
+        self.alloc_guard_stack.last_mut().map(f)
     }
 }
 
 pub struct GcNodeGuard<'a> {
+    nodes: SmallVec<[NonNull<GcHead>; 8]>,
+    heap: NonNull<GcHeap>,
+
+    #[deprecated]
     /// simple protect: prohobit being collected, but do not trace into descendants,
     /// full protect: prohobit being collected, and trace into descendants,
     simple: bool,
-    nodes: SmallVec<[NonNull<GcHead>; 8]>,
-    heap: *mut GcHeap,
+
     _mark: PhantomData<&'a ()>,
 }
 
@@ -321,7 +324,7 @@ impl<'a> Drop for GcNodeGuard<'a> {
             let count = n.dec_protect_count();
 
             if count == 0 && !self.simple && !n.is_root() {
-                let heap = unsafe { &mut *self.heap };
+                let heap = unsafe { self.heap.as_mut() };
                 if let Some(par) = heap.partition_mut(n.partition_id())
                     && let Some(i) = par.root_nodes.iter().position(|&x| x == node)
                 {
@@ -342,7 +345,7 @@ impl<'a> GcNodeGuard<'a> {
                 }
             } else {
                 unsafe {
-                    (*self.heap).full_protect_node(node);
+                    self.heap.as_mut().full_protect_node(node);
                 }
             }
 
