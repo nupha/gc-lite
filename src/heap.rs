@@ -155,23 +155,15 @@ impl GcHeap {
     /// # Note
     ///
     /// This method **DO NOT** increase partitions' mem_use.
-    #[inline]
     pub(crate) fn attach_node(&mut self, partition_id: GcPartitionId, mut node: NonNull<GcHead>) {
         debug_assert!(!partition_id.is_null());
-
-        unsafe {
-            debug_assert!(node.as_ref().scope_id().is_null());
-            debug_assert!(node.as_ref().next.is_none());
-            debug_assert!(node.as_ref().xref().is_null());
-
-            node.as_mut().set_scope_id(partition_id);
-        }
+        let n = unsafe { node.as_mut() };
+        debug_assert!(n.scope_id().is_null());
+        debug_assert!(n.next.is_none());
+        n.set_scope_id(partition_id);
 
         let par = self.partitions.get_mut(&partition_id).unwrap();
-        let link_head = par.nodes.take();
-        unsafe {
-            node.as_mut().next = link_head;
-        }
+        n.next = par.nodes.take();
         par.nodes = Some(node);
     }
 

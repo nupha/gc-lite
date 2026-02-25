@@ -41,7 +41,7 @@ impl GcHead {
 
 impl GcHeap {
     #[deprecated]
-    pub const fn set_xref(&mut self, from_scope: GcPartitionId, mut node: NonNull<GcHead>) -> bool {
+    pub const fn set_xref(&mut self, from_scope: GcPartitionId, node: NonNull<GcHead>) -> bool {
         false
     }
 }
