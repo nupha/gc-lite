@@ -101,8 +101,11 @@ impl GcHeap {
 
                         while let Some(mut ch) = gcx.traced_nodes.pop_front() {
                             let child = unsafe { ch.as_mut() };
-                            let scope = child.scope_id();
 
+                            #[cfg(debug_assertions)]
+                            child.debug_assert_node_valid_simple();
+
+                            let scope = child.scope_id();
                             if scope == partition_id {
                                 if matches!(child.color(), GcTriColor::White | GcTriColor::Gray) {
                                     child.set_color(GcTriColor::Gray);

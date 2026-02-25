@@ -31,17 +31,15 @@ impl<'a> GcTraceCtx<'a> {
 
     /// Submit a node to collected list regardless its color state.
     pub fn add_node(&mut self, node: NonNull<GcHead>) {
+        #[cfg(debug_assertions)]
+        unsafe {
+            node.as_ref().debug_assert_node_valid_simple();
+        }
+
         if !self.traced_nodes.contains(&node) {
             self.traced_nodes.push_back(node);
         }
     }
-
-    // /// Submit nodes to collected list
-    // pub fn add_nodes(&mut self, nodes: impl Iterator<Item = NonNull<GcHead>>) {
-    //     for n in nodes {
-    //         self.add_node(n);
-    //     }
-    // }
 
     /// Submit a GcRef to collected list
     #[inline(always)]
