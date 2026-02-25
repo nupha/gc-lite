@@ -9,7 +9,7 @@
 //! - Memory usage efficiency analysis
 //! - Automatic GC threshold performance
 
-use gc_lite::{GcHeap, GcRef, GcTracable, GcTraceCtx, gc_type_register};
+use gc_lite::{GcHeap, GcRef, GcTrace, GcTraceCtx, gc_type_register};
 use std::time::{Duration, Instant};
 
 fn main() {
@@ -267,7 +267,7 @@ struct SimpleNode {
     _data: Vec<u8>,
 }
 
-unsafe impl GcTracable for SimpleNode {
+impl GcTrace for SimpleNode {
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
 
@@ -277,7 +277,7 @@ struct GraphNode {
     neighbors: Vec<GcRef<GraphNode>>,
 }
 
-unsafe impl GcTracable for GraphNode {
+impl GcTrace for GraphNode {
     fn trace(&self, tr: &mut GcTraceCtx) {
         for neighbor in &self.neighbors {
             tr.add(*neighbor);
@@ -291,7 +291,7 @@ struct SmallData {
     // To avoid unused field warnings, no id and value fields included here
 }
 
-unsafe impl GcTracable for SmallData {
+impl GcTrace for SmallData {
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
 

@@ -262,7 +262,7 @@ mod tests {
     use super::*;
 
     struct DummyType;
-    unsafe impl crate::trace::GcTracable for DummyType {
+    impl crate::trace::GcTrace for DummyType {
         fn trace(&self, _: &mut crate::trace::GcTraceCtx) {}
     }
 

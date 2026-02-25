@@ -11,7 +11,7 @@
 
 use std::ops::Deref;
 
-use gc_lite::{GcHeap, GcRef, GcResult, GcTracable, GcTraceCtx, gc_type_register};
+use gc_lite::{GcHeap, GcRef, GcResult, GcTrace, GcTraceCtx, gc_type_register};
 
 #[derive(Debug)]
 struct MyString(String);
@@ -22,7 +22,7 @@ impl PartialEq<str> for MyString {
     }
 }
 
-unsafe impl GcTracable for MyString {
+impl GcTrace for MyString {
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
 
@@ -370,7 +370,7 @@ impl CyclicNode {
     }
 }
 
-unsafe impl GcTracable for CyclicNode {
+impl GcTrace for CyclicNode {
     fn trace(&self, tr: &mut GcTraceCtx) {
         if let Some(partner) = self.partner {
             tr.add(partner);
@@ -404,7 +404,7 @@ impl TreeNode {
     }
 }
 
-unsafe impl GcTracable for TreeNode {
+impl GcTrace for TreeNode {
     fn trace(&self, tr: &mut GcTraceCtx) {
         for child in &self.children {
             tr.add(*child);
@@ -431,7 +431,7 @@ struct DataContainer {
     optional_data: Option<GcRef<TreeNode>>,
 }
 
-unsafe impl GcTracable for DataContainer {
+impl GcTrace for DataContainer {
     fn trace(&self, tr: &mut GcTraceCtx) {
         tr.add(self.root);
         if let Some(data) = self.optional_data {
@@ -447,7 +447,7 @@ struct TestData {
     name: String,
 }
 
-unsafe impl GcTracable for TestData {
+impl GcTrace for TestData {
     fn trace(&self, _: &mut GcTraceCtx) {
         // No references to trace
     }

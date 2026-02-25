@@ -360,7 +360,7 @@ impl<'a> GcNodeGuard<'a> {
 
 #[cfg(test)]
 mod heap_tests {
-    use crate::{GcTraceCtx, trace::GcTracable};
+    use crate::{GcTraceCtx, trace::GcTrace};
 
     use super::*;
 
@@ -370,7 +370,7 @@ mod heap_tests {
         value: i32,
     }
 
-    unsafe impl GcTracable for Node {
+    impl GcTrace for Node {
         fn trace(&self, tr: &mut GcTraceCtx) {
             if let Some(next) = self.next {
                 tr.add(next);

@@ -301,12 +301,12 @@ mod sweep_test {
     use super::*;
     use crate::GcRef;
 
-    use crate::trace::{GcTracable, GcTraceCtx};
+    use crate::trace::{GcTrace, GcTraceCtx};
 
     #[derive(Debug)]
     struct MyI32(i32);
 
-    unsafe impl GcTracable for MyI32 {
+    impl GcTrace for MyI32 {
         fn trace(&self, _: &mut GcTraceCtx) {}
     }
 

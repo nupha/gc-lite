@@ -7,7 +7,7 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::{GcHeap, GcPartitionId, GcTracable, GcWeak, weak::GcWeakRawId};
+use crate::{GcHeap, GcPartitionId, GcTrace, GcWeak, weak::GcWeakRawId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -247,7 +247,7 @@ impl GcHead {
     }
 }
 
-pub trait GcNode: GcTracable {
+pub trait GcNode: GcTrace {
     /// Node data type id
     const GC_TYPE_ID: u8;
 

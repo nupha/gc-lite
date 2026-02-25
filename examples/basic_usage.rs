@@ -12,7 +12,7 @@
 
 use std::ops::Deref;
 
-use gc_lite::{GcHeap, GcRef, GcResult, GcTracable, GcTraceCtx, gc_type_register};
+use gc_lite::{GcHeap, GcRef, GcResult, GcTrace, GcTraceCtx, gc_type_register};
 
 #[derive(Debug)]
 struct MyString(String);
@@ -20,11 +20,11 @@ struct MyString(String);
 #[derive(Debug)]
 struct MyI32(i32);
 
-unsafe impl GcTracable for MyString {
+impl GcTrace for MyString {
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
 
-unsafe impl GcTracable for MyI32 {
+impl GcTrace for MyI32 {
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
 
@@ -254,7 +254,7 @@ impl TestNode {
     }
 }
 
-unsafe impl GcTracable for TestNode {
+impl GcTrace for TestNode {
     fn trace(&self, tr: &mut GcTraceCtx) {
         // Trace all child nodes
         for child in &self.children {

@@ -172,21 +172,21 @@ impl GcHeap {
 
 #[cfg(test)]
 mod tests {
-    use crate::{GcTracable, GcTraceCtx, gc_type_register};
+    use crate::{GcTrace, GcTraceCtx, gc_type_register};
 
     use super::*;
 
     #[derive(Debug, Default, PartialEq, Eq)]
     struct TestData1;
 
-    unsafe impl GcTracable for TestData1 {
+    impl GcTrace for TestData1 {
         fn trace(&self, _: &mut GcTraceCtx) {}
     }
 
     #[derive(Debug, Default, PartialEq, Eq)]
     struct TestData2;
 
-    unsafe impl GcTracable for TestData2 {
+    impl GcTrace for TestData2 {
         fn trace(&self, _: &mut GcTraceCtx) {}
     }
 

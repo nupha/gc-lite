@@ -5,7 +5,7 @@ use std::{collections::VecDeque, marker::PhantomData, ptr::NonNull};
 
 use crate::{GcHeap, GcNode, GcPartitionId, GcRef, node::GcHead};
 
-pub unsafe trait GcTracable: 'static {
+pub trait GcTrace: 'static {
     /// Collect directly referenced children gc nodes
     fn trace(&self, gcx: &mut GcTraceCtx);
 
@@ -231,22 +231,22 @@ impl GcHeap {
 macro_rules! impl_dummy_trace_for_primitive {
     ($($ty:ty),*) => {
         $(
-            unsafe impl GcTracable for $ty {
+            impl GcTrace for $ty {
                 #[inline(always)]
                 fn trace(&self, _: &mut GcTraceCtx) { }
             }
 
-            unsafe impl GcTracable for [$ty] {
+            impl GcTrace for [$ty] {
                 #[inline(always)]
                 fn trace(&self, _: &mut GcTraceCtx) { }
             }
 
-            unsafe impl GcTracable for Vec<$ty> {
+            impl GcTrace for Vec<$ty> {
                 #[inline(always)]
                 fn trace(&self, _: &mut GcTraceCtx) { }
             }
 
-            unsafe impl GcTracable for Box<[$ty]> {
+            impl GcTrace for Box<[$ty]> {
                 #[inline(always)]
                 fn trace(&self, _: &mut GcTraceCtx) { }
             }
@@ -254,27 +254,27 @@ macro_rules! impl_dummy_trace_for_primitive {
     };
 }
 
-// Implement GcTracable for basic types
+// Implement GcTrace for basic types
 impl_dummy_trace_for_primitive!(
     u8, u16, u32, u64, u128, i8, i16, i32, i64, i128, f32, f64, usize, isize, bool, char
 );
 
-unsafe impl GcTracable for str {
+impl GcTrace for str {
     #[inline(always)]
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
 
-unsafe impl GcTracable for &'static str {
+impl GcTrace for &'static str {
     #[inline(always)]
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
 
-unsafe impl GcTracable for String {
+impl GcTrace for String {
     #[inline(always)]
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
 
-unsafe impl GcTracable for &'static String {
+impl GcTrace for &'static String {
     #[inline(always)]
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
@@ -305,7 +305,7 @@ mod tests {
         }
     }
 
-    unsafe impl GcTracable for TestNode {
+    impl GcTrace for TestNode {
         fn trace(&self, tr: &mut GcTraceCtx) {
             println!(
                 "TestNode::trace({self:p}), {} children",

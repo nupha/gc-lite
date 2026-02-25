@@ -3,7 +3,7 @@
 
 use std::ptr::NonNull;
 
-use crate::{GcHead, GcNode, GcTracable, trace::GcTraceCtx};
+use crate::{GcHead, GcNode, GcTrace, trace::GcTraceCtx};
 
 #[derive(Debug, Copy, Clone)]
 #[allow(dead_code)]
@@ -14,7 +14,7 @@ pub struct GcTypeInfo {
     pub drop_pass: u8,
 }
 
-pub fn trace_fn<T: GcTracable>(node: NonNull<GcHead>, gcx: &mut GcTraceCtx) {
+pub fn trace_fn<T: GcTrace>(node: NonNull<GcHead>, gcx: &mut GcTraceCtx) {
     unsafe {
         node.as_ref().payload().cast::<T>().as_ref().trace(gcx);
     }

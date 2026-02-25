@@ -18,13 +18,13 @@ A Partitioned Garbage Collector.
 - **Gc<T>**: GC pointer wrapper providing safe object access
 - **GcRef<T>**: Underlying GC reference for internal operations
 - **GcWeak<T>**: Weak reference that doesn't prevent object collection
-- **GcTracable** trait: Defines behavior that objects to be garbage collected must implement
+- **GcTrace** trait: Defines behavior that objects to be garbage collected must implement
 - **GcTraceCtx**: Unified trace context for traversal and marking reachable objects
 
 ## Basic Usage
 
 ```rust
-use gc_lite::{GcHeap, GcResult, GcTracable};
+use gc_lite::{GcHeap, GcResult, GcTrace};
 
 fn main() -> GcResult<()> {
     // Create garbage collection heap
@@ -125,10 +125,10 @@ match weak_ref.upgrade(&heap) {
 
 ## Custom Types
 
-To use custom types, implement the `GcTracable` trait:
+To use custom types, implement the `GcTrace` trait:
 
 ```rust
-use gc_lite::{GcTracable, GcTraceCtx, GcPartitionId};
+use gc_lite::{GcTrace, GcTraceCtx, GcPartitionId};
 
 #[derive(Debug)]
 struct MyNode {
@@ -145,7 +145,7 @@ impl MyNode {
     }
 }
 
-unsafe impl GcTracable for MyNode {
+  impl GcTrace for MyNode {
     fn trace(&self, ctx: &mut GcTraceCtx) {
         for child in &self.children {
             ctx.add(*child);
@@ -208,14 +208,14 @@ assert!(!heap1.contains(&obj2));
 ## Gc Wrapper
 
 ```rust
-use gc_lite::{Gc, GcHeap, GcTracable};
+use gc_lite::{Gc, GcHeap, GcTrace};
 
 #[derive(Debug)]
 struct Data {
     value: i32,
 }
 
-unsafe impl GcTracable for Data {
+  impl GcTrace for Data {
     fn trace(&self, _ctx: &mut gc_lite::GcTraceCtx) {}
 }
 
@@ -256,7 +256,7 @@ match result {
 
 ## Notes
 
-- All objects on the heap must implement the `GcTracable` trait
+- All objects on the heap must implement the `GcTrace` trait
 - Only root objects or objects referenced by root objects (directly or indirectly) will be retained
 - Weak references don't prevent objects from being garbage collected
 - Circular references can be broken through weak references
