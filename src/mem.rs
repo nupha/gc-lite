@@ -118,6 +118,10 @@ impl GcHeap {
 
                     log::trace!("[alloc] {:?}", unsafe { head.as_ref() });
 
+                    if let Some(guard) = self.current_alloc_trans_guard_mut() {
+                        guard.add(head);
+                    }
+
                     Ok(GcRef {
                         head_ptr: head,
                         _marker: PhantomData,

@@ -13,12 +13,15 @@ use crate::{
 };
 
 pub struct GcHeap {
-    /// Partition management
-    pub(super) partitions: HashMap<GcPartitionId, GcPartition>,
-    /// Weak reference list, each slot stores (version, GcHeader)
-    pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
     /// Registered GC data type info
     pub(super) node_dtypes: &'static GcTypeRegistry,
+
+    /// Partition management
+    pub(super) partitions: HashMap<GcPartitionId, GcPartition>,
+    /// allocation transactions
+    pub(crate) alloc_trans_stack: Vec<GcAllocTrans<'static>>,
+    /// Weak reference list, each slot stores (version, GcHeader)
+    pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
 
     /// User provided opaque raw pointer
     opaque: *mut u8,
@@ -34,9 +37,14 @@ impl Drop for GcHeap {
         // heap world is gone, dealloc all nodes live in it, regardless their status.
         log::trace!("[heap::drop]");
 
-        let mut kv = std::mem::take(&mut self.partitions);
+        for mut trans in self.alloc_trans_stack.drain(..) {
+            unsafe {
+                trans.guard.abort();
+            }
+        }
 
-        for (_, mut partition) in kv.drain() {
+        let mut pars = std::mem::take(&mut self.partitions);
+        for (_, mut partition) in pars.drain() {
             if let Some(link) = partition.nodes.take() {
                 self.dispose_all_nodes(link, Self::DUMMY_DISPOSE_CALLBACK);
             }
@@ -65,6 +73,7 @@ impl GcHeap {
             weak_slots: Vec::new(),
             opaque: std::ptr::null_mut(),
             node_dtypes: registry,
+            alloc_trans_stack: Vec::new(),
 
             #[cfg(debug_assertions)]
             dbg_dropping_root_partition: None,
@@ -318,6 +327,31 @@ impl GcHeap {
 
         res
     }
+
+    pub fn open_alloc_trans(&mut self) {
+        let guard = GcNodeGuard {
+            nodes: SmallVec::new(),
+            heap: self as *mut GcHeap,
+            _mark: PhantomData,
+        };
+        self.alloc_trans_stack.push(GcAllocTrans { guard });
+    }
+
+    pub fn close_alloc_trans(&mut self) {
+        let trans = self
+            .alloc_trans_stack
+            .pop()
+            .expect("GcAllocTrans stack underflow");
+        drop(trans);
+    }
+
+    pub(crate) fn current_alloc_trans_guard_mut(&mut self) -> Option<&mut GcNodeGuard<'static>> {
+        self.alloc_trans_stack.last_mut().map(|t| &mut t.guard)
+    }
+}
+
+pub struct GcAllocTrans<'a> {
+    guard: GcNodeGuard<'a>,
 }
 
 pub struct GcNodeGuard<'a> {
@@ -329,8 +363,16 @@ pub struct GcNodeGuard<'a> {
 impl<'a> Drop for GcNodeGuard<'a> {
     fn drop(&mut self) {
         for mut node in self.nodes.drain(..) {
-            unsafe {
-                node.as_mut().dec_protect_count();
+            let n = unsafe { node.as_mut() };
+            let count = n.dec_protect_count();
+
+            if count == 0 && !n.is_root() {
+                let heap = unsafe { &mut *self.heap };
+                if let Some(par) = heap.partition_mut(n.scope_id())
+                    && let Some(i) = par.root_nodes.iter().position(|&x| x == node)
+                {
+                    par.root_nodes.swap_remove(i);
+                }
             }
         }
     }
@@ -345,6 +387,15 @@ impl<'a> GcNodeGuard<'a> {
             }
             self.nodes.push(node);
         }
+    }
+
+    /// # Safety
+    ///
+    /// 仅供 `GcHeap::drop` 在销毁事务栈时调用，用于跳过对
+    /// `nodes` 中节点的保护计数更新与根集合维护逻辑。
+    /// 调用方必须保证这些节点即将被整体释放，不再通过 GC 访问。
+    unsafe fn abort(&mut self) {
+        self.nodes.clear();
     }
 }
 
@@ -403,6 +454,129 @@ mod heap_tests {
         unsafe {
             assert_eq!(head.as_ref().protect_count(), 0);
         }
+    }
+
+    #[test]
+    fn test_alloc_trans_protects_nodes_during_transaction() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition(4096);
+
+        heap.open_alloc_trans();
+
+        let node: GcRef<Node> = heap
+            .alloc(
+                partition_id,
+                Node {
+                    next: None,
+                    value: 1,
+                },
+            )
+            .unwrap();
+
+        let head = node.head_ptr;
+
+        unsafe {
+            assert_eq!(head.as_ref().protect_count(), 1);
+        }
+
+        while !heap.mark(partition_id, 64) {}
+
+        let removed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert_eq!(removed, 0);
+
+        heap.close_alloc_trans();
+
+        while !heap.mark(partition_id, 64) {}
+
+        let removed_after = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert!(removed_after > 0);
+    }
+
+    #[test]
+    fn test_alloc_trans_nested_transactions() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition(4096);
+
+        heap.open_alloc_trans();
+        let node1: GcRef<Node> = heap
+            .alloc(
+                partition_id,
+                Node {
+                    next: None,
+                    value: 1,
+                },
+            )
+            .unwrap();
+        let head1 = node1.head_ptr;
+
+        heap.open_alloc_trans();
+        let node2: GcRef<Node> = heap
+            .alloc(
+                partition_id,
+                Node {
+                    next: None,
+                    value: 2,
+                },
+            )
+            .unwrap();
+        let head2 = node2.head_ptr;
+
+        unsafe {
+            assert_eq!(head1.as_ref().protect_count(), 1);
+            assert_eq!(head2.as_ref().protect_count(), 1);
+        }
+
+        while !heap.mark(partition_id, 64) {}
+
+        let disposed_head1 = std::cell::Cell::new(false);
+        let disposed_head2 = std::cell::Cell::new(false);
+        let head1_ptr = head1;
+        let head2_ptr = head2;
+        let removed_inner = heap.sweep(partition_id, |_, h| {
+            let ptr = h as *const GcHead;
+            if ptr == head1_ptr.as_ptr() {
+                disposed_head1.set(true);
+            }
+            if ptr == head2_ptr.as_ptr() {
+                disposed_head2.set(true);
+            }
+        });
+        assert_eq!(removed_inner, 0);
+        assert!(!disposed_head1.get());
+        assert!(!disposed_head2.get());
+
+        heap.close_alloc_trans();
+
+        while !heap.mark(partition_id, 64) {}
+
+        let disposed_head1_after = std::cell::Cell::new(false);
+        let disposed_head2_after = std::cell::Cell::new(false);
+        let removed_after_inner = heap.sweep(partition_id, |_, h| {
+            let ptr = h as *const GcHead;
+            if ptr == head1_ptr.as_ptr() {
+                disposed_head1_after.set(true);
+            }
+            if ptr == head2_ptr.as_ptr() {
+                disposed_head2_after.set(true);
+            }
+        });
+        assert!(removed_after_inner > 0);
+        assert!(!disposed_head1_after.get());
+        assert!(disposed_head2_after.get());
+
+        heap.close_alloc_trans();
+
+        while !heap.mark(partition_id, 64) {}
+
+        let disposed_head1_final = std::cell::Cell::new(false);
+        let removed_final = heap.sweep(partition_id, |_, h| {
+            let ptr = h as *const GcHead;
+            if ptr == head1_ptr.as_ptr() {
+                disposed_head1_final.set(true);
+            }
+        });
+        assert!(removed_final > 0);
+        assert!(disposed_head1_final.get());
     }
 
     #[test]
