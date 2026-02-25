@@ -4,11 +4,11 @@
 pub mod gctype;
 mod heap;
 mod helpers;
+mod mark_sweep;
 mod mem;
 mod node;
 mod node_iterator;
 mod partition;
-mod sweep;
 mod trace;
 mod weak;
 mod xref;
