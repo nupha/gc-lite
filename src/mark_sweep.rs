@@ -199,8 +199,10 @@ impl GcHeap {
                 for n in NodeLinkIter::new(link1) {
                     unsafe {
                         debug_assert!(
-                            n.as_ref().color() == GcTriColor::Black || n.as_ref().is_protected(),
-                            "live nodes should be black or protected"
+                            n.as_ref().color() == GcTriColor::Black
+                                || n.as_ref().is_root()
+                                || n.as_ref().is_protected(),
+                            "live nodes should be black, root or protected"
                         );
                     }
                 }

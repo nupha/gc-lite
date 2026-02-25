@@ -138,12 +138,7 @@ impl GcHeap {
         log::trace!("[dispose] {hd:?}");
 
         #[cfg(debug_assertions)]
-        {
-            hd.debug_assert_node_valid(self);
-            if self.dbg_dropping_root_partition.is_none() {
-                debug_assert!(hd.xref().is_null(), "{hd:?}");
-            }
-        }
+        hd.debug_assert_node_valid(self);
 
         if !hd.weak_id.is_null() {
             // clear weak slot

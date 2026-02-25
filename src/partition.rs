@@ -19,24 +19,11 @@ impl GcPartitionId {
     pub const fn is_null(&self) -> bool {
         self.0 == 0
     }
-
-    /// Get the underlying serial number of this partition.
-    ///
-    /// Value is in range [0, u16::MAX], where 0 is reserved for `NONE`.
-    #[inline(always)]
-    pub const fn serial(self) -> u16 {
-        self.0
-    }
-
-    #[inline(always)]
-    pub(crate) const fn from_serial(serial: u16) -> Self {
-        Self(serial)
-    }
 }
 
 impl std::fmt::Debug for GcPartitionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:04}", self.serial())
+        write!(f, "{}", self.0)
     }
 }
 
@@ -191,7 +178,7 @@ impl GcHeap {
             let start = serial;
 
             loop {
-                let candidate = GcPartitionId::from_serial(serial);
+                let candidate = GcPartitionId(serial);
                 let conflict = self.partitions.contains_key(&candidate);
                 if !conflict {
                     let next = if serial == u16::MAX { 1 } else { serial + 1 };
@@ -353,8 +340,8 @@ mod tests {
 
     #[test]
     fn test_partition_id_serial_and_range() {
-        let id = GcPartitionId::from_serial(10);
-        assert_eq!(id.serial(), 10);
+        let id = GcPartitionId(10);
+        assert_eq!(id.0, 10);
         assert!(!id.is_null());
         assert!(GcPartitionId::NONE.is_null());
     }

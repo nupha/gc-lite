@@ -85,13 +85,16 @@ impl std::fmt::Debug for GcHead {
             .field("partition", &self.partition_id())
             .field("color", &self.color());
 
-        if !self.xref().is_null() {
-            s.field("xref", &self.xref());
+        if self.is_protected() {
+            s.field("protected", &self.protect_count());
         }
         if !self.weak_id.is_null() {
             let w = self.weak_id;
             s.field("weakref", &format!("{}#{}", w.index(), w.version()));
         }
+        // if !self.xref().is_null() {
+        //     s.field("xref", &self.xref());
+        // }
 
         #[cfg(debug_assertions)]
         {
@@ -128,7 +131,7 @@ impl GcHead {
     }
 
     #[inline(always)]
-    pub(crate) fn is_protected(&self) -> bool {
+    pub fn is_protected(&self) -> bool {
         (self.attrs & PROTECT_COUNT_MASK) != 0
     }
 
