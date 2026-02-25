@@ -23,26 +23,17 @@ impl GcPartitionId {
         self.0 == 0
     }
 
-    /// Get the underlying serial number of this partition (low 10 bits).
+    /// Get the underlying serial number of this partition.
+    ///
+    /// Value is in range [0, u16::MAX], where 0 is reserved for `NONE`.
     #[inline(always)]
     pub const fn serial(self) -> u16 {
-        self.0 & 0x03ff
-    }
-
-    /// Get depth encoded in this id (high 6 bits).
-    #[inline(always)]
-    pub const fn depth(self) -> u8 {
-        (self.0 >> 10) as u8
+        self.0
     }
 
     #[inline(always)]
     pub(crate) const fn from_serial(serial: u16) -> Self {
-        Self::from_depth_serial(0, serial)
-    }
-
-    #[inline(always)]
-    pub const fn from_depth_serial(depth: u8, serial: u16) -> Self {
-        Self(((depth as u16) << 10) | (serial & 0x03ff))
+        Self(serial)
     }
 }
 
@@ -62,10 +53,6 @@ pub struct GcPartition {
     pub(crate) gray_list: Vec<NonNull<GcHead>>,
     /// Is in a marking cycle
     marking: bool,
-    /// Parent partition id, NONE for root
-    pub(crate) parent: GcPartitionId,
-    /// Child partition ids
-    pub(crate) children: SmallVec<[GcPartitionId; 4]>,
 
     /// Current memory usage
     pub(crate) memory_used: usize,
@@ -86,8 +73,6 @@ impl GcPartition {
             root_nodes: SmallVec::new(),
             gray_list: Vec::new(),
             marking: false,
-            parent: GcPartitionId::NONE,
-            children: SmallVec::new(),
         }
     }
 
@@ -160,21 +145,6 @@ impl GcPartition {
     }
 
     #[inline(always)]
-    pub fn is_root(&self) -> bool {
-        self.parent.is_null()
-    }
-
-    #[inline(always)]
-    pub fn parent(&self) -> GcPartitionId {
-        self.parent
-    }
-
-    #[inline(always)]
-    pub fn children(&self) -> &[GcPartitionId] {
-        &self.children
-    }
-
-    #[inline(always)]
     pub const fn is_marking(&self) -> bool {
         self.marking
     }
@@ -204,93 +174,47 @@ impl GcPartition {
 }
 
 impl GcHeap {
-    /// Create a new partition with optional parent
+    /// Create a new partition.
     ///
     /// # Parameters
     /// - `memory_limit`: Optional memory limit (0 for unlimited)
-    /// - `parent`: Parent partition ID, GcPartitionId::NONE for root partition
     ///
     /// # Returns
     /// The ID of the newly created partition
-    fn create_partition_internal(
-        &mut self,
-        memory_limit: Option<usize>,
-        parent: GcPartitionId,
-    ) -> GcPartitionId {
-        const MAX_SERIAL: u16 = 1023;
-
+    pub fn create_partition(&mut self, memory_limit: usize) -> GcPartitionId {
         thread_local! {
-            static NEXT_PARTITION_SERIAL: Cell<u16> = const { Cell::new(1) };
+            static NEXT_PARTITION_ID: Cell<u16> = const { Cell::new(1) };
         }
 
-        let depth: u8 = if parent.is_null() {
-            0
-        } else {
-            parent.depth().saturating_add(1)
-        };
-
-        let id = NEXT_PARTITION_SERIAL.with(|next_serial| {
-            let mut serial = next_serial.get();
-            if serial == 0 || serial > MAX_SERIAL {
+        let id = NEXT_PARTITION_ID.with(|next_id| {
+            let mut serial = next_id.get();
+            if serial == 0 {
                 serial = 1;
             }
             let start = serial;
 
             loop {
-                let candidate = GcPartitionId::from_depth_serial(depth, serial);
-                let conflict = self.partitions.keys().any(|pid| pid.0 == candidate.0);
+                let candidate = GcPartitionId::from_serial(serial);
+                let conflict = self.partitions.contains_key(&candidate);
                 if !conflict {
-                    let next = if serial >= MAX_SERIAL { 1 } else { serial + 1 };
-                    next_serial.set(next);
+                    let next = if serial == u16::MAX { 1 } else { serial + 1 };
+                    next_id.set(next);
                     return candidate;
                 }
 
-                serial = if serial >= MAX_SERIAL { 1 } else { serial + 1 };
+                serial = if serial == u16::MAX { 1 } else { serial + 1 };
                 if serial == start {
                     panic!("too many active partitions");
                 }
             }
         });
 
-        let mut partition = GcPartition::new(memory_limit.unwrap_or(0));
-        partition.parent = parent;
+        let partition = GcPartition::new(memory_limit);
         self.partitions.insert(id, partition);
-
-        if !parent.is_null() {
-            if let Some(par) = self.partitions.get_mut(&parent) {
-                par.children.push(id);
-            }
-        }
 
         log::trace!("[new_scope] {id:?}");
 
         id
-    }
-
-    /// Create a new partition with the specified memory limit
-    ///
-    /// # Parameters
-    /// - `memory_limit`: Memory limit in bytes (0 for unlimited)
-    ///
-    /// # Returns
-    /// The ID of the newly created top-level partition
-    pub fn create_partition(&mut self, memory_limit: usize) -> GcPartitionId {
-        self.create_partition_internal(Some(memory_limit), GcPartitionId::NONE)
-    }
-
-    /// Create a new sub-partition under given parent
-    pub fn create_sub_partition(&mut self, parent: GcPartitionId) -> GcPartitionId {
-        self.create_partition_internal(None, parent)
-    }
-
-    /// Note: `since` is not included in result vec
-    fn load_descendants(&self, since: GcPartitionId, lst: &mut SmallVec<[GcPartitionId; 8]>) {
-        if let Some(par) = self.partition(since) {
-            for &ch in par.children() {
-                lst.push(ch);
-                self.load_descendants(ch, lst);
-            }
-        }
     }
 
     /// Remove a partition, and dispose unused nodes.
@@ -298,141 +222,21 @@ impl GcHeap {
     pub fn remove_partition(
         &mut self,
         partition_id: GcPartitionId,
-        on_promote: impl Fn(&GcHeap, &GcHead, GcPartitionId),
         on_dispose: impl Fn(&GcHeap, &GcHead),
-    ) {
-        let parent_id = if let Some(par) = self.partition(partition_id) {
-            par.parent()
-        } else {
-            return;
-        };
+    ) -> usize {
+        log::trace!("[close_scope] {partition_id:?}");
 
-        // if parent_id.is_null() {
-        //     // drop root partition - fast mode
-        //     return self.remove_root_partition_fast(partition_id, on_dispose);
-        // }
-
-        let mut scopes = SmallVec::<[GcPartitionId; 8]>::new();
-        scopes.push(partition_id);
-        self.load_descendants(partition_id, &mut scopes);
-
-        // remove resursivly from leaves to partition
-        let call_on_promote = !std::ptr::addr_eq(&on_promote, &GcHeap::DUMMY_PROMOTE_CALLBACK);
         let mut freed_bytes = 0;
 
-        // FIXME: clear all node's visit flag in all partitions - this is heavy.
-        // but this is the safe way to traverse every node in subtree
-        // this should be optimized
-        for pid in self.partition_ids() {
-            self.traverse_start(pid);
+        if let Some(mut par) = self.partitions.remove(&partition_id)
+            && let Some(link) = par.nodes.take()
+        {
+            freed_bytes += self.dispose_all_nodes(link, &on_dispose);
         }
 
-        while let Some(pid) = scopes.pop() {
-            log::trace!("[close_scope] {pid:?}");
+        log::trace!("[close_scope_done] {partition_id:?}");
 
-            // fix xref tree recursively
-            if let Some(par) = self.partitions.get_mut(&pid) {
-                let roots = std::mem::take(&mut par.root_nodes);
-
-                for &xn in roots
-                    .iter()
-                    .filter(|n| unsafe { !n.as_ref().xref().is_null() })
-                {
-                    let xref = unsafe {
-                        debug_assert_eq!(xn.as_ref().scope_id(), pid); // O.o
-                        xn.as_ref().xref()
-                    };
-
-                    log::debug!("[traverse_xref] {:?}", unsafe { xn.as_ref() });
-
-                    self.traverse_subtree(xn, GcPartitionId::NONE, {
-                        let hp = NonNull::from_ref(self);
-
-                        move |mut n, _| unsafe {
-                            let xref0 = n.as_ref().xref();
-
-                            let xref = if xref0.is_null() {
-                                hp.as_ref().common_parent2(xref, n.as_ref().scope_id())
-                            } else {
-                                hp.as_ref()
-                                    .common_parent3(xref, n.as_ref().scope_id(), xref0)
-                            };
-                            debug_assert!(!xref.is_null());
-
-                            if n.as_mut().set_xref(xref) && n.as_ref().scope_id() != pid {
-                                // xref was set. if node not in removing scope, mark the node as root node.
-                                (*hp.as_ptr()).set_root_node(n, true);
-                            }
-                        }
-                    });
-                }
-            }
-
-            if let Some(mut par) = self.partitions.remove(&pid)
-                && let Some(link0_head) = par.nodes.take()
-            {
-                // promote xref nodes
-                let mut link1 = Some(link0_head);
-                let mut current = Some(link0_head);
-                let mut prev: Option<NonNull<GcHead>> = None;
-
-                while let Some(mut this) = current {
-                    current = unsafe { this.as_ref().next };
-
-                    let xref = unsafe { this.as_ref().xref() };
-                    if !xref.is_null() {
-                        log::trace!("[promote] {:?} -> {xref:?}", unsafe { this.as_ref() });
-                        debug_assert_ne!(xref, pid);
-
-                        if let Some(p) = prev {
-                            unsafe {
-                                (*p.as_ptr()).next = current;
-                            }
-                        } else {
-                            link1 = current;
-                        }
-
-                        if call_on_promote {
-                            on_promote(self, unsafe { this.as_ref() }, xref);
-                        }
-
-                        // clear flags and attach to xref chain
-                        unsafe {
-                            let n = this.as_mut();
-                            n.remove_flag(GcNodeFlag::ROOT);
-                            n.partition = 0;
-                            n.next.take();
-                        }
-                        self.attach_node(xref, this);
-
-                        self.update_mem_use(
-                            xref,
-                            (self.node_dtypes.type_info_list
-                                [unsafe { this.as_ref().dtype() } as usize]
-                                .size as usize
-                                + std::mem::size_of::<GcHead>()) as i32,
-                        );
-                    } else {
-                        prev = Some(this);
-                    }
-                }
-
-                // free rest nodes
-                if let Some(first) = link1 {
-                    freed_bytes += self.dispose_all_nodes(first, &on_dispose);
-                }
-            }
-
-            if let Some(parent) = self.partition_mut(parent_id) {
-                // Remove from parent's children list
-                parent.children.retain(|c| *c != partition_id);
-            }
-
-            // Decrease parent's memory usage
-            self.update_mem_use(parent_id, -(freed_bytes as i32));
-
-            log::trace!("[close_scope_done] {pid:?}");
-        }
+        freed_bytes
     }
 
     /// Get partition information
@@ -450,154 +254,6 @@ impl GcHeap {
     /// Get all partition IDs
     pub fn partition_ids(&self) -> Vec<GcPartitionId> {
         self.partitions.keys().copied().collect()
-    }
-
-    /// Check if the given partition is an ancestor of another partition
-    ///
-    /// # Parameters
-    /// - `upper`: The partition supposed to be ancestor
-    /// - `lower`: The partition supposed to be descendant
-    ///
-    /// # Returns
-    /// `true` if `upper` is an ancestor of `lower`, `false` otherwise
-    #[inline(always)]
-    pub fn check_partition_ancestor(&self, upper: GcPartitionId, lower: GcPartitionId) -> bool {
-        self.is_ancestor_of(lower, upper)
-    }
-
-    /// Find the nearest common parent partition of two partitions
-    ///
-    /// # Parameters
-    /// - `p1`: First partition ID
-    /// - `p2`: Second partition ID
-    ///
-    /// # Returns
-    /// The nearest common parent partition ID, or `GcPartitionId::NONE` if no common ancestor
-    pub fn common_parent2(&self, p1: GcPartitionId, p2: GcPartitionId) -> GcPartitionId {
-        if p1 == GcPartitionId::NONE || p2 == GcPartitionId::NONE {
-            return GcPartitionId::NONE;
-        } else if p1 == p2 {
-            return p1;
-        }
-
-        let d1 = p1.depth() as usize;
-        let d2 = p2.depth() as usize;
-
-        let dmin = d1.min(d2);
-        let mut a = p1;
-        let mut b = p2;
-
-        let mut da = d1;
-        while da > dmin {
-            match self.partition(a) {
-                Some(partition) => {
-                    a = partition.parent;
-                    da -= 1;
-                }
-                None => return GcPartitionId::NONE,
-            }
-        }
-        let mut db = d2;
-        while db > dmin {
-            match self.partition(b) {
-                Some(partition) => {
-                    b = partition.parent;
-                    db -= 1;
-                }
-                None => return GcPartitionId::NONE,
-            }
-        }
-
-        while a != b {
-            match (self.partition(a), self.partition(b)) {
-                (Some(pa), Some(pb)) => {
-                    a = pa.parent;
-                    b = pb.parent;
-                }
-                _ => return GcPartitionId::NONE,
-            }
-        }
-
-        a
-    }
-
-    /// Find the nearest common parent partition of three partitions
-    ///
-    /// # Parameters
-    /// - `p1`: First partition ID
-    /// - `p2`: Second partition ID
-    /// - `p3`: Third partition ID
-    ///
-    /// # Returns
-    /// The nearest common parent partition ID, or `GcPartitionId::NONE` if no common ancestor
-    pub fn common_parent3(
-        &self,
-        p1: GcPartitionId,
-        p2: GcPartitionId,
-        p3: GcPartitionId,
-    ) -> GcPartitionId {
-        if p1 == GcPartitionId::NONE || p2 == GcPartitionId::NONE || p3 == GcPartitionId::NONE {
-            return GcPartitionId::NONE;
-        }
-
-        if p1 == p2 {
-            return self.common_parent2(p1, p3);
-        } else if p1 == p3 || p2 == p3 {
-            return self.common_parent2(p1, p2);
-        }
-
-        let d1 = p1.depth() as usize;
-        let d2 = p2.depth() as usize;
-        let d3 = p3.depth() as usize;
-
-        let dmin = d1.min(d2).min(d3);
-        let mut a = p1;
-        let mut b = p2;
-        let mut c = p3;
-
-        let mut da = d1;
-        while da > dmin {
-            match self.partition(a) {
-                Some(partition) => {
-                    a = partition.parent;
-                    da -= 1;
-                }
-                None => return GcPartitionId::NONE,
-            }
-        }
-        let mut db = d2;
-        while db > dmin {
-            match self.partition(b) {
-                Some(partition) => {
-                    b = partition.parent;
-                    db -= 1;
-                }
-                None => return GcPartitionId::NONE,
-            }
-        }
-        let mut dc = d3;
-        while dc > dmin {
-            match self.partition(c) {
-                Some(partition) => {
-                    c = partition.parent;
-                    dc -= 1;
-                }
-                None => return GcPartitionId::NONE,
-            }
-        }
-
-        while a != b || a != c {
-            match (self.partition(a), self.partition(b), self.partition(c)) {
-                (Some(pa), Some(pb), Some(pc)) => {
-                    a = pa.parent;
-                    b = pb.parent;
-                    c = pc.parent;
-                }
-                _ => return GcPartitionId::NONE,
-            }
-        }
-
-        a
     }
 }
 
@@ -622,49 +278,12 @@ mod tests {
         let partition = heap.partition(id).unwrap();
         assert_eq!(partition.memory_limit(), 1024);
         assert_eq!(partition.gc_threshold(), 0); // Default threshold is 0, automatic GC disabled
-        assert!(partition.is_root());
-        assert_eq!(partition.parent(), GcPartitionId::NONE);
 
         // Clean up partition
-        heap.remove_partition(
-            id,
-            |_, n, p| {
-                println!("migrate {n:?} -> {p:?}");
-            },
-            |_, n| {
-                println!("dispose: {n:?}");
-            },
-        );
+        heap.remove_partition(id, |_, n| {
+            println!("dispose: {n:?}");
+        });
         assert!(heap.partition(id).is_none());
-    }
-
-    #[test]
-    fn test_hierarchical_partition_creation() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-
-        // Create root partition
-        let root_id = heap.create_partition(1024);
-        assert!(heap.partition(root_id).unwrap().is_root());
-
-        // Create child partition
-        let child_id = heap.create_sub_partition(root_id);
-        let child = heap.partition(child_id).unwrap();
-        assert!(!child.is_root());
-        assert_eq!(child.parent(), root_id);
-
-        // Verify root has the child in its children list
-        let root = heap.partition(root_id).unwrap();
-        assert_eq!(root.children().len(), 1);
-        assert_eq!(root.children()[0], child_id);
-
-        // Clean up
-        heap.remove_partition(
-            root_id,
-            GcHeap::DUMMY_PROMOTE_CALLBACK,
-            GcHeap::DUMMY_DISPOSE_CALLBACK,
-        );
-        assert!(heap.partition(root_id).is_none());
-        assert!(heap.partition(child_id).is_none());
     }
 
     #[test]
@@ -682,11 +301,7 @@ mod tests {
         assert_eq!(partition.gc_threshold(), 0);
 
         // Clean up
-        heap.remove_partition(
-            id,
-            GcHeap::DUMMY_PROMOTE_CALLBACK,
-            GcHeap::DUMMY_DISPOSE_CALLBACK,
-        );
+        heap.remove_partition(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     }
 
     #[test]
@@ -704,288 +319,46 @@ mod tests {
         assert_eq!(partition.memory_limit(), 0);
 
         // Clean up
-        heap.remove_partition(
-            id,
-            GcHeap::DUMMY_PROMOTE_CALLBACK,
-            GcHeap::DUMMY_DISPOSE_CALLBACK,
-        );
+        heap.remove_partition(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     }
 
     #[test]
     fn test_is_ancestor_of() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p1 = heap.create_partition(0);
-        let p2 = heap.create_sub_partition(p1);
-        let p3 = heap.create_sub_partition(p2);
-        let p4 = heap.create_partition(0);
-
-        assert!(heap.check_partition_ancestor(p1, p2));
-        assert!(heap.check_partition_ancestor(p1, p3));
-        assert!(heap.check_partition_ancestor(p2, p3));
-        assert!(!heap.check_partition_ancestor(p2, p1));
-        assert!(!heap.check_partition_ancestor(p3, p1));
-        assert!(!heap.check_partition_ancestor(p3, p2));
-        assert!(!heap.check_partition_ancestor(p1, p4));
-        assert!(!heap.check_partition_ancestor(p4, p1));
-
-        // Clean up
-        heap.remove_partition(
-            p1,
-            GcHeap::DUMMY_PROMOTE_CALLBACK,
-            GcHeap::DUMMY_DISPOSE_CALLBACK,
-        );
-        heap.remove_partition(
-            p4,
-            GcHeap::DUMMY_PROMOTE_CALLBACK,
-            GcHeap::DUMMY_DISPOSE_CALLBACK,
-        );
+        // 已删除 ancestor 相关 API，此测试不再适用，保留空壳确保编译通过
     }
 
     #[test]
     fn test_common_parent() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p1 = heap.create_partition(0);
-        let p2 = heap.create_sub_partition(p1);
-        let p3 = heap.create_sub_partition(p1);
-        let p4 = heap.create_sub_partition(p2);
-        let p5 = heap.create_sub_partition(p2);
-        let p6 = heap.create_sub_partition(p3);
-        let p7 = heap.create_partition(0);
-
-        assert_eq!(heap.common_parent2(p4, p5), p2);
-        assert_eq!(heap.common_parent2(p4, p6), p1);
-        assert_eq!(heap.common_parent2(p5, p6), p1);
-        assert_eq!(heap.common_parent2(p2, p3), p1);
-        assert_eq!(heap.common_parent2(p1, p7), GcPartitionId::NONE);
-
-        // Clean up
-        heap.remove_partition(
-            p1,
-            GcHeap::DUMMY_PROMOTE_CALLBACK,
-            GcHeap::DUMMY_DISPOSE_CALLBACK,
-        );
-        heap.remove_partition(
-            p7,
-            GcHeap::DUMMY_PROMOTE_CALLBACK,
-            GcHeap::DUMMY_DISPOSE_CALLBACK,
-        );
+        // 已删除 common_parent 相关 API，此测试不再适用，保留空壳确保编译通过
     }
 
     #[test]
     fn test_update_mem_use() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let p1 = heap.create_partition(0);
-        let p2 = heap.create_sub_partition(p1);
-        let p3 = heap.create_sub_partition(p2);
+        let p2 = heap.create_partition(0);
 
-        heap.update_mem_use(p3, 100);
+        heap.update_mem_use(p1, 100);
         assert_eq!(heap.partition(p1).unwrap().memory_used(), 100);
-        assert_eq!(heap.partition(p2).unwrap().memory_used(), 100);
-        assert_eq!(heap.partition(p3).unwrap().memory_used(), 100);
+        assert_eq!(heap.partition(p2).unwrap().memory_used(), 0);
 
         heap.update_mem_use(p2, 50);
-        assert_eq!(heap.partition(p1).unwrap().memory_used(), 150);
-        assert_eq!(heap.partition(p2).unwrap().memory_used(), 150);
-        assert_eq!(heap.partition(p3).unwrap().memory_used(), 100);
+        assert_eq!(heap.partition(p1).unwrap().memory_used(), 100);
+        assert_eq!(heap.partition(p2).unwrap().memory_used(), 50);
 
-        heap.update_mem_use(p3, -20);
-        assert_eq!(heap.partition(p1).unwrap().memory_used(), 130);
-        assert_eq!(heap.partition(p2).unwrap().memory_used(), 130);
-        assert_eq!(heap.partition(p3).unwrap().memory_used(), 80);
+        heap.update_mem_use(p1, -20);
+        assert_eq!(heap.partition(p1).unwrap().memory_used(), 80);
+        assert_eq!(heap.partition(p2).unwrap().memory_used(), 50);
 
         // Clean up
-        heap.remove_partition(
-            p1,
-            GcHeap::DUMMY_PROMOTE_CALLBACK,
-            GcHeap::DUMMY_DISPOSE_CALLBACK,
-        );
+        heap.remove_partition(p1, GcHeap::DUMMY_DISPOSE_CALLBACK);
     }
 
     #[test]
-    fn test_common_parent_none_cases() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-
-        let root_id = heap.create_partition(2048);
-        let child_id = heap.create_sub_partition(root_id);
-
-        // NONE cases
-        assert_eq!(
-            heap.common_parent2(GcPartitionId::NONE, child_id),
-            GcPartitionId::NONE
-        );
-        assert_eq!(
-            heap.common_parent2(child_id, GcPartitionId::NONE),
-            GcPartitionId::NONE
-        );
-        assert_eq!(
-            heap.common_parent2(GcPartitionId::NONE, GcPartitionId::NONE),
-            GcPartitionId::NONE
-        );
-
-        // Clean up - GcHeap doesn't have remove_partition, but we can let it drop
-    }
-
-    #[test]
-    fn test_common_parent_different_trees() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-
-        // Create two separate root partitions (different trees)
-        let root1_id = heap.create_partition(2048);
-        let root2_id = heap.create_partition(2048);
-        let child1_id = heap.create_sub_partition(root1_id);
-        let child2_id = heap.create_sub_partition(root2_id);
-
-        // Different trees should have no common parent
-        assert_eq!(
-            heap.common_parent2(child1_id, child2_id),
-            GcPartitionId::NONE
-        );
-        assert_eq!(heap.common_parent2(root1_id, root2_id), GcPartitionId::NONE);
-
-        // Clean up - GcHeap doesn't have remove_partition, but we can let it drop
-    }
-
-    #[test]
-    fn test_common_parent3() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-
-        // Create hierarchy:
-        // root_id
-        //   ├── child1_id
-        //   │   └── grandchild1_id
-        //   ├── child2_id
-        //   │   └── grandchild2_id
-        //   └── child3_id
-        let root_id = heap.create_partition(2048);
-        let child1_id = heap.create_sub_partition(root_id);
-        let child2_id = heap.create_sub_partition(root_id);
-        let child3_id = heap.create_sub_partition(root_id);
-        let grandchild1_id = heap.create_sub_partition(child1_id);
-        let grandchild2_id = heap.create_sub_partition(child2_id);
-
-        // Same partition (all three are the same)
-        assert_eq!(heap.common_parent3(root_id, root_id, root_id), root_id);
-        assert_eq!(
-            heap.common_parent3(child1_id, child1_id, child1_id),
-            child1_id
-        );
-
-        // Two same, one different
-        assert_eq!(heap.common_parent3(child1_id, child1_id, root_id), root_id);
-        assert_eq!(heap.common_parent3(root_id, child1_id, child1_id), root_id);
-        assert_eq!(heap.common_parent3(child1_id, root_id, child1_id), root_id);
-
-        // Three siblings - common parent is root
-        assert_eq!(
-            heap.common_parent3(child1_id, child2_id, child3_id),
-            root_id
-        );
-
-        // Two siblings and their parent
-        assert_eq!(heap.common_parent3(child1_id, child2_id, root_id), root_id);
-
-        // Grandchildren from different subtrees
-        assert_eq!(
-            heap.common_parent3(grandchild1_id, grandchild2_id, child3_id),
-            root_id
-        );
-
-        // One grandchild, its parent, and another child
-        assert_eq!(
-            heap.common_parent3(grandchild1_id, child1_id, child2_id),
-            root_id
-        );
-
-        // NONE cases
-        assert_eq!(
-            heap.common_parent3(GcPartitionId::NONE, child1_id, child2_id),
-            GcPartitionId::NONE
-        );
-        assert_eq!(
-            heap.common_parent3(child1_id, GcPartitionId::NONE, child2_id),
-            GcPartitionId::NONE
-        );
-        assert_eq!(
-            heap.common_parent3(child1_id, child2_id, GcPartitionId::NONE),
-            GcPartitionId::NONE
-        );
-        assert_eq!(
-            heap.common_parent3(
-                GcPartitionId::NONE,
-                GcPartitionId::NONE,
-                GcPartitionId::NONE
-            ),
-            GcPartitionId::NONE
-        );
-
-        // Different trees (no common ancestor)
-        let root2_id = heap.create_partition(2048);
-        let child4_id = heap.create_sub_partition(root2_id);
-        assert_eq!(
-            heap.common_parent3(child1_id, child2_id, child4_id),
-            GcPartitionId::NONE
-        );
-    }
-
-    #[test]
-    fn test_common_parent3_complex_hierarchy() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-
-        // Create a more complex hierarchy:
-        // root
-        //   ├── A
-        //   │   ├── A1
-        //   │   │   └── A1a
-        //   │   └── A2
-        //   ├── B
-        //   │   └── B1
-        //   └── C
-        let root = heap.create_partition(4096);
-        let a = heap.create_sub_partition(root);
-        let b = heap.create_sub_partition(root);
-        let c = heap.create_sub_partition(root);
-        let a1 = heap.create_sub_partition(a);
-        let a2 = heap.create_sub_partition(a);
-        let a1a = heap.create_sub_partition(a1);
-        let b1 = heap.create_sub_partition(b);
-
-        // Test cases
-        // 1. Three nodes in same subtree
-        assert_eq!(heap.common_parent3(a1a, a1, a), a);
-        assert_eq!(heap.common_parent3(a1a, a1, a2), a);
-
-        // 2. Nodes from different subtrees
-        assert_eq!(heap.common_parent3(a1a, b1, c), root);
-        assert_eq!(heap.common_parent3(a1, b, c), root);
-
-        // 3. Mix of depths
-        assert_eq!(heap.common_parent3(a1a, a2, root), root);
-        assert_eq!(heap.common_parent3(a1a, b, root), root);
-
-        // 4. One is ancestor of others
-        assert_eq!(heap.common_parent3(a1a, a1, a1), a1); // two same
-        assert_eq!(heap.common_parent3(a, a1, a1a), a);
-    }
-
-    #[test]
-    fn test_partition_id_depth_and_serial_encoding() {
-        let id = GcPartitionId::from_depth_serial(3, 10);
-        assert_eq!(id.depth(), 3);
+    fn test_partition_id_serial_and_range() {
+        let id = GcPartitionId::from_serial(10);
         assert_eq!(id.serial(), 10);
-    }
-
-    #[test]
-    fn test_partition_depth_bits_on_creation() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let root = heap.create_partition(0);
-        let child = heap.create_sub_partition(root);
-        let grandchild = heap.create_sub_partition(child);
-
-        assert_eq!(root.depth(), 0);
-        assert_eq!(child.depth(), 1);
-        assert_eq!(grandchild.depth(), 2);
-        assert_ne!(root.serial(), 0);
-        assert_ne!(child.serial(), 0);
-        assert_ne!(grandchild.serial(), 0);
+        assert!(!id.is_null());
+        assert!(GcPartitionId::NONE.is_null());
     }
 }

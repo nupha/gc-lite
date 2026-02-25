@@ -60,10 +60,6 @@ impl Drop for GcHeap {
 }
 
 impl GcHeap {
-    //
-    // default callbacks
-    //
-    pub const DUMMY_PROMOTE_CALLBACK: fn(&GcHeap, &GcHead, GcPartitionId) = |_, _, _| {};
     pub const DUMMY_DISPOSE_CALLBACK: fn(&GcHeap, &GcHead) = |_, _| {};
 
     /// Create a new garbage collection heap with an explicit GC type registry
@@ -139,27 +135,11 @@ impl GcHeap {
         }
 
         let mut freed_bytes = 0;
-        let mut to_drop = vec![partition_id];
-        let mut i = 0;
 
-        while i < to_drop.len() {
-            let current_id = to_drop[i];
-            i += 1;
-
-            if let Some(mut partition) = self.partitions.remove(&current_id) {
-                to_drop.extend_from_slice(&partition.children);
-
-                if let Some(head) = partition.nodes.take() {
-                    freed_bytes += self.dispose_all_nodes(head, &on_dispose);
-                }
-
-                if !partition.parent.is_null()
-                    && let Some(up) = self.partitions.get_mut(&partition.parent)
-                    && let Some(i) = up.children.iter().position(|&id| id == current_id)
-                {
-                    up.children.swap_remove(i);
-                }
-            }
+        if let Some(mut par) = self.partitions.remove(&partition_id)
+            && let Some(link) = par.nodes.take()
+        {
+            freed_bytes += self.dispose_all_nodes(link, &on_dispose);
         }
 
         #[cfg(debug_assertions)]
@@ -285,47 +265,26 @@ impl GcHeap {
     pub fn is_ancestor_of(&self, this: GcPartitionId, ancestor: GcPartitionId) -> bool {
         debug_assert_ne!(this, GcPartitionId::NONE);
         debug_assert_ne!(ancestor, GcPartitionId::NONE);
-
-        let mut current_id = this;
-        while current_id != GcPartitionId::NONE {
-            if current_id == ancestor {
-                return true;
-            } else if let Some(p) = self.partitions.get(&current_id) {
-                current_id = p.parent;
-            } else {
-                #[cfg(debug_assertions)]
-                unreachable!();
-                #[cfg(not(debug_assertions))]
-                break;
-            }
-        }
-
-        false
+        this == ancestor
     }
 
     /// Update memory usage with rollup to parent partitions
     pub(crate) fn update_mem_use(&mut self, id: GcPartitionId, delta: i32) -> usize {
-        let mut cur_id = id;
-        let mut res = 0;
-
-        while cur_id != GcPartitionId::NONE {
-            if let Some(par) = self.partitions.get_mut(&cur_id) {
-                if delta >= 0 {
-                    par.memory_used += delta as usize;
-                } else {
-                    debug_assert!(par.memory_used >= (-delta) as usize);
-                    par.memory_used -= (-delta) as usize;
-                }
-                if cur_id == id {
-                    res = par.memory_used;
-                }
-                cur_id = par.parent;
-            } else {
-                break;
-            }
+        if id.is_null() {
+            return 0;
         }
 
-        res
+        if let Some(par) = self.partitions.get_mut(&id) {
+            if delta >= 0 {
+                par.memory_used += delta as usize;
+            } else {
+                debug_assert!(par.memory_used >= (-delta) as usize);
+                par.memory_used -= (-delta) as usize;
+            }
+            par.memory_used
+        } else {
+            0
+        }
     }
 
     pub fn open_alloc_trans(&mut self) {

@@ -92,11 +92,7 @@ fn test_partition_removal() {
     assert!(heap.partition(id).is_some());
     assert_eq!(heap.partition_ids().len(), 1);
 
-    heap.remove_partition(
-        id,
-        GcHeap::DUMMY_PROMOTE_CALLBACK,
-        GcHeap::DUMMY_DISPOSE_CALLBACK,
-    );
+    heap.remove_partition(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
 
     assert!(heap.partition(id).is_none());
     assert_eq!(heap.partition_ids().len(), 0);
@@ -133,7 +129,7 @@ fn test_allocation_fails_when_limit_exceeded() {
         match heap.alloc(
             id,
             TestData {
-                value: allocated_count as i32,
+                value: allocated_count,
                 name: format!("obj_{}", allocated_count),
             },
         ) {
@@ -401,7 +397,7 @@ fn test_multiple_object_allocation() {
             .alloc(
                 id,
                 TestData {
-                    value: i as i32,
+                    value: i,
                     name: format!("obj_{}", i),
                 },
             )
@@ -571,7 +567,7 @@ fn test_manual_garbage_collection() {
             .alloc(
                 id,
                 TestData {
-                    value: i as i32,
+                    value: i,
                     name: format!("obj_{}", i),
                 },
             )
@@ -719,9 +715,9 @@ fn test_multiple_weak_references() {
 fn test_weak_reference_after_partition_removal() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
 
-    // 创建有层级的partitions
+    // 创建两个同级的 partitions
     let root_id = heap.create_partition(2048);
-    let child_id = heap.create_sub_partition(root_id);
+    let child_id = heap.create_partition(2048);
 
     // 在下属partition创建对象
     let obj = heap
@@ -741,11 +737,7 @@ fn test_weak_reference_after_partition_removal() {
     assert!(weak_ref.upgrade(&heap).is_some());
 
     // 删除partition
-    heap.remove_partition(
-        child_id,
-        GcHeap::DUMMY_PROMOTE_CALLBACK,
-        GcHeap::DUMMY_DISPOSE_CALLBACK,
-    );
+    heap.remove_partition(child_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
 
     // 这时此partition中的对象也会释放
     // 访问这些对象的GcWeak引用，并upgrade()，应该返回None

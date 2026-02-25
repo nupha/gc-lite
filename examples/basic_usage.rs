@@ -223,19 +223,11 @@ fn main() -> GcResult<()> {
     println!("  Created empty partition: {:?}", empty_partition);
 
     // Delete empty partition
-    heap.remove_partition(
-        empty_partition,
-        GcHeap::DUMMY_PROMOTE_CALLBACK,
-        GcHeap::DUMMY_DISPOSE_CALLBACK,
-    );
+    heap.remove_partition(empty_partition, GcHeap::DUMMY_DISPOSE_CALLBACK);
     println!("  Deleted empty partition successfully");
 
     // Delete non-empty partition
-    heap.remove_partition(
-        partition1,
-        GcHeap::DUMMY_PROMOTE_CALLBACK,
-        GcHeap::DUMMY_DISPOSE_CALLBACK,
-    );
+    heap.remove_partition(partition1, GcHeap::DUMMY_DISPOSE_CALLBACK);
     println!("  Deleted non-empty partition successfully");
 
     println!("\nExample completed!");

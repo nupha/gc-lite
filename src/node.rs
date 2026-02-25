@@ -82,7 +82,7 @@ impl std::fmt::Debug for GcHead {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("GcNode");
         s.field("ptr", &(self as *const Self))
-            .field("scope", &self.scope_id())
+            .field("partition", &self.scope_id())
             .field("color", &self.color());
 
         if !self.xref().is_null() {
