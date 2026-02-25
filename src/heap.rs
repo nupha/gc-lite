@@ -19,7 +19,7 @@ pub struct GcHeap {
     /// Partition management
     pub(super) partitions: HashMap<GcPartitionId, GcPartition>,
     /// allocation transactions
-    pub(crate) alloc_trans_stack: Vec<GcAllocTrans<'static>>,
+    pub(crate) alloc_trans_stack: SmallVec<[GcAllocTrans<'static>; 8]>,
     /// Weak reference list, each slot stores (version, GcHeader)
     pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
 
@@ -73,7 +73,7 @@ impl GcHeap {
             weak_slots: Vec::new(),
             opaque: std::ptr::null_mut(),
             node_dtypes: registry,
-            alloc_trans_stack: Vec::new(),
+            alloc_trans_stack: SmallVec::new(),
 
             #[cfg(debug_assertions)]
             dbg_dropping_root_partition: None,
