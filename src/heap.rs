@@ -18,8 +18,8 @@ pub struct GcHeap {
 
     /// Partition management
     pub(super) partitions: HashMap<GcPartitionId, GcPartition>,
-    /// allocation transactions
-    pub(crate) alloc_trans_stack: SmallVec<[GcAllocTrans<'static>; 8]>,
+    /// stacked node guards
+    pub(crate) guard_stack: SmallVec<[GcNodeGuard<'static>; 8]>,
     /// Weak reference list, each slot stores (version, GcHeader)
     pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
 
@@ -37,9 +37,9 @@ impl Drop for GcHeap {
         // heap world is gone, dealloc all nodes live in it, regardless their status.
         log::trace!("[heap::drop]");
 
-        for mut trans in self.alloc_trans_stack.drain(..) {
+        for mut g in self.guard_stack.drain(..) {
             unsafe {
-                trans.guard.abort();
+                g.abort();
             }
         }
 
@@ -69,7 +69,7 @@ impl GcHeap {
             weak_slots: Vec::new(),
             opaque: std::ptr::null_mut(),
             node_dtypes: registry,
-            alloc_trans_stack: SmallVec::new(),
+            guard_stack: SmallVec::new(),
 
             #[cfg(debug_assertions)]
             dbg_dropping_root_partition: None,
@@ -287,30 +287,33 @@ impl GcHeap {
         }
     }
 
-    pub fn open_alloc_trans(&mut self) {
+    pub fn open_guard(&mut self) {
         let guard = GcNodeGuard {
             nodes: SmallVec::new(),
             heap: self as *mut GcHeap,
             _mark: PhantomData,
         };
-        self.alloc_trans_stack.push(GcAllocTrans { guard });
+        self.guard_stack.push(guard);
     }
 
-    pub fn close_alloc_trans(&mut self) {
+    pub fn close_guard(&mut self) {
         let trans = self
-            .alloc_trans_stack
+            .guard_stack
             .pop()
             .expect("GcAllocTrans stack underflow");
         drop(trans);
     }
 
-    pub(crate) fn current_alloc_trans_guard_mut(&mut self) -> Option<&mut GcNodeGuard<'static>> {
-        self.alloc_trans_stack.last_mut().map(|t| &mut t.guard)
+    /// get current node guard
+    #[inline(always)]
+    pub(crate) fn current_guard(&mut self) -> Option<&mut GcNodeGuard<'static>> {
+        self.guard_stack.last_mut()
     }
-}
 
-pub struct GcAllocTrans<'a> {
-    guard: GcNodeGuard<'a>,
+    /// with current node guard
+    pub fn with_current_guard<R, F: FnOnce(&mut GcNodeGuard) -> R>(&mut self, f: F) -> Option<R> {
+        self.guard_stack.last_mut().map(f)
+    }
 }
 
 pub struct GcNodeGuard<'a> {
@@ -420,7 +423,7 @@ mod heap_tests {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
 
-        heap.open_alloc_trans();
+        heap.open_guard();
 
         let node: GcRef<Node> = heap
             .alloc(
@@ -443,7 +446,7 @@ mod heap_tests {
         let removed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
         assert_eq!(removed, 0);
 
-        heap.close_alloc_trans();
+        heap.close_guard();
 
         while !heap.mark(partition_id, 64) {}
 
@@ -456,7 +459,7 @@ mod heap_tests {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
 
-        heap.open_alloc_trans();
+        heap.open_guard();
         let node1: GcRef<Node> = heap
             .alloc(
                 partition_id,
@@ -468,7 +471,7 @@ mod heap_tests {
             .unwrap();
         let head1 = node1.head_ptr;
 
-        heap.open_alloc_trans();
+        heap.open_guard();
         let node2: GcRef<Node> = heap
             .alloc(
                 partition_id,
@@ -504,7 +507,7 @@ mod heap_tests {
         assert!(!disposed_head1.get());
         assert!(!disposed_head2.get());
 
-        heap.close_alloc_trans();
+        heap.close_guard();
 
         while !heap.mark(partition_id, 64) {}
 
@@ -523,7 +526,7 @@ mod heap_tests {
         assert!(!disposed_head1_after.get());
         assert!(disposed_head2_after.get());
 
-        heap.close_alloc_trans();
+        heap.close_guard();
 
         while !heap.mark(partition_id, 64) {}
 

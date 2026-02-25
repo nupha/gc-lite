@@ -118,7 +118,7 @@ impl GcHeap {
 
                     log::trace!("[alloc] {:?}", unsafe { head.as_ref() });
 
-                    if let Some(guard) = self.current_alloc_trans_guard_mut() {
+                    if let Some(guard) = self.current_guard() {
                         guard.add(head);
                     }
 
