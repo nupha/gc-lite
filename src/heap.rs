@@ -247,11 +247,14 @@ impl GcHeap {
 
     /// full protect
     #[must_use]
-    pub fn protect_nodes(&self, nodes: &[NonNull<GcHead>]) -> GcNodeGuard<'_> {
+    pub fn protect_nodes_iter(
+        &self,
+        nodes: impl Iterator<Item = NonNull<GcHead>>,
+    ) -> GcNodeGuard<'_> {
         let mut lst = SmallVec::<[NonNull<GcHead>; 8]>::new();
         let mut heap_ptr = NonNull::from_ref(self); // as *const Self as *mut Self;
 
-        for &n in nodes {
+        for n in nodes {
             unsafe {
                 heap_ptr.as_mut().do_protect_node(n);
             }
@@ -264,6 +267,11 @@ impl GcHeap {
             simple: false,
             _mark: PhantomData,
         }
+    }
+
+    #[must_use]
+    pub fn protect_nodes(&self, nodes: &[NonNull<GcHead>]) -> GcNodeGuard<'_> {
+        self.protect_nodes_iter(nodes.iter().copied())
     }
 
     /// full protect
