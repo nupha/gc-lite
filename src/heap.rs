@@ -217,7 +217,7 @@ impl GcHeap {
             .any(|p| p == node)
     }
 
-    fn full_protect_node(&mut self, mut n: NonNull<GcHead>) {
+    fn do_protect_node(&mut self, mut n: NonNull<GcHead>) {
         let node = unsafe { n.as_mut() };
         let count = node.inc_protect_count();
 
@@ -238,7 +238,7 @@ impl GcHeap {
 
         for &n in nodes {
             unsafe {
-                heap_ptr.as_mut().full_protect_node(n);
+                heap_ptr.as_mut().do_protect_node(n);
             }
             lst.push(n);
         }
@@ -305,6 +305,105 @@ impl GcHeap {
     }
 }
 
+pub struct GcLocal<T: GcNode> {
+    gc: GcRef<T>,
+    heap: NonNull<GcHeap>,
+}
+
+impl<T: GcNode + std::fmt::Debug> std::fmt::Debug for GcLocal<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", std::ops::Deref::deref(&self))
+    }
+}
+
+impl<T: GcNode + std::fmt::Display> std::fmt::Display for GcLocal<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", std::ops::Deref::deref(&self))
+    }
+}
+
+impl<T: GcNode> GcLocal<T> {
+    pub fn new(heap: &GcHeap, gc: GcRef<T>) -> Self {
+        let mut heap_ptr = NonNull::from_ref(heap);
+        let head: NonNull<GcHead> = (&gc).into();
+
+        unsafe {
+            heap_ptr.as_mut().do_protect_node(head);
+        }
+
+        Self { gc, heap: heap_ptr }
+    }
+
+    #[inline(always)]
+    pub fn get(&self) -> GcRef<T> {
+        self.gc
+    }
+}
+
+impl<T: GcNode> Drop for GcLocal<T> {
+    fn drop(&mut self) {
+        let heap = unsafe { self.heap.as_mut() };
+        let mut node = self.gc.head_ptr;
+
+        unsafe {
+            let n = node.as_mut();
+            let count = n.dec_protect_count();
+
+            if count == 0
+                && !n.is_root()
+                && let Some(par) = heap.partition_mut(n.partition_id())
+                && let Some(i) = par.root_nodes.iter().position(|&x| x == node)
+            {
+                par.root_nodes.swap_remove(i);
+            }
+        }
+    }
+}
+
+impl<T: GcNode> From<GcLocal<T>> for GcRef<T> {
+    #[inline(always)]
+    fn from(value: GcLocal<T>) -> Self {
+        value.gc
+    }
+}
+
+impl<T: GcNode> std::ops::Deref for GcLocal<T> {
+    type Target = T;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.gc
+    }
+}
+
+impl<T: GcNode> GcRef<T> {
+    pub fn to_local(self, heap: &GcHeap) -> GcLocal<T> {
+        GcLocal::new(heap, self)
+    }
+}
+
+pub struct GcHandleScope<'heap> {
+    heap: &'heap mut GcHeap,
+}
+
+impl<'heap> GcHandleScope<'heap> {
+    pub fn new(heap: &'heap mut GcHeap) -> Self {
+        heap.open_alloc_guard();
+        Self { heap }
+    }
+
+    #[inline(always)]
+    pub fn heap(&mut self) -> &mut GcHeap {
+        self.heap
+    }
+}
+
+impl<'heap> Drop for GcHandleScope<'heap> {
+    fn drop(&mut self) {
+        self.heap.close_alloc_guard();
+    }
+}
+
 pub struct GcNodeGuard<'a> {
     nodes: SmallVec<[NonNull<GcHead>; 8]>,
     heap: NonNull<GcHeap>,
@@ -345,7 +444,7 @@ impl<'a> GcNodeGuard<'a> {
                 }
             } else {
                 unsafe {
-                    self.heap.as_mut().full_protect_node(node);
+                    self.heap.as_mut().do_protect_node(node);
                 }
             }
 
@@ -568,5 +667,113 @@ mod heap_tests {
             }
             h.inc_protect_count();
         }
+    }
+
+    #[test]
+    fn test_gc_local_keeps_node_alive_during_scope() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition(4096);
+
+        let node: GcRef<Node> = heap
+            .alloc(
+                partition_id,
+                Node {
+                    next: None,
+                    value: 1,
+                },
+            )
+            .unwrap();
+
+        let head = node.head_ptr;
+
+        {
+            unsafe {
+                assert_eq!(head.as_ref().protect_count(), 0);
+            }
+
+            {
+                let _local = GcLocal::new(&heap, node);
+                unsafe {
+                    assert_eq!(head.as_ref().protect_count(), 1);
+                }
+
+                let par = heap.partitions.get(&partition_id).unwrap();
+                assert!(par.root_nodes.contains(&head));
+            }
+
+            unsafe {
+                assert_eq!(head.as_ref().protect_count(), 0);
+            }
+
+            let par = heap.partitions.get(&partition_id).unwrap();
+            assert!(!par.root_nodes.contains(&head));
+        }
+    }
+
+    #[test]
+    fn test_handle_scope_protects_allocated_nodes() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition(4096);
+
+        {
+            let mut scope = GcHandleScope::new(&mut heap);
+            let heap_ref = scope.heap();
+
+            let node: GcRef<Node> = heap_ref
+                .alloc(
+                    partition_id,
+                    Node {
+                        next: None,
+                        value: 1,
+                    },
+                )
+                .unwrap();
+
+            let head = node.head_ptr;
+
+            unsafe {
+                assert_eq!(head.as_ref().protect_count(), 1);
+            }
+
+            while !heap_ref.mark(partition_id, 64) {}
+            let removed = heap_ref.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+            assert_eq!(removed, 0);
+        }
+
+        while !heap.mark(partition_id, 64) {}
+        let removed_after = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert!(removed_after > 0);
+    }
+
+    #[test]
+    fn test_alloc_local_behaves_like_alloc_plus_gc_local() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition(4096);
+
+        let local: GcLocal<Node> = heap
+            .alloc_local(
+                partition_id,
+                Node {
+                    next: None,
+                    value: 1,
+                },
+            )
+            .unwrap();
+
+        let head = local.get().head_ptr;
+
+        unsafe {
+            assert_eq!(head.as_ref().protect_count(), 1);
+        }
+
+        drop(local);
+
+        unsafe {
+            assert_eq!(head.as_ref().protect_count(), 0);
+        }
+
+        while !heap.mark(partition_id, 64) {}
+        let removed_after = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert!(removed_after > 0);
     }
 }

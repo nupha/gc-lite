@@ -3,7 +3,9 @@
 
 use std::{alloc::Layout, marker::PhantomData, ptr::NonNull};
 
-use crate::{GcError, GcHead, GcHeap, GcNode, GcPartitionId, GcRef, unlikely, weak::GcWeakRawId};
+use crate::{
+    GcError, GcHead, GcHeap, GcLocal, GcNode, GcPartitionId, GcRef, unlikely, weak::GcWeakRawId,
+};
 
 impl GcHeap {
     fn mem_alloc(&mut self, size: usize) -> Option<NonNull<u8>> {
@@ -129,6 +131,17 @@ impl GcHeap {
                 }
             }
             None => Err((GcError::PartitionNotFound, payload)),
+        }
+    }
+
+    pub fn alloc_local<T: GcNode>(
+        &mut self,
+        scope: GcPartitionId,
+        payload: T,
+    ) -> Result<GcLocal<T>, (GcError, T)> {
+        match self.alloc(scope, payload) {
+            Ok(gc_ref) => Ok(GcLocal::new(self, gc_ref)),
+            Err(e) => Err(e),
         }
     }
 
