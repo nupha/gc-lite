@@ -479,6 +479,22 @@ impl<T: GcNode> Drop for GcLocal<T> {
     }
 }
 
+impl<T: GcNode> std::ops::Deref for GcLocal<T> {
+    type Target = T;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.gc
+    }
+}
+
+impl<T: GcNode> std::ops::DerefMut for GcLocal<T> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.gc
+    }
+}
+
 impl<T: GcNode + std::fmt::Debug> std::fmt::Debug for GcLocal<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", std::ops::Deref::deref(&self))
@@ -495,15 +511,6 @@ impl<T: GcNode> From<GcLocal<T>> for GcRef<T> {
     #[inline(always)]
     fn from(value: GcLocal<T>) -> Self {
         value.gc
-    }
-}
-
-impl<T: GcNode> std::ops::Deref for GcLocal<T> {
-    type Target = T;
-
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        &self.gc
     }
 }
 
