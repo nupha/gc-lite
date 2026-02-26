@@ -217,6 +217,7 @@ impl GcHeap {
             .any(|p| p == node)
     }
 
+    #[inline(always)]
     pub(crate) fn do_protect_node(&mut self, mut n: NonNull<GcHead>) {
         let node = unsafe { n.as_mut() };
         let count = node.inc_protect_count();
@@ -227,6 +228,20 @@ impl GcHeap {
             if par.is_marking() && node.color() == GcTriColor::White {
                 par.add_gray_node(n);
             }
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn do_unprotect_node(&mut self, mut n: NonNull<GcHead>) {
+        let node = unsafe { n.as_mut() };
+        let count = node.dec_protect_count();
+
+        if count == 0
+            && !node.is_root()
+            && let Some(par) = self.partition_mut(node.partition_id())
+            && let Some(i) = par.root_nodes.iter().position(|&x| x == n)
+        {
+            par.root_nodes.swap_remove(i);
         }
     }
 
@@ -341,16 +356,16 @@ pub struct GcNodeGuard<'a> {
 
 impl<'a> Drop for GcNodeGuard<'a> {
     fn drop(&mut self) {
-        for mut node in self.nodes.drain(..) {
-            let n = unsafe { node.as_mut() };
-            let count = n.dec_protect_count();
-
-            if count == 0 && !self.simple && !n.is_root() {
+        for node in self.nodes.drain(..) {
+            if self.simple {
+                let mut node = node;
+                unsafe {
+                    node.as_mut().dec_protect_count();
+                }
+            } else {
                 let heap = unsafe { self.heap.as_mut() };
-                if let Some(par) = heap.partition_mut(n.partition_id())
-                    && let Some(i) = par.root_nodes.iter().position(|&x| x == node)
-                {
-                    par.root_nodes.swap_remove(i);
+                unsafe {
+                    heap.do_unprotect_node(node);
                 }
             }
         }

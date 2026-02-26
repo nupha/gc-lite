@@ -462,20 +462,8 @@ pub struct GcLocal<T: GcNode> {
 impl<T: GcNode> Drop for GcLocal<T> {
     fn drop(&mut self) {
         let heap = unsafe { self.heap.as_mut() };
-        let mut node = self.gc.head_ptr;
-
-        unsafe {
-            let n = node.as_mut();
-            let count = n.dec_protect_count();
-
-            if count == 0
-                && !n.is_root()
-                && let Some(par) = heap.partition_mut(n.partition_id())
-                && let Some(i) = par.root_nodes.iter().position(|&x| x == node)
-            {
-                par.root_nodes.swap_remove(i);
-            }
-        }
+        let node = self.gc.head_ptr;
+        heap.do_unprotect_node(node);
     }
 }
 
