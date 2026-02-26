@@ -447,6 +447,82 @@ impl<T: GcNode> GcRef<T> {
     pub fn node_info(&self) -> &GcHead {
         unsafe { self.head_ptr.as_ref() }
     }
+
+    #[inline(always)]
+    pub fn to_local(self, heap: &GcHeap) -> GcLocal<T> {
+        GcLocal::new(heap, self)
+    }
+}
+
+pub struct GcLocal<T: GcNode> {
+    gc: GcRef<T>,
+    heap: NonNull<GcHeap>,
+}
+
+impl<T: GcNode> Drop for GcLocal<T> {
+    fn drop(&mut self) {
+        let heap = unsafe { self.heap.as_mut() };
+        let mut node = self.gc.head_ptr;
+
+        unsafe {
+            let n = node.as_mut();
+            let count = n.dec_protect_count();
+
+            if count == 0
+                && !n.is_root()
+                && let Some(par) = heap.partition_mut(n.partition_id())
+                && let Some(i) = par.root_nodes.iter().position(|&x| x == node)
+            {
+                par.root_nodes.swap_remove(i);
+            }
+        }
+    }
+}
+
+impl<T: GcNode + std::fmt::Debug> std::fmt::Debug for GcLocal<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", std::ops::Deref::deref(&self))
+    }
+}
+
+impl<T: GcNode + std::fmt::Display> std::fmt::Display for GcLocal<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", std::ops::Deref::deref(&self))
+    }
+}
+
+impl<T: GcNode> From<GcLocal<T>> for GcRef<T> {
+    #[inline(always)]
+    fn from(value: GcLocal<T>) -> Self {
+        value.gc
+    }
+}
+
+impl<T: GcNode> std::ops::Deref for GcLocal<T> {
+    type Target = T;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.gc
+    }
+}
+
+impl<T: GcNode> GcLocal<T> {
+    pub fn new(heap: &GcHeap, gc: GcRef<T>) -> Self {
+        let mut heap_ptr = NonNull::from_ref(heap);
+        let head: NonNull<GcHead> = (&gc).into();
+
+        unsafe {
+            heap_ptr.as_mut().do_protect_node(head);
+        }
+
+        Self { gc, heap: heap_ptr }
+    }
+
+    #[inline(always)]
+    pub fn get(&self) -> GcRef<T> {
+        self.gc
+    }
 }
 
 impl GcHeap {
