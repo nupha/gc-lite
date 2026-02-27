@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+mod ctx;
 pub mod gctype;
 mod heap;
 mod helpers;
@@ -14,6 +15,7 @@ mod weak;
 mod xref;
 
 pub use {
+    ctx::GcContext,
     gctype::{GcTypeInfo, GcTypeRegistry, drop_fn as gctype_drop, trace_fn as gctype_trace},
     heap::{GcHandleScope, GcHeap, GcNodeGuard},
     helpers::{GcError, GcResult},

@@ -48,14 +48,15 @@ fn benchmark_object_sizes() {
         let alloc_start = Instant::now();
         let mut objects = Vec::new();
         for _i in 0..size {
-            let node = context
-                .alloc(
+            let node = unsafe {
+                context.alloc_raw(
                     partition,
                     SimpleNode {
                         _data: vec![0u8; 100],
                     },
-                ) // Each node 100 bytes
-                .unwrap();
+                )
+            } // Each node 100 bytes
+            .unwrap();
             objects.push(node);
         }
         let alloc_duration = alloc_start.elapsed();
@@ -99,14 +100,15 @@ fn benchmark_complex_graphs() {
 
         // Create all nodes
         for _i in 0..size {
-            let node = context
-                .alloc(
+            let node = unsafe {
+                context.alloc_raw(
                     partition,
                     GraphNode {
                         neighbors: Vec::new(),
                     },
                 )
-                .unwrap();
+            }
+            .unwrap();
             nodes.push(node);
         }
 
@@ -156,7 +158,7 @@ fn benchmark_memory_efficiency() {
     let mut small_objects = Vec::new();
 
     for _i in 0..small_objects_count {
-        let obj = context.alloc(partition, SmallData {}).unwrap();
+        let obj = unsafe { context.alloc_raw(partition, SmallData {}) }.unwrap();
         small_objects.push(obj);
     }
 
@@ -226,7 +228,7 @@ fn benchmark_auto_gc_threshold() {
         let node = SimpleNode {
             _data: vec![0u8; 100],
         };
-        match context.alloc(partition, node) {
+        match unsafe { context.alloc_raw(partition, node) } {
             Ok(_gc_ref) => {
                 allocated_bytes += 100 + std::mem::size_of::<GcRef<SimpleNode>>(); // Estimated size
                 object_count += 1;

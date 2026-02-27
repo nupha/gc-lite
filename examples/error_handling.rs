@@ -39,7 +39,8 @@ fn demonstrate_out_of_memory() -> GcResult<()> {
 
     // Allocate first large object (1KB + header)
     println!("2. Allocate first large object...");
-    let gc1: GcRef<LargeData> = match context.alloc(partition_id, LargeData { data: [0; 1024] }) {
+    let gc1: GcRef<LargeData> =
+        match unsafe { context.alloc_raw(partition_id, LargeData { data: [0; 1024] }) } {
         Ok(gc_ref) => {
             println!("  ✓ Successfully allocated first object (1KB)");
             gc_ref
@@ -52,7 +53,7 @@ fn demonstrate_out_of_memory() -> GcResult<()> {
 
     // Allocate second large object (1KB + header) - should exceed 2KB limit
     println!("3. Try to allocate second large object...");
-    match context.alloc(partition_id, LargeData { data: [0; 1024] }) {
+    match unsafe { context.alloc_raw(partition_id, LargeData { data: [0; 1024] }) } {
         Err((GcError::PartitionFull, _)) => {
             println!("  ✓ Correctly detected partition full error");
         }
@@ -85,13 +86,15 @@ fn demonstrate_partition_management_errors() -> GcResult<()> {
     let invalid_partition = gc_lite::GcPartitionId(9999); // Non-existent partition
 
     // Test allocating objects in non-existent partition
-    match context.alloc(
-        invalid_partition,
-        TestData {
-            value: 42,
-            name: "test".to_string(),
-        },
-    ) {
+    match unsafe {
+        context.alloc_raw(
+            invalid_partition,
+            TestData {
+                value: 42,
+                name: "test".to_string(),
+            },
+        )
+    } {
         Err((GcError::PartitionNotFound, _)) => {
             println!("  ✓ Allocating objects in non-existent partition returns correct error");
         }
@@ -122,15 +125,16 @@ fn demonstrate_partition_management_errors() -> GcResult<()> {
     let partition_id = context.create_partition(1024);
 
     // Allocate objects in partition
-    let obj = context
-        .alloc(
+    let obj = unsafe {
+        context.alloc_raw(
             partition_id,
             TestData {
                 value: 1,
                 name: "obj".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
     context.set_root(obj, true);
 
     // Try to delete non-empty partition (remove_partition will force cleanup)

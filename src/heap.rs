@@ -6,7 +6,7 @@ use std::{collections::HashMap, marker::PhantomData, ptr::NonNull};
 use smallvec::SmallVec;
 
 use crate::{
-    GcNode, GcRef,
+    GcContext, GcNode, GcRef,
     gctype::GcTypeRegistry,
     node::{GcHead, GcTriColor},
     partition::{GcPartition, GcPartitionId},
@@ -76,6 +76,15 @@ impl GcHeap {
             #[cfg(debug_assertions)]
             dbg_living_nodes: std::collections::HashSet::with_capacity(128),
         }
+    }
+
+    pub fn with_context<R>(
+        &mut self,
+        partition_id: GcPartitionId,
+        f: impl FnOnce(&mut GcContext<'_>) -> R,
+    ) -> R {
+        let mut ctx = GcContext::new(self, partition_id);
+        f(&mut ctx)
     }
 
     #[inline(always)]
@@ -437,15 +446,16 @@ mod heap_tests {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
 
-        let node: GcRef<Node> = heap
-            .alloc(
+        let node: GcRef<Node> = unsafe {
+            heap.alloc_raw(
                 partition_id,
                 Node {
                     next: None,
                     value: 1,
                 },
             )
-            .unwrap();
+        }
+        .unwrap();
 
         let head = node.head_ptr;
 
@@ -472,15 +482,16 @@ mod heap_tests {
 
         heap.open_alloc_guard();
 
-        let node: GcRef<Node> = heap
-            .alloc(
+        let node: GcRef<Node> = unsafe {
+            heap.alloc_raw(
                 partition_id,
                 Node {
                     next: None,
                     value: 1,
                 },
             )
-            .unwrap();
+        }
+        .unwrap();
 
         let head = node.head_ptr;
 
@@ -507,27 +518,29 @@ mod heap_tests {
         let partition_id = heap.create_partition(4096);
 
         heap.open_alloc_guard();
-        let node1: GcRef<Node> = heap
-            .alloc(
+        let node1: GcRef<Node> = unsafe {
+            heap.alloc_raw(
                 partition_id,
                 Node {
                     next: None,
                     value: 1,
                 },
             )
-            .unwrap();
+        }
+        .unwrap();
         let head1 = node1.head_ptr;
 
         heap.open_alloc_guard();
-        let node2: GcRef<Node> = heap
-            .alloc(
+        let node2: GcRef<Node> = unsafe {
+            heap.alloc_raw(
                 partition_id,
                 Node {
                     next: None,
                     value: 2,
                 },
             )
-            .unwrap();
+        }
+        .unwrap();
         let head2 = node2.head_ptr;
 
         unsafe {
@@ -594,15 +607,16 @@ mod heap_tests {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
 
-        let node: GcRef<Node> = heap
-            .alloc(
+        let node: GcRef<Node> = unsafe {
+            heap.alloc_raw(
                 partition_id,
                 Node {
                     next: None,
                     value: 1,
                 },
             )
-            .unwrap();
+        }
+        .unwrap();
 
         let mut head = node.head_ptr;
 
@@ -620,15 +634,16 @@ mod heap_tests {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
 
-        let node: GcRef<Node> = heap
-            .alloc(
+        let node: GcRef<Node> = unsafe {
+            heap.alloc_raw(
                 partition_id,
                 Node {
                     next: None,
                     value: 1,
                 },
             )
-            .unwrap();
+        }
+        .unwrap();
 
         let head = node.head_ptr;
 
@@ -665,15 +680,16 @@ mod heap_tests {
             let mut scope = GcHandleScope::new(&mut heap);
             let heap_ref = scope.heap();
 
-            let node: GcRef<Node> = heap_ref
-                .alloc(
+            let node: GcRef<Node> = unsafe {
+                heap_ref.alloc_raw(
                     partition_id,
                     Node {
                         next: None,
                         value: 1,
                     },
                 )
-                .unwrap();
+            }
+            .unwrap();
 
             let head = node.head_ptr;
 
@@ -696,15 +712,16 @@ mod heap_tests {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
 
-        let local: GcLocal<Node> = heap
-            .alloc_local(
+        let local: GcLocal<Node> = unsafe {
+            heap.alloc_local_raw(
                 partition_id,
                 Node {
                     next: None,
                     value: 1,
                 },
             )
-            .unwrap();
+            .unwrap()
+        };
 
         let head = local.get().head_ptr;
 
@@ -713,6 +730,30 @@ mod heap_tests {
         }
 
         drop(local);
+
+        unsafe {
+            assert_eq!(head.as_ref().protect_count(), 0);
+        }
+
+        while !heap.mark(partition_id, 64) {}
+        let removed_after = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert!(removed_after > 0);
+    }
+
+    #[test]
+    fn test_heap_with_context_alloc_and_cleanup() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition(4096);
+
+        let head = heap.with_context(partition_id, |ctx| {
+            let node: GcRef<Node> = ctx
+                .alloc(Node {
+                    next: None,
+                    value: 1,
+                })
+                .unwrap();
+            node.head_ptr
+        });
 
         unsafe {
             assert_eq!(head.as_ref().protect_count(), 0);

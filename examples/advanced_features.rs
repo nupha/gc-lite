@@ -81,9 +81,10 @@ fn demonstrate_weak_references(
 ) -> GcResult<()> {
     println!("1. Create strong and weak references...");
 
-    let strong_ref = heap
-        .alloc(partition, MyString(String::from("Strong Reference Data")))
-        .map_err(|(err, _)| err)?;
+    let strong_ref = unsafe {
+        heap.alloc_raw(partition, MyString(String::from("Strong Reference Data")))
+    }
+    .map_err(|(err, _)| err)?;
 
     let weak_ref = heap.downgrade(&strong_ref);
     println!("  Created strong reference: {:?}", strong_ref);
@@ -123,11 +124,9 @@ fn demonstrate_cyclic_references(
     println!("1. Create circular reference nodes...");
 
     // Create two mutually referencing nodes
-    let mut node1 = heap
-        .alloc(partition, CyclicNode::new("Node A"))
+    let mut node1 = unsafe { heap.alloc_raw(partition, CyclicNode::new("Node A")) }
         .map_err(|(err, _)| err)?;
-    let mut node2 = heap
-        .alloc(partition, CyclicNode::new("Node B"))
+    let mut node2 = unsafe { heap.alloc_raw(partition, CyclicNode::new("Node B")) }
         .map_err(|(err, _)| err)?;
 
     // Establish circular references
@@ -175,17 +174,13 @@ fn demonstrate_complex_structures(
     println!("1. Create complex data structures...");
 
     // Create multiple nodes
-    let mut root_node = heap
-        .alloc(partition, TreeNode::new("Root"))
+    let mut root_node = unsafe { heap.alloc_raw(partition, TreeNode::new("Root")) }
         .map_err(|(err, _)| err)?;
-    let mut child1 = heap
-        .alloc(partition, TreeNode::new("Child 1"))
+    let mut child1 = unsafe { heap.alloc_raw(partition, TreeNode::new("Child 1")) }
         .map_err(|(err, _)| err)?;
-    let child2 = heap
-        .alloc(partition, TreeNode::new("Child 2"))
+    let child2 = unsafe { heap.alloc_raw(partition, TreeNode::new("Child 2")) }
         .map_err(|(err, _)| err)?;
-    let grandchild = heap
-        .alloc(partition, TreeNode::new("Grandchild"))
+    let grandchild = unsafe { heap.alloc_raw(partition, TreeNode::new("Grandchild")) }
         .map_err(|(err, _)| err)?;
 
     // Build tree structure
@@ -196,8 +191,8 @@ fn demonstrate_complex_structures(
     }
 
     // Create data container
-    let container = heap
-        .alloc(
+    let container = unsafe {
+        heap.alloc_raw(
             partition,
             DataContainer {
                 root: root_node,
@@ -205,7 +200,8 @@ fn demonstrate_complex_structures(
                 optional_data: Some(child1),
             },
         )
-        .map_err(|(err, _)| err)?;
+    }
+    .map_err(|(err, _)| err)?;
 
     heap.set_root(container, true);
 
@@ -240,15 +236,16 @@ fn demonstrate_reference_recovery(
 ) -> GcResult<()> {
     println!("1. Create object and get reference...");
 
-    let original_ref = heap
-        .alloc(
+    let original_ref = unsafe {
+        heap.alloc_raw(
             partition,
             TestData {
                 value: 42,
                 name: "test".to_string(),
             },
         )
-        .map_err(|(err, _)| err)?;
+    }
+    .map_err(|(err, _)| err)?;
 
     let data_ref = original_ref.deref();
     println!("  Original reference: {:?}", original_ref);
@@ -294,24 +291,26 @@ fn demonstrate_cross_context_detection() -> GcResult<()> {
     let partition1 = context1.create_partition(1024);
     let partition2 = context2.create_partition(1024);
 
-    let obj1 = context1
-        .alloc(
+    let obj1 = unsafe {
+        context1.alloc_raw(
             partition1,
             TestData {
                 value: 1,
                 name: "obj1".to_string(),
             },
         )
-        .unwrap();
-    let obj2 = context2
-        .alloc(
+    }
+    .unwrap();
+    let obj2 = unsafe {
+        context2.alloc_raw(
             partition2,
             TestData {
                 value: 2,
                 name: "obj2".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
 
     println!("2. Test object source detection...");
     assert!(

@@ -65,13 +65,15 @@ fn main() -> GcResult<()> {
 
     // Allocate objects in partition1
     println!("\nAllocate objects in partition1:");
-    let obj1 = heap
-        .alloc(partition1, MyString(String::from("Hello")))
-        .map_err(|(err, _)| err)?;
-    let obj2 = heap.alloc(partition1, MyI32(42)).map_err(|(err, _)| err)?;
-    let obj3 = heap
-        .alloc(partition1, MyString(String::from("VectorData")))
-        .map_err(|(err, _)| err)?;
+    let obj1 = unsafe {
+        heap.alloc_raw(partition1, MyString(String::from("Hello")))
+    }
+    .map_err(|(err, _)| err)?;
+    let obj2 = unsafe { heap.alloc_raw(partition1, MyI32(42)) }.map_err(|(err, _)| err)?;
+    let obj3 = unsafe {
+        heap.alloc_raw(partition1, MyString(String::from("VectorData")))
+    }
+    .map_err(|(err, _)| err)?;
 
     println!("  Created string: '{}'", obj1.deref());
     println!("  Created number: {}", obj2.deref());
@@ -79,10 +81,11 @@ fn main() -> GcResult<()> {
 
     // Allocate objects in partition2
     println!("\nAllocate objects in partition2:");
-    let obj4 = heap
-        .alloc(partition2, MyString(String::from("World")))
-        .map_err(|(err, _)| err)?;
-    let obj5 = heap.alloc(partition2, MyI32(99)).map_err(|(err, _)| err)?;
+    let obj4 = unsafe {
+        heap.alloc_raw(partition2, MyString(String::from("World")))
+    }
+    .map_err(|(err, _)| err)?;
+    let obj5 = unsafe { heap.alloc_raw(partition2, MyI32(99)) }.map_err(|(err, _)| err)?;
 
     println!("  Created string: '{}'", obj4.deref());
     println!("  Created number: {}", obj5.deref());
@@ -163,9 +166,10 @@ fn main() -> GcResult<()> {
 
     // Allocate multiple objects to fill partition
     for i in 0..5 {
-        let _obj = heap
-            .alloc(small_partition, MyString(format!("Object {}", i)))
-            .map_err(|(err, _)| err)?;
+        let _obj = unsafe {
+            heap.alloc_raw(small_partition, MyString(format!("Object {}", i)))
+        }
+        .map_err(|(err, _)| err)?;
     }
 
     println!("  Allocated 5 objects in small partition");
@@ -190,11 +194,9 @@ fn main() -> GcResult<()> {
 
     // Demonstrate complex types with GC references
     println!("\nDemonstrate complex types with GC references:");
-    let mut node1 = heap
-        .alloc(partition1, TestNode::new("Node 1"))
+    let mut node1 = unsafe { heap.alloc_raw(partition1, TestNode::new("Node 1")) }
         .map_err(|(err, _)| err)?;
-    let mut node2 = heap
-        .alloc(partition1, TestNode::new("Node 2"))
+    let mut node2 = unsafe { heap.alloc_raw(partition1, TestNode::new("Node 2")) }
         .map_err(|(err, _)| err)?;
 
     // Set as root objects

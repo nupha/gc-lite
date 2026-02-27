@@ -62,12 +62,12 @@ impl GcHeap {
     }
 
     /// Allocate a typed gc node with payload data in given scope
-    pub fn alloc<T: GcNode>(
+    pub unsafe fn alloc_raw<T: GcNode>(
         &mut self,
-        scope: GcPartitionId,
+        partition_id: GcPartitionId,
         payload: T,
     ) -> Result<GcRef<T>, (GcError, T)> {
-        match self.partition_mut(scope) {
+        match self.partition_mut(partition_id) {
             Some(par) => {
                 let size = std::mem::size_of::<T>();
                 let gross_size = std::mem::size_of::<GcHead>() + size;
@@ -114,9 +114,9 @@ impl GcHeap {
                     }
 
                     // Add to nodes link
-                    self.attach_node(scope, head);
+                    self.attach_node(partition_id, head);
                     // Update memory usage with rollup to parent partitions
-                    self.update_mem_use(scope, gross_size as i32);
+                    self.update_mem_use(partition_id, gross_size as i32);
 
                     log::trace!("[alloc] {:?}", unsafe { head.as_ref() });
 
@@ -134,12 +134,12 @@ impl GcHeap {
         }
     }
 
-    pub fn alloc_local<T: GcNode>(
+    pub unsafe fn alloc_local_raw<T: GcNode>(
         &mut self,
-        scope: GcPartitionId,
+        partition_id: GcPartitionId,
         payload: T,
     ) -> Result<GcLocal<T>, (GcError, T)> {
-        match self.alloc(scope, payload) {
+        match unsafe { self.alloc_raw(partition_id, payload) } {
             Ok(gc_ref) => Ok(GcLocal::new(self, gc_ref)),
             Err(e) => Err(e),
         }

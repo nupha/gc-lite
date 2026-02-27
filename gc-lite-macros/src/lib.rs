@@ -151,7 +151,7 @@ pub fn gc_type_table_internal(input: TokenStream) -> TokenStream {
                 scope: #crate_path::GcPartitionId,
                 payload: #tys,
             ) -> Result<#crate_path::GcRef<#tys>, (#crate_path::GcError, #tys)> {
-                heap.alloc(scope, payload)
+                unsafe { heap.alloc_raw(scope, payload) }
             }
         }
         )*

@@ -126,13 +126,15 @@ fn test_allocation_fails_when_limit_exceeded() {
     // Allocate objects until we hit the limit
     let mut allocated_count = 0;
     loop {
-        match heap.alloc(
-            id,
-            TestData {
-                value: allocated_count,
-                name: format!("obj_{}", allocated_count),
-            },
-        ) {
+        match unsafe {
+            heap.alloc_raw(
+                id,
+                TestData {
+                    value: allocated_count,
+                    name: format!("obj_{}", allocated_count),
+                },
+            )
+        } {
             Ok(_) => {
                 allocated_count += 1;
             }
@@ -150,13 +152,15 @@ fn test_allocation_fails_when_limit_exceeded() {
     assert!(allocated_count > 0);
 
     // Try to allocate one more - should fail
-    let result = heap.alloc(
-        id,
-        TestData {
-            value: 999,
-            name: "should_fail".to_string(),
-        },
-    );
+    let result = unsafe {
+        heap.alloc_raw(
+            id,
+            TestData {
+                value: 999,
+                name: "should_fail".to_string(),
+            },
+        )
+    };
 
     assert!(matches!(result, Err((GcError::PartitionFull, _))));
 }
@@ -167,25 +171,27 @@ fn test_set_memory_limit_above_used_memory() {
     let id = heap.create_partition(1024);
 
     // Allocate some objects to use memory
-    let _obj1 = heap
-        .alloc(
+    let _obj1 = unsafe {
+        heap.alloc_raw(
             id,
             TestData {
                 value: 1,
                 name: "obj1".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
 
-    let _obj2 = heap
-        .alloc(
+    let _obj2 = unsafe {
+        heap.alloc_raw(
             id,
             TestData {
                 value: 2,
                 name: "obj2".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
 
     let used_memory = heap.partition(id).unwrap().memory_used();
     assert!(used_memory > 0);
@@ -198,15 +204,16 @@ fn test_set_memory_limit_above_used_memory() {
     assert_eq!(heap.partition(id).unwrap().memory_limit(), new_limit);
 
     // Should be able to allocate more objects
-    let _obj3 = heap
-        .alloc(
+    let _obj3 = unsafe {
+        heap.alloc_raw(
             id,
             TestData {
                 value: 3,
                 name: "obj3".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
 }
 
 #[test]
@@ -215,25 +222,27 @@ fn test_set_memory_limit_below_used_memory() {
     let id = heap.create_partition(2048);
 
     // Allocate some objects to use memory
-    let _obj1 = heap
-        .alloc(
+    let _obj1 = unsafe {
+        heap.alloc_raw(
             id,
             TestData {
                 value: 1,
                 name: "obj1".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
 
-    let _obj2 = heap
-        .alloc(
+    let _obj2 = unsafe {
+        heap.alloc_raw(
             id,
             TestData {
                 value: 2,
                 name: "obj2".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
 
     let used_memory = heap.partition(id).unwrap().memory_used();
     assert!(used_memory > 0);
@@ -252,13 +261,15 @@ fn test_set_memory_limit_below_used_memory() {
     // Should still be able to allocate (because limit >= used_memory)
     // But not more than the limit allows
     // Note: Since limit == used_memory, no new allocations should be allowed
-    let result = heap.alloc(
-        id,
-        TestData {
-            value: 3,
-            name: "should_fail".to_string(),
-        },
-    );
+    let result = unsafe {
+        heap.alloc_raw(
+            id,
+            TestData {
+                value: 3,
+                name: "should_fail".to_string(),
+            },
+        )
+    };
 
     assert!(matches!(result, Err((GcError::PartitionFull, _))));
 }
@@ -277,13 +288,15 @@ fn test_set_unlimited_memory() {
     // Should be able to allocate many objects without hitting limit
     let mut allocated_count = 0;
     loop {
-        match heap.alloc(
-            id,
-            TestData {
-                value: allocated_count as i32,
-                name: format!("obj_{}", allocated_count),
-            },
-        ) {
+        match unsafe {
+            heap.alloc_raw(
+                id,
+                TestData {
+                    value: allocated_count as i32,
+                    name: format!("obj_{}", allocated_count),
+                },
+            )
+        } {
             Ok(_) => {
                 allocated_count += 1;
                 // Stop after a reasonable number to avoid infinite loop
@@ -311,15 +324,16 @@ fn test_object_allocation() {
     let initial_memory = heap.partition(id).unwrap().memory_used();
 
     // Allocate an object
-    let obj: GcRef<TestData> = heap
-        .alloc(
+    let obj: GcRef<TestData> = unsafe {
+        heap.alloc_raw(
             id,
             TestData {
                 value: 42,
                 name: "test".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
 
     // Verify partition memory was updated
     let partition = heap.partition(id).unwrap();
@@ -341,15 +355,16 @@ fn test_memory_usage_increases_with_allocation() {
 
     // Allocate multiple objects and track memory
     for i in 0..5 {
-        let _obj = heap
-            .alloc(
+        let _obj = unsafe {
+            heap.alloc_raw(
                 id,
                 TestData {
                     value: i as i32,
                     name: format!("obj_{}", i),
                 },
             )
-            .expect("allocation failed");
+        }
+        .expect("allocation failed");
 
         let memory = heap.partition(id).unwrap().memory_used();
         memory_after_each_alloc.push(memory);
@@ -368,15 +383,16 @@ fn test_memory_usage_increases_with_allocation() {
     assert!(final_memory > 0);
 
     // Verify memory was freed after GC
-    let root_obj = heap
-        .alloc(
+    let root_obj = unsafe {
+        heap.alloc_raw(
             id,
             TestData {
                 value: 100,
                 name: "root".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
     heap.set_root(root_obj, true);
     let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     assert!(freed > 0);
@@ -393,15 +409,16 @@ fn test_multiple_object_allocation() {
     // Allocate multiple objects
     let mut objs: Vec<GcRef<TestData>> = Vec::new();
     for i in 0..10 {
-        let obj = heap
-            .alloc(
+        let obj = unsafe {
+            heap.alloc_raw(
                 id,
                 TestData {
                     value: i,
                     name: format!("obj_{}", i),
                 },
             )
-            .expect("allocation failed");
+        }
+        .expect("allocation failed");
         objs.push(obj);
     }
 
@@ -422,25 +439,29 @@ fn test_partition_full_error() {
     let id = heap.create_partition(512); // Very small limit
 
     // Try to allocate objects until partition is full
-    let mut result = heap.alloc(
-        id,
-        TestData {
-            value: 0,
-            name: "test".to_string(),
-        },
-    );
+    let mut result = unsafe {
+        heap.alloc_raw(
+            id,
+            TestData {
+                value: 0,
+                name: "test".to_string(),
+            },
+        )
+    };
 
     // Keep trying until we get a PartitionFull error
     let mut count = 0;
     while let Ok(_obj) = result {
         count += 1;
-        result = heap.alloc(
-            id,
-            TestData {
-                value: count,
-                name: format!("test_{}", count),
-            },
-        );
+        result = unsafe {
+            heap.alloc_raw(
+                id,
+                TestData {
+                    value: count,
+                    name: format!("test_{}", count),
+                },
+            )
+        };
     }
 
     assert!(matches!(result, Err((GcError::PartitionFull, _))));
@@ -452,13 +473,15 @@ fn test_invalid_partition_allocation() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let invalid_id = GcPartitionId(9999);
 
-    let result = heap.alloc(
-        invalid_id,
-        TestData {
-            value: 42,
-            name: "test".to_string(),
-        },
-    );
+    let result = unsafe {
+        heap.alloc_raw(
+            invalid_id,
+            TestData {
+                value: 42,
+                name: "test".to_string(),
+            },
+        )
+    };
 
     assert!(matches!(result, Err((GcError::PartitionNotFound, _))));
 }
@@ -470,15 +493,16 @@ fn test_root_object_management() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_partition(2048);
 
-    let obj = heap
-        .alloc(
+    let obj = unsafe {
+        heap.alloc_raw(
             id,
             TestData {
                 value: 42,
                 name: "test".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
 
     // Initially not a root
     assert!(!obj.is_root());
@@ -497,15 +521,16 @@ fn test_root_objects_preserve_during_gc() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_partition(2048);
 
-    let obj = heap
-        .alloc(
+    let obj = unsafe {
+        heap.alloc_raw(
             id,
             TestData {
                 value: 42,
                 name: "test".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
 
     heap.set_root(obj, true);
 
@@ -523,25 +548,27 @@ fn test_non_root_objects_collected() {
     let id = heap.create_partition(2048);
 
     // Create two objects, one is root, one is not
-    let root_obj = heap
-        .alloc(
+    let root_obj = unsafe {
+        heap.alloc_raw(
             id,
             TestData {
                 value: 1,
                 name: "root".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
 
-    let _non_root_obj = heap
-        .alloc(
+    let _non_root_obj = unsafe {
+        heap.alloc_raw(
             id,
             TestData {
                 value: 2,
                 name: "non_root".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
 
     heap.set_root(root_obj, true);
     // non_root_obj is not set as root
@@ -563,15 +590,16 @@ fn test_manual_garbage_collection() {
 
     // Create objects with some as roots
     for i in 0..5 {
-        let obj = heap
-            .alloc(
+        let obj = unsafe {
+            heap.alloc_raw(
                 id,
                 TestData {
                     value: i,
                     name: format!("obj_{}", i),
                 },
             )
-            .unwrap();
+        }
+        .unwrap();
         if i < 2 {
             heap.set_root(obj, true);
         }
@@ -597,9 +625,8 @@ fn test_circular_reference_handling() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_partition(2048);
 
-    // Create two nodes that reference each other
-    let mut node1 = heap.alloc(id, TestNode::new(1)).unwrap();
-    let mut node2 = heap.alloc(id, TestNode::new(2)).unwrap();
+    let mut node1 = unsafe { heap.alloc_raw(id, TestNode::new(1)) }.unwrap();
+    let mut node2 = unsafe { heap.alloc_raw(id, TestNode::new(2)) }.unwrap();
 
     // Create circular reference
     node1.with_mut(&mut heap, |n| n.add_child(node2));
@@ -634,15 +661,16 @@ fn test_weak_reference_creation_and_upgrade() {
     let id = heap.create_partition(2048);
 
     // Create object and weak reference
-    let obj = heap
-        .alloc(
+    let obj = unsafe {
+        heap.alloc_raw(
             id,
             TestData {
                 value: 42,
                 name: "test".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
 
     heap.set_root(obj, true);
 
@@ -662,15 +690,16 @@ fn test_weak_reference_after_collection() {
     let id = heap.create_partition(2048);
 
     // Create object and weak reference
-    let obj = heap
-        .alloc(
+    let obj = unsafe {
+        heap.alloc_raw(
             id,
             TestData {
                 value: 42,
                 name: "test".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
 
     let weak_ref = heap.downgrade(&obj);
 
@@ -688,15 +717,16 @@ fn test_multiple_weak_references() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
     let id = heap.create_partition(2048);
 
-    let obj = heap
-        .alloc(
+    let obj = unsafe {
+        heap.alloc_raw(
             id,
             TestData {
                 value: 42,
                 name: "test".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
 
     heap.set_root(obj, true);
 
@@ -720,15 +750,16 @@ fn test_weak_reference_after_partition_removal() {
     let child_id = heap.create_partition(2048);
 
     // 在下属partition创建对象
-    let obj = heap
-        .alloc(
+    let obj = unsafe {
+        heap.alloc_raw(
             child_id,
             TestData {
                 value: 42,
                 name: "test".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
 
     // 记录这些对象的GcWeak
     let weak_ref = heap.downgrade(&obj);
@@ -755,25 +786,27 @@ fn test_contains_method() {
     let id1 = heap1.create_partition(1024);
     let id2 = heap2.create_partition(1024);
 
-    let obj1 = heap1
-        .alloc(
+    let obj1 = unsafe {
+        heap1.alloc_raw(
             id1,
             TestData {
                 value: 1,
                 name: "heap1".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
 
-    let obj2 = heap2
-        .alloc(
+    let obj2 = unsafe {
+        heap2.alloc_raw(
             id2,
             TestData {
                 value: 2,
                 name: "heap2".to_string(),
             },
         )
-        .unwrap();
+    }
+    .unwrap();
 
     // Verify object ownership
     assert!(heap1.contains(obj1.node_ptr()));

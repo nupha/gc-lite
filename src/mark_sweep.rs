@@ -353,7 +353,7 @@ mod sweep_test {
         let partition_id = heap.create_partition(4096);
 
         let objects: Vec<GcRef<MyI32>> = (0..5)
-            .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
+            .map(|i| unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap())
             .collect();
 
         for (i, obj) in objects.iter().enumerate() {
@@ -388,7 +388,7 @@ mod sweep_test {
         let partition_id = heap.create_partition(4096);
 
         let objects: Vec<GcRef<MyI32>> = (0..5)
-            .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
+            .map(|i| unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap())
             .collect();
 
         heap.set_root(objects[3], true);
@@ -439,7 +439,7 @@ mod sweep_test {
         let partition_id = heap.create_partition(4096);
 
         let _objects: Vec<GcRef<MyI32>> = (0..3)
-            .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
+            .map(|i| unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap())
             .collect();
 
         while !heap.mark(partition_id, 64) {}
@@ -468,7 +468,7 @@ mod sweep_test {
         let partition_id = heap.create_partition(4096);
 
         let objects: Vec<GcRef<MyI32>> = (0..5)
-            .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
+            .map(|i| unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap())
             .collect();
 
         for (i, obj) in objects.iter().enumerate() {
@@ -510,9 +510,9 @@ mod sweep_test {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
 
-        let root_obj = heap.alloc(partition_id, MyI32(0)).unwrap();
+        let root_obj = unsafe { heap.alloc_raw(partition_id, MyI32(0)) }.unwrap();
         let _objects: Vec<GcRef<MyI32>> = (1..3)
-            .map(|i| heap.alloc(partition_id, MyI32(i)).unwrap())
+            .map(|i| unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap())
             .collect();
 
         heap.set_root(root_obj, true);

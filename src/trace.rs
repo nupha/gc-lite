@@ -260,14 +260,13 @@ mod tests {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
 
-        // Create a simple tree: root -> child1, child2
-        let child1 = heap.alloc(partition_id, TestNode::new(1)).unwrap();
-        let child2 = heap.alloc(partition_id, TestNode::new(2)).unwrap();
+        let child1 = unsafe { heap.alloc_raw(partition_id, TestNode::new(1)) }.unwrap();
+        let child2 = unsafe { heap.alloc_raw(partition_id, TestNode::new(2)) }.unwrap();
 
         let mut root = TestNode::new(0);
         root.add_child(child1);
         root.add_child(child2);
-        let root_ref = heap.alloc(partition_id, root).unwrap();
+        let root_ref = unsafe { heap.alloc_raw(partition_id, root) }.unwrap();
 
         // Debug: print node pointers
         println!("Root: {:?}", root_ref.node_ptr());
@@ -300,14 +299,13 @@ mod tests {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
 
-        // Create a simple tree: root -> child1, child2
-        let child1 = heap.alloc(partition_id, TestNode::new(1)).unwrap();
-        let child2 = heap.alloc(partition_id, TestNode::new(2)).unwrap();
+        let child1 = unsafe { heap.alloc_raw(partition_id, TestNode::new(1)) }.unwrap();
+        let child2 = unsafe { heap.alloc_raw(partition_id, TestNode::new(2)) }.unwrap();
 
         let mut root = TestNode::new(0);
         root.add_child(child1);
         root.add_child(child2);
-        let root_ref = heap.alloc(partition_id, root).unwrap();
+        let root_ref = unsafe { heap.alloc_raw(partition_id, root) }.unwrap();
 
         // Mark reachable nodes incrementally with small step limit
         heap.set_root(root_ref, true);
@@ -323,20 +321,19 @@ mod tests {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(8192);
 
-        // Create a deep tree: level0 -> level1 -> level2 -> level3
-        let level3 = heap.alloc(partition_id, TestNode::new(3)).unwrap();
+        let level3 = unsafe { heap.alloc_raw(partition_id, TestNode::new(3)) }.unwrap();
 
         let mut level2 = TestNode::new(2);
         level2.add_child(level3);
-        let level2_ref = heap.alloc(partition_id, level2).unwrap();
+        let level2_ref = unsafe { heap.alloc_raw(partition_id, level2) }.unwrap();
 
         let mut level1 = TestNode::new(1);
         level1.add_child(level2_ref);
-        let level1_ref = heap.alloc(partition_id, level1).unwrap();
+        let level1_ref = unsafe { heap.alloc_raw(partition_id, level1) }.unwrap();
 
         let mut level0 = TestNode::new(0);
         level0.add_child(level1_ref);
-        let level0_ref = heap.alloc(partition_id, level0).unwrap();
+        let level0_ref = unsafe { heap.alloc_raw(partition_id, level0) }.unwrap();
 
         // Mark reachable nodes
         heap.set_root(level0_ref, true);
@@ -357,25 +354,25 @@ mod tests {
         //     / \    / \
         //    c   d  e   f
 
-        let c = heap.alloc(partition_id, TestNode::new(3)).unwrap();
-        let d = heap.alloc(partition_id, TestNode::new(4)).unwrap();
-        let e = heap.alloc(partition_id, TestNode::new(5)).unwrap();
-        let f = heap.alloc(partition_id, TestNode::new(6)).unwrap();
+        let c = unsafe { heap.alloc_raw(partition_id, TestNode::new(3)) }.unwrap();
+        let d = unsafe { heap.alloc_raw(partition_id, TestNode::new(4)) }.unwrap();
+        let e = unsafe { heap.alloc_raw(partition_id, TestNode::new(5)) }.unwrap();
+        let f = unsafe { heap.alloc_raw(partition_id, TestNode::new(6)) }.unwrap();
 
         let mut a = TestNode::new(1);
         a.add_child(c);
         a.add_child(d);
-        let a_ref = heap.alloc(partition_id, a).unwrap();
+        let a_ref = unsafe { heap.alloc_raw(partition_id, a) }.unwrap();
 
         let mut b = TestNode::new(2);
         b.add_child(e);
         b.add_child(f);
-        let b_ref = heap.alloc(partition_id, b).unwrap();
+        let b_ref = unsafe { heap.alloc_raw(partition_id, b) }.unwrap();
 
         let mut root = TestNode::new(0);
         root.add_child(a_ref);
         root.add_child(b_ref);
-        let root_ref = heap.alloc(partition_id, root).unwrap();
+        let root_ref = unsafe { heap.alloc_raw(partition_id, root) }.unwrap();
 
         // Mark reachable nodes
         heap.set_root(root_ref, true);
@@ -392,7 +389,7 @@ mod tests {
         // Create a tree with 10 nodes in a balanced structure
         let mut nodes = Vec::new();
         for i in 0..10 {
-            nodes.push(heap.alloc(partition_id, TestNode::new(i as u32)).unwrap());
+            nodes.push(unsafe { heap.alloc_raw(partition_id, TestNode::new(i as u32)) }.unwrap());
         }
 
         // Build tree: 0 -> 1,2; 1 -> 3,4; 2 -> 5,6; 3 -> 7,8; 4 -> 9
@@ -447,9 +444,8 @@ mod tests {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
 
-        // Create two nodes that reference each other
-        let mut node1 = heap.alloc(partition_id, TestNode::new(1)).unwrap();
-        let mut node2 = heap.alloc(partition_id, TestNode::new(2)).unwrap();
+        let mut node1 = unsafe { heap.alloc_raw(partition_id, TestNode::new(1)) }.unwrap();
+        let mut node2 = unsafe { heap.alloc_raw(partition_id, TestNode::new(2)) }.unwrap();
 
         {
             node1.with_mut(&mut heap, |n| n.add_child(node2));
