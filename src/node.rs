@@ -191,15 +191,6 @@ impl GcHead {
         self.contains_flag(GcNodeFlag::ROOT)
     }
 
-    /// Set/clear root object flag
-    pub(super) fn set_root(&mut self, is_root: bool) {
-        if is_root {
-            self.insert_flag(GcNodeFlag::ROOT);
-        } else {
-            self.remove_flag(GcNodeFlag::ROOT);
-        }
-    }
-
     #[inline(always)]
     pub(super) fn traverse_visited(&self) -> bool {
         self.contains_flag(GcNodeFlag::TRAVERSE_VISITED)

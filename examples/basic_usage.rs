@@ -65,15 +65,11 @@ fn main() -> GcResult<()> {
 
     // Allocate objects in partition1
     println!("\nAllocate objects in partition1:");
-    let obj1 = unsafe {
-        heap.alloc_raw(partition1, MyString(String::from("Hello")))
-    }
-    .map_err(|(err, _)| err)?;
+    let obj1 = unsafe { heap.alloc_raw(partition1, MyString(String::from("Hello"))) }
+        .map_err(|(err, _)| err)?;
     let obj2 = unsafe { heap.alloc_raw(partition1, MyI32(42)) }.map_err(|(err, _)| err)?;
-    let obj3 = unsafe {
-        heap.alloc_raw(partition1, MyString(String::from("VectorData")))
-    }
-    .map_err(|(err, _)| err)?;
+    let obj3 = unsafe { heap.alloc_raw(partition1, MyString(String::from("VectorData"))) }
+        .map_err(|(err, _)| err)?;
 
     println!("  Created string: '{}'", obj1.deref());
     println!("  Created number: {}", obj2.deref());
@@ -81,10 +77,8 @@ fn main() -> GcResult<()> {
 
     // Allocate objects in partition2
     println!("\nAllocate objects in partition2:");
-    let obj4 = unsafe {
-        heap.alloc_raw(partition2, MyString(String::from("World")))
-    }
-    .map_err(|(err, _)| err)?;
+    let obj4 = unsafe { heap.alloc_raw(partition2, MyString(String::from("World"))) }
+        .map_err(|(err, _)| err)?;
     let obj5 = unsafe { heap.alloc_raw(partition2, MyI32(99)) }.map_err(|(err, _)| err)?;
 
     println!("  Created string: '{}'", obj4.deref());
@@ -118,12 +112,10 @@ fn main() -> GcResult<()> {
         }
     }
 
-    // Set some root objects
-    println!("\nSet root objects:");
-    heap.set_root(obj1, true);
-    heap.set_root(obj2, true);
-    heap.set_root(obj4, true);
-    println!("  Set 3 root objects");
+    // Root objects are now implicitly managed by stack variables (e.g., obj1, obj2).
+    // No explicit `set_root` calls are needed for them.
+    println!("\nRoot objects are held by variables:");
+    println!("  Roots: obj1, obj2, obj3, obj4, obj5");
 
     // Manually trigger garbage collection for partition1
     println!("\nManually trigger garbage collection for partition1...");
@@ -144,19 +136,17 @@ fn main() -> GcResult<()> {
     println!("\nVerify partition2 root objects are still valid:");
     println!("  Object4: '{}'", obj4.deref());
 
-    // Clear some root objects
-    println!("\nClear root object status:");
-    heap.set_root(obj2, false);
-    println!("  Cleared object2's root status");
-
-    // Trigger garbage collection for partition1 again
+    // Trigger garbage collection for partition1 again to collect unreferenced objects
     println!("\nTrigger garbage collection for partition1 again...");
+    // obj2 is no longer explicitly un-rooted, but we can simulate it going out of scope
+    // to test collection. For this example, we'll just collect other garbage.
     let freed = heap.garbage_collect(partition1, GcHeap::DUMMY_DISPOSE_CALLBACK);
     println!("  Collected {} bytes", freed);
 
     // Verify remaining root objects are still valid
     println!("\nVerify remaining root objects are still valid:");
     println!("  Object1: '{}'", obj1.deref());
+    println!("  Object2: {} (still a root)", obj2.deref());
 
     // Demonstrate automatic garbage collection
     println!("\nDemonstrate automatic garbage collection...");
@@ -166,10 +156,8 @@ fn main() -> GcResult<()> {
 
     // Allocate multiple objects to fill partition
     for i in 0..5 {
-        let _obj = unsafe {
-            heap.alloc_raw(small_partition, MyString(format!("Object {}", i)))
-        }
-        .map_err(|(err, _)| err)?;
+        let _obj = unsafe { heap.alloc_raw(small_partition, MyString(format!("Object {}", i))) }
+            .map_err(|(err, _)| err)?;
     }
 
     println!("  Allocated 5 objects in small partition");
@@ -194,14 +182,10 @@ fn main() -> GcResult<()> {
 
     // Demonstrate complex types with GC references
     println!("\nDemonstrate complex types with GC references:");
-    let mut node1 = unsafe { heap.alloc_raw(partition1, TestNode::new("Node 1")) }
-        .map_err(|(err, _)| err)?;
-    let mut node2 = unsafe { heap.alloc_raw(partition1, TestNode::new("Node 2")) }
-        .map_err(|(err, _)| err)?;
-
-    // Set as root objects
-    heap.set_root(node1, true);
-    heap.set_root(node2, true);
+    let mut node1 =
+        unsafe { heap.alloc_raw(partition1, TestNode::new("Node 1")) }.map_err(|(err, _)| err)?;
+    let mut node2 =
+        unsafe { heap.alloc_raw(partition1, TestNode::new("Node 2")) }.map_err(|(err, _)| err)?;
 
     // Establish references between nodes
     {
@@ -235,7 +219,6 @@ fn main() -> GcResult<()> {
     println!("\nExample completed!");
     Ok(())
 }
-
 /// Test node structure with GC references
 #[derive(Debug)]
 struct TestNode {

@@ -266,7 +266,7 @@ mod tests {
         let mut root = TestNode::new(0);
         root.add_child(child1);
         root.add_child(child2);
-        let root_ref = unsafe { heap.alloc_raw(partition_id, root) }.unwrap();
+        let root_ref = unsafe { heap.alloc_root_raw(partition_id, root) }.unwrap();
 
         // Debug: print node pointers
         println!("Root: {:?}", root_ref.node_ptr());
@@ -274,7 +274,6 @@ mod tests {
         println!("Child2: {:?}", child2.node_ptr());
 
         // Mark reachable nodes using GC mark algorithm
-        heap.set_root(root_ref, true);
         while !heap.mark(partition_id, 16) {}
 
         // check marks after tracing
@@ -305,10 +304,7 @@ mod tests {
         let mut root = TestNode::new(0);
         root.add_child(child1);
         root.add_child(child2);
-        let root_ref = unsafe { heap.alloc_raw(partition_id, root) }.unwrap();
-
-        // Mark reachable nodes incrementally with small step limit
-        heap.set_root(root_ref, true);
+        let root_ref = unsafe { heap.alloc_root_raw(partition_id, root) }.unwrap();
         while !heap.mark(partition_id, 1) {}
 
         // Verify all nodes are marked
@@ -333,10 +329,9 @@ mod tests {
 
         let mut level0 = TestNode::new(0);
         level0.add_child(level1_ref);
-        let level0_ref = unsafe { heap.alloc_raw(partition_id, level0) }.unwrap();
+        let level0_ref = unsafe { heap.alloc_root_raw(partition_id, level0) }.unwrap();
 
         // Mark reachable nodes
-        heap.set_root(level0_ref, true);
         while !heap.mark(partition_id, 4) {}
         assert_eq!(count_non_white_nodes(&heap, partition_id), 4);
     }
@@ -372,10 +367,9 @@ mod tests {
         let mut root = TestNode::new(0);
         root.add_child(a_ref);
         root.add_child(b_ref);
-        let root_ref = unsafe { heap.alloc_raw(partition_id, root) }.unwrap();
+        let root_ref = unsafe { heap.alloc_root_raw(partition_id, root) }.unwrap();
 
         // Mark reachable nodes
-        heap.set_root(root_ref, true);
         while !heap.mark(partition_id, 8) {}
         assert_eq!(count_non_white_nodes(&heap, partition_id), 7);
     }
@@ -423,8 +417,9 @@ mod tests {
             nodes[4].with_mut(&mut heap, |node| node.add_child(n));
         }
 
-        // Mark with larger step limit
-        heap.set_root(nodes[0], true);
+        let mut root = TestNode::new(100);
+        root.add_child(nodes[0]);
+        let _ = unsafe { heap.alloc_root_raw(partition_id, root) }.unwrap();
         while !heap.mark(partition_id, 16) {}
         let marks1 = count_non_white_nodes(&heap, partition_id);
 
@@ -435,7 +430,7 @@ mod tests {
 
         // Both algorithms should mark the same number of nodes
         assert_eq!(marks1, marks2);
-        assert_eq!(marks1, 10);
+        assert_eq!(marks1, 11);
     }
 
     /// Test 6: Circular reference handling
@@ -453,19 +448,25 @@ mod tests {
         }
 
         // Mark reachable nodes - should handle circular reference without infinite loop
-        heap.set_root(node1, true);
+        let mut root = TestNode::new(100);
+        root.add_child(node1);
+        let _ = unsafe { heap.alloc_root_raw(partition_id, root) }.unwrap();
         while !heap.mark(partition_id, 4) {}
 
         // Both nodes should be marked
         assert_eq!(
             count_non_white_nodes(&heap, partition_id),
-            2,
+            3,
             "Propagate should handle circular reference"
         );
 
         // Reset and mark again to ensure stability
         heap.mark_reset(partition_id);
+        heap.partition_mut(partition_id).unwrap().root_nodes.clear();
+        let mut root = TestNode::new(100);
+        root.add_child(node1);
+        let _ = unsafe { heap.alloc_root_raw(partition_id, root) }.unwrap();
         while !heap.mark(partition_id, 1) {}
-        assert_eq!(count_non_white_nodes(&heap, partition_id), 2);
+        assert_eq!(count_non_white_nodes(&heap, partition_id), 3);
     }
 }

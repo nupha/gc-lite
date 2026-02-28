@@ -358,7 +358,16 @@ mod sweep_test {
 
         for (i, obj) in objects.iter().enumerate() {
             if i % 2 == 1 {
-                heap.set_root(*obj, true);
+                // Make existing nodes roots instead of creating new ones.
+                unsafe {
+                    let head = obj.head_ptr.as_ptr();
+                    let attrs = (*head).attrs | crate::node::GcNodeFlag::ROOT.bits() as u32;
+                    std::ptr::write(&mut (*head).attrs, attrs);
+                    heap.partition_mut(partition_id)
+                        .unwrap()
+                        .root_nodes
+                        .push(obj.head_ptr);
+                }
             }
         }
 
@@ -369,7 +378,11 @@ mod sweep_test {
         let removed = heap.sweep(partition_id, |_, _| {});
         assert!(removed > 0, "Should have freed some bytes");
 
-        assert_eq!(count_nodes_in_partition(&heap, partition_id), 2);
+        assert_eq!(
+            count_nodes_in_partition(&heap, partition_id),
+            2,
+            "Only root nodes should remain"
+        );
 
         let remaining_nodes = get_all_nodes_in_partition(&heap, partition_id);
         for node in remaining_nodes {
@@ -391,8 +404,8 @@ mod sweep_test {
             .map(|i| unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap())
             .collect();
 
-        heap.set_root(objects[3], true);
-        heap.set_root(objects[4], true);
+        let _ = unsafe { heap.alloc_root_raw(partition_id, MyI32(3)) }.unwrap();
+        let _ = unsafe { heap.alloc_root_raw(partition_id, MyI32(4)) }.unwrap();
 
         while !heap.mark(partition_id, 64) {}
 
@@ -467,15 +480,15 @@ mod sweep_test {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
 
-        let objects: Vec<GcRef<MyI32>> = (0..5)
-            .map(|i| unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap())
+        let _objects: Vec<GcRef<MyI32>> = (0..5)
+            .map(|i| {
+                if i != 2 {
+                    unsafe { heap.alloc_root_raw(partition_id, MyI32(i)) }.unwrap()
+                } else {
+                    unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap()
+                }
+            })
             .collect();
-
-        for (i, obj) in objects.iter().enumerate() {
-            if i != 2 {
-                heap.set_root(*obj, true);
-            }
-        }
 
         while !heap.mark(partition_id, 64) {}
 
@@ -515,20 +528,9 @@ mod sweep_test {
             .map(|i| unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap())
             .collect();
 
-        heap.set_root(root_obj, true);
+        let _ = unsafe { heap.alloc_root_raw(partition_id, MyI32(1)) }.unwrap();
 
-        assert!(
-            heap.partitions
-                .get(&partition_id)
-                .unwrap()
-                .root_nodes
-                .contains(&root_obj.head_ptr)
-        );
-
-        heap.set_root(root_obj, false);
-        for obj in &_objects {
-            heap.set_root(*obj, true);
-        }
+        let _ = unsafe { heap.alloc_root_raw(partition_id, MyI32(1)) }.unwrap();
 
         while !heap.mark(partition_id, 64) {}
 

@@ -62,11 +62,11 @@ impl GcHeap {
     }
 
     /// Allocate a typed gc node with payload data in given scope
-    pub unsafe fn alloc_raw<T: GcNode>(
+    unsafe fn alloc_node_mem<T: GcNode>(
         &mut self,
         partition_id: GcPartitionId,
         payload: T,
-    ) -> Result<GcRef<T>, (GcError, T)> {
+    ) -> Result<(NonNull<GcHead>, usize), (GcError, T)> {
         match self.partition_mut(partition_id) {
             Some(par) => {
                 let size = std::mem::size_of::<T>();
@@ -87,6 +87,10 @@ impl GcHeap {
                     let head = ptr.cast::<GcHead>();
 
                     // setup node info and data
+                    unsafe {
+                        std::ptr::write(head.add(1).cast::<T>().as_ptr(), payload);
+                    }
+
                     let node_info = GcHead {
                         attrs: {
                             #[cfg(debug_assertions)]
@@ -110,30 +114,87 @@ impl GcHeap {
 
                     unsafe {
                         std::ptr::write(head.as_ptr(), node_info);
-                        std::ptr::write(head.add(1).cast::<T>().as_ptr(), payload);
                     }
 
-                    // Add to nodes link
-                    self.attach_node(partition_id, head);
-                    // Update memory usage with rollup to parent partitions
                     self.update_mem_use(partition_id, gross_size as i32);
 
-                    log::trace!("[alloc] {:?}", unsafe { head.as_ref() });
-
-                    if let Some(guard) = self.current_alloc_guard() {
-                        guard.add(head);
-                    }
-
-                    Ok(GcRef {
-                        head_ptr: head,
-                        _marker: PhantomData,
-                    })
+                    Ok((head, gross_size))
                 }
             }
             None => Err((GcError::PartitionNotFound, payload)),
         }
     }
 
+    /// # SAFETY
+    ///
+    /// This function is unsafe because it directly manipulates raw pointers and memory allocation.
+    /// The caller must ensure that the `partition_id` is valid and that the returned `GcRef` is
+    /// properly managed to avoid memory leaks or use-after-free errors.
+    pub unsafe fn alloc_raw<T: GcNode>(
+        &mut self,
+        partition_id: GcPartitionId,
+        payload: T,
+    ) -> Result<GcRef<T>, (GcError, T)> {
+        match unsafe { self.alloc_node_mem(partition_id, payload) } {
+            Ok((head, _)) => {
+                log::trace!("[alloc] {:?}", unsafe { head.as_ref() });
+
+                self.attach_node(partition_id, head);
+                if let Some(guard) = self.current_alloc_guard() {
+                    guard.add(head);
+                }
+
+                Ok(GcRef {
+                    head_ptr: head,
+                    _marker: PhantomData,
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// # SAFETY
+    ///
+    /// This function is unsafe because it directly manipulates raw pointers and memory allocation.
+    /// The caller must ensure that the `partition_id` is valid and that the returned `GcRef` is
+    /// properly managed to avoid memory leaks or use-after-free errors.
+    pub unsafe fn alloc_root_raw<T: GcNode>(
+        &mut self,
+        partition_id: GcPartitionId,
+        payload: T,
+    ) -> Result<GcRef<T>, (GcError, T)> {
+        match unsafe { self.alloc_node_mem(partition_id, payload) } {
+            Ok((mut head, gross_size)) => {
+                // Add to nodes link
+                self.attach_node(partition_id, head);
+
+                log::trace!("[alloc] {:?}", unsafe { head.as_ref() });
+
+                if let Some(guard) = self.current_alloc_guard() {
+                    guard.add(head);
+                }
+
+                // Mark as root
+                unsafe { head.as_mut() }.insert_flag(crate::node::GcNodeFlag::ROOT);
+                self.partition_mut(partition_id)
+                    .unwrap()
+                    .root_nodes
+                    .push(head);
+
+                Ok(GcRef {
+                    head_ptr: head,
+                    _marker: PhantomData,
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// # SAFETY
+    ///
+    /// This function is unsafe because it directly manipulates raw pointers and memory allocation.
+    /// The caller must ensure that the `partition_id` is valid and that the returned `GcLocal` is
+    /// properly managed to avoid memory leaks or use-after-free errors.
     pub unsafe fn alloc_local_raw<T: GcNode>(
         &mut self,
         partition_id: GcPartitionId,

@@ -18,6 +18,7 @@ pub struct GcHeap {
 
     /// Partition management
     pub(super) partitions: HashMap<GcPartitionId, GcPartition>,
+    pub(crate) scope_stack: Vec<GcContext<'static>>,
     /// stacked node guards
     pub(crate) alloc_guard_stack: SmallVec<[GcNodeGuard<'static>; 8]>,
     /// Weak reference list, each slot stores (version, GcHeader)
@@ -36,6 +37,12 @@ impl Drop for GcHeap {
     fn drop(&mut self) {
         // heap world is gone, dealloc all nodes live in it, regardless their status.
         log::trace!("[heap::drop]");
+
+        for mut s in self.scope_stack.drain(..) {
+            unsafe {
+                s.abort();
+            }
+        }
 
         for mut g in self.alloc_guard_stack.drain(..) {
             unsafe {
@@ -70,21 +77,13 @@ impl GcHeap {
             opaque: std::ptr::null_mut(),
             node_dtypes: registry,
             alloc_guard_stack: SmallVec::new(),
+            scope_stack: Vec::new(),
 
             #[cfg(debug_assertions)]
             dbg_dropping_root_partition: None,
             #[cfg(debug_assertions)]
             dbg_living_nodes: std::collections::HashSet::with_capacity(128),
         }
-    }
-
-    pub fn with_context<R>(
-        &mut self,
-        partition_id: GcPartitionId,
-        f: impl FnOnce(&mut GcContext<'_>) -> R,
-    ) -> R {
-        let mut ctx = GcContext::new(self, partition_id);
-        f(&mut ctx)
     }
 
     #[inline(always)]
@@ -174,39 +173,6 @@ impl GcHeap {
         let par = self.partitions.get_mut(&partition_id).unwrap();
         n.next = par.nodes.take();
         par.nodes = Some(node);
-    }
-
-    /// Set/unset a node to be root
-    pub fn set_root_node(&mut self, mut node_ptr: NonNull<GcHead>, is_root: bool) {
-        let node = unsafe { node_ptr.as_mut() };
-
-        if node.is_root() != is_root {
-            node.set_root(is_root);
-            let par = self.partition_mut(node.partition_id()).unwrap();
-
-            if is_root {
-                // Add to partition's root object list
-                if !par.root_nodes.contains(&node_ptr) {
-                    par.root_nodes.push(node_ptr);
-                    if par.is_marking() && node.color() != GcTriColor::Black {
-                        par.add_gray_node(node_ptr);
-                    }
-                } else {
-                    #[cfg(debug_assertions)]
-                    debug_assert!(node.is_protected());
-                }
-            } else if !node.is_protected() {
-                // Remove from partition's root nodes list
-                let i = par.root_nodes.iter().position(|&n| n == node_ptr).unwrap();
-                par.root_nodes.swap_remove(i);
-            }
-        }
-    }
-
-    /// Set/unset a gc_ref to be root
-    #[inline(always)]
-    pub fn set_root<T: GcNode>(&mut self, gc_ref: GcRef<T>, is_root: bool) {
-        self.set_root_node(gc_ref.head_ptr, is_root);
     }
 
     pub fn get_roots(
@@ -381,9 +347,7 @@ impl<'a> Drop for GcNodeGuard<'a> {
                 }
             } else {
                 let heap = unsafe { self.heap.as_mut() };
-                unsafe {
-                    heap.do_unprotect_node(node);
-                }
+                heap.do_unprotect_node(node);
             }
         }
     }
@@ -745,7 +709,7 @@ mod heap_tests {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
 
-        let head = heap.with_context(partition_id, |ctx| {
+        let head = heap.with_new_scope(partition_id, |ctx| {
             let node: GcRef<Node> = ctx
                 .alloc(Node {
                     next: None,

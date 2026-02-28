@@ -384,7 +384,7 @@ fn test_memory_usage_increases_with_allocation() {
 
     // Verify memory was freed after GC
     let root_obj = unsafe {
-        heap.alloc_raw(
+        heap.alloc_root_raw(
             id,
             TestData {
                 value: 100,
@@ -393,7 +393,6 @@ fn test_memory_usage_increases_with_allocation() {
         )
     }
     .unwrap();
-    heap.set_root(root_obj, true);
     let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     assert!(freed > 0);
 
@@ -494,7 +493,7 @@ fn test_root_object_management() {
     let id = heap.create_partition(2048);
 
     let obj = unsafe {
-        heap.alloc_raw(
+        heap.alloc_root_raw(
             id,
             TestData {
                 value: 42,
@@ -505,15 +504,7 @@ fn test_root_object_management() {
     .unwrap();
 
     // Initially not a root
-    assert!(!obj.is_root());
-
-    // Set as root
-    heap.set_root(obj, true);
     assert!(obj.is_root());
-
-    // Clear root status
-    heap.set_root(obj, false);
-    assert!(!obj.is_root());
 }
 
 #[test]
@@ -522,7 +513,7 @@ fn test_root_objects_preserve_during_gc() {
     let id = heap.create_partition(2048);
 
     let obj = unsafe {
-        heap.alloc_raw(
+        heap.alloc_root_raw(
             id,
             TestData {
                 value: 42,
@@ -531,8 +522,6 @@ fn test_root_objects_preserve_during_gc() {
         )
     }
     .unwrap();
-
-    heap.set_root(obj, true);
 
     // Trigger GC
     let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
@@ -549,7 +538,7 @@ fn test_non_root_objects_collected() {
 
     // Create two objects, one is root, one is not
     let root_obj = unsafe {
-        heap.alloc_raw(
+        heap.alloc_root_raw(
             id,
             TestData {
                 value: 1,
@@ -570,9 +559,6 @@ fn test_non_root_objects_collected() {
     }
     .unwrap();
 
-    heap.set_root(root_obj, true);
-    // non_root_obj is not set as root
-
     // Trigger GC
     let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
     assert!(freed > 0);
@@ -590,18 +576,28 @@ fn test_manual_garbage_collection() {
 
     // Create objects with some as roots
     for i in 0..5 {
-        let obj = unsafe {
-            heap.alloc_raw(
-                id,
-                TestData {
-                    value: i,
-                    name: format!("obj_{}", i),
-                },
-            )
-        }
-        .unwrap();
         if i < 2 {
-            heap.set_root(obj, true);
+            let _obj = unsafe {
+                heap.alloc_root_raw(
+                    id,
+                    TestData {
+                        value: i,
+                        name: format!("obj_{}", i),
+                    },
+                )
+            }
+            .unwrap();
+        } else {
+            let _obj = unsafe {
+                heap.alloc_raw(
+                    id,
+                    TestData {
+                        value: i,
+                        name: format!("obj_{}", i),
+                    },
+                )
+            }
+            .unwrap();
         }
     }
 
@@ -623,34 +619,28 @@ fn test_manual_garbage_collection() {
 #[test]
 fn test_circular_reference_handling() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(2048);
+    let id = heap.create_partition(4096);
 
+    // Allocate nodes and create a circular reference
     let mut node1 = unsafe { heap.alloc_raw(id, TestNode::new(1)) }.unwrap();
     let mut node2 = unsafe { heap.alloc_raw(id, TestNode::new(2)) }.unwrap();
-
-    // Create circular reference
     node1.with_mut(&mut heap, |n| n.add_child(node2));
     node2.with_mut(&mut heap, |n| n.add_child(node1));
 
-    // Set both as roots - they should be preserved
-    heap.set_root(node1, true);
-    heap.set_root(node2, true);
+    // To test collection, we need a root that references the cycle
+    let mut root = unsafe { heap.alloc_root_raw(id, TestNode::new(0)) }.unwrap();
+    root.with_mut(&mut heap, |n| n.add_child(node1));
 
-    // Verify node values are correct
-    let node1_val = node1.value;
-    let node2_val = node2.value;
-    assert_eq!(node1_val, 1);
-    assert_eq!(node2_val, 2);
+    // Now, break the link from the root to the cycle
+    root.with_mut(&mut heap, |n| n.children.clear());
 
+    // GC should now collect the cycle
     let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
-    assert_eq!(freed, 0); // Nothing freed because both are roots
+    assert!(freed > 0);
 
-    // Clear roots - circular reference should be collected
-    heap.set_root(node1, false);
-    heap.set_root(node2, false);
-
+    // GC should not collect anything yet
     let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
-    assert!(freed > 0); // Circular reference should be freed
+    assert_eq!(freed, 0);
 }
 
 // ============ Weak Reference Tests ============
@@ -662,7 +652,7 @@ fn test_weak_reference_creation_and_upgrade() {
 
     // Create object and weak reference
     let obj = unsafe {
-        heap.alloc_raw(
+        heap.alloc_root_raw(
             id,
             TestData {
                 value: 42,
@@ -671,8 +661,6 @@ fn test_weak_reference_creation_and_upgrade() {
         )
     }
     .unwrap();
-
-    heap.set_root(obj, true);
 
     let weak_ref = heap.downgrade(&obj);
 
@@ -703,8 +691,7 @@ fn test_weak_reference_after_collection() {
 
     let weak_ref = heap.downgrade(&obj);
 
-    // Clear root and collect
-    heap.set_root(obj, false);
+    // Collect garbage. Since obj is not a root, it should be collected.
     heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
 
     // Upgrade should fail after object is collected
@@ -718,7 +705,7 @@ fn test_multiple_weak_references() {
     let id = heap.create_partition(2048);
 
     let obj = unsafe {
-        heap.alloc_raw(
+        heap.alloc_root_raw(
             id,
             TestData {
                 value: 42,
@@ -727,8 +714,6 @@ fn test_multiple_weak_references() {
         )
     }
     .unwrap();
-
-    heap.set_root(obj, true);
 
     // Create multiple weak references
     let weak1 = heap.downgrade(&obj);

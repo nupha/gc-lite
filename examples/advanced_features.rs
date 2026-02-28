@@ -81,10 +81,9 @@ fn demonstrate_weak_references(
 ) -> GcResult<()> {
     println!("1. Create strong and weak references...");
 
-    let strong_ref = unsafe {
-        heap.alloc_raw(partition, MyString(String::from("Strong Reference Data")))
-    }
-    .map_err(|(err, _)| err)?;
+    let strong_ref =
+        unsafe { heap.alloc_root_raw(partition, MyString(String::from("Strong Reference Data"))) }
+            .map_err(|(err, _)| err)?;
 
     let weak_ref = heap.downgrade(&strong_ref);
     println!("  Created strong reference: {:?}", strong_ref);
@@ -103,7 +102,6 @@ fn demonstrate_weak_references(
 
     // Try upgrading after releasing strong reference
     println!("\n3. Upgrade weak reference after releasing strong reference...");
-    heap.set_root(strong_ref, false);
     heap.garbage_collect(partition, GcHeap::DUMMY_DISPOSE_CALLBACK);
 
     match weak_ref.upgrade(heap) {
@@ -124,9 +122,9 @@ fn demonstrate_cyclic_references(
     println!("1. Create circular reference nodes...");
 
     // Create two mutually referencing nodes
-    let mut node1 = unsafe { heap.alloc_raw(partition, CyclicNode::new("Node A")) }
+    let mut node1 = unsafe { heap.alloc_root_raw(partition, CyclicNode::new("Node A")) }
         .map_err(|(err, _)| err)?;
-    let mut node2 = unsafe { heap.alloc_raw(partition, CyclicNode::new("Node B")) }
+    let mut node2 = unsafe { heap.alloc_root_raw(partition, CyclicNode::new("Node B")) }
         .map_err(|(err, _)| err)?;
 
     // Establish circular references
@@ -137,10 +135,6 @@ fn demonstrate_cyclic_references(
 
     println!("  Created node1: {}", node1.deref());
     println!("  Created node2: {}", node2.deref());
-
-    // Set as root objects
-    heap.set_root(node1, true);
-    heap.set_root(node2, true);
 
     // Trigger garbage collection
     println!("\n2. Trigger garbage collection (circular references still exist)...");
@@ -154,9 +148,6 @@ fn demonstrate_cyclic_references(
 
     // Clear root object status, let circular references be collected
     println!("\n4. Clear root object status and trigger GC again...");
-    heap.set_root(node1, false);
-    heap.set_root(node2, false);
-
     let freed = heap.garbage_collect(partition, GcHeap::DUMMY_DISPOSE_CALLBACK);
     println!(
         "  Freed {} bytes of memory (circular references correctly collected)",
@@ -174,12 +165,12 @@ fn demonstrate_complex_structures(
     println!("1. Create complex data structures...");
 
     // Create multiple nodes
-    let mut root_node = unsafe { heap.alloc_raw(partition, TreeNode::new("Root")) }
-        .map_err(|(err, _)| err)?;
-    let mut child1 = unsafe { heap.alloc_raw(partition, TreeNode::new("Child 1")) }
-        .map_err(|(err, _)| err)?;
-    let child2 = unsafe { heap.alloc_raw(partition, TreeNode::new("Child 2")) }
-        .map_err(|(err, _)| err)?;
+    let mut root_node =
+        unsafe { heap.alloc_root_raw(partition, TreeNode::new("Root")) }.map_err(|(err, _)| err)?;
+    let mut child1 =
+        unsafe { heap.alloc_raw(partition, TreeNode::new("Child 1")) }.map_err(|(err, _)| err)?;
+    let child2 =
+        unsafe { heap.alloc_raw(partition, TreeNode::new("Child 2")) }.map_err(|(err, _)| err)?;
     let grandchild = unsafe { heap.alloc_raw(partition, TreeNode::new("Grandchild")) }
         .map_err(|(err, _)| err)?;
 
@@ -192,7 +183,7 @@ fn demonstrate_complex_structures(
 
     // Create data container
     let container = unsafe {
-        heap.alloc_raw(
+        heap.alloc_root_raw(
             partition,
             DataContainer {
                 root: root_node,
@@ -202,8 +193,6 @@ fn demonstrate_complex_structures(
         )
     }
     .map_err(|(err, _)| err)?;
-
-    heap.set_root(container, true);
 
     println!("  Created tree structure:");
     println!("    Root -> Child 1 -> Grandchild");
@@ -283,16 +272,16 @@ fn demonstrate_reference_recovery(
 
 /// Demonstrate cross-context detection
 fn demonstrate_cross_context_detection() -> GcResult<()> {
-    println!("1. Create two independent contexts...");
+    println!("1. Create two independent heaps...");
 
-    let mut context1 = new_heap();
-    let mut context2 = new_heap();
+    let mut heap1 = new_heap();
+    let mut heap2 = new_heap();
 
-    let partition1 = context1.create_partition(1024);
-    let partition2 = context2.create_partition(1024);
+    let partition1 = heap1.create_partition(1024);
+    let partition2 = heap2.create_partition(1024);
 
     let obj1 = unsafe {
-        context1.alloc_raw(
+        heap1.alloc_root_raw(
             partition1,
             TestData {
                 value: 1,
@@ -300,9 +289,9 @@ fn demonstrate_cross_context_detection() -> GcResult<()> {
             },
         )
     }
-    .unwrap();
+    .map_err(|(e, _)| e)?;
     let obj2 = unsafe {
-        context2.alloc_raw(
+        heap2.alloc_raw(
             partition2,
             TestData {
                 value: 2,
@@ -310,33 +299,25 @@ fn demonstrate_cross_context_detection() -> GcResult<()> {
             },
         )
     }
-    .unwrap();
+    .map_err(|(e, _)| e)?;
 
     println!("2. Test object source detection...");
+    assert!(heap1.contains(obj1.node_ptr()), "obj1 should be from heap1");
     assert!(
-        context1.contains(obj1.node_ptr()),
-        "obj1 should be from context1"
+        !heap1.contains(obj2.node_ptr()),
+        "obj2 should not be from heap1"
     );
+    assert!(heap2.contains(obj2.node_ptr()), "obj2 should be from heap2");
     assert!(
-        !context1.contains(obj2.node_ptr()),
-        "obj2 should not be from context1"
-    );
-    assert!(
-        context2.contains(obj2.node_ptr()),
-        "obj2 should be from context2"
-    );
-    assert!(
-        !context2.contains(obj1.node_ptr()),
-        "obj1 should not be from context2"
+        !heap2.contains(obj1.node_ptr()),
+        "obj1 should not be from heap2"
     );
 
     println!("  ✓ Cross-context detection correct");
 
     // Clean up
-    context1.set_root(obj1, false);
-    context1.garbage_collect(partition1, GcHeap::DUMMY_DISPOSE_CALLBACK);
-    context2.set_root(obj2, false);
-    context2.garbage_collect(partition2, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    heap1.garbage_collect(partition1, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    heap2.garbage_collect(partition2, GcHeap::DUMMY_DISPOSE_CALLBACK);
 
     Ok(())
 }

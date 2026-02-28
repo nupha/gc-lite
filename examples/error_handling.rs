@@ -41,15 +41,15 @@ fn demonstrate_out_of_memory() -> GcResult<()> {
     println!("2. Allocate first large object...");
     let gc1: GcRef<LargeData> =
         match unsafe { context.alloc_raw(partition_id, LargeData { data: [0; 1024] }) } {
-        Ok(gc_ref) => {
-            println!("  ✓ Successfully allocated first object (1KB)");
-            gc_ref
-        }
-        Err((error, _)) => {
-            println!("  ✗ First object allocation failed: {:?}", error);
-            return Ok(());
-        }
-    };
+            Ok(gc_ref) => {
+                println!("  ✓ Successfully allocated first object (1KB)");
+                gc_ref
+            }
+            Err((error, _)) => {
+                println!("  ✗ First object allocation failed: {:?}", error);
+                return Ok(());
+            }
+        };
 
     // Allocate second large object (1KB + header) - should exceed 2KB limit
     println!("3. Try to allocate second large object...");
@@ -72,7 +72,6 @@ fn demonstrate_out_of_memory() -> GcResult<()> {
 
     // Clean up - through garbage collection instead of manual release
     println!("  ✓ Automatic cleanup through GC");
-    context.set_root(gc1, false);
     context.garbage_collect(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
 
     Ok(())
@@ -135,7 +134,7 @@ fn demonstrate_partition_management_errors() -> GcResult<()> {
         )
     }
     .unwrap();
-    context.set_root(obj, true);
+    let _ = obj;
 
     // Try to delete non-empty partition (remove_partition will force cleanup)
     context.remove_partition(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
