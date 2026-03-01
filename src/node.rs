@@ -126,7 +126,7 @@ impl GcHead {
     }
 
     #[inline(always)]
-    pub(crate) fn protect_count(&self) -> u8 {
+    pub fn protect_count(&self) -> u8 {
         ((self.attrs & PROTECT_COUNT_MASK) >> PROTECT_COUNT_SHIFT) as u8
     }
 
@@ -146,7 +146,7 @@ impl GcHead {
     pub(super) fn inc_protect_count(&mut self) -> u8 {
         let mut count = self.protect_count();
         if count >= 7 {
-            panic!("GcHead protect count overflow");
+            panic!("GcHead protect count overflow: {count}");
         }
         count += 1;
         self.set_protect_count(count);

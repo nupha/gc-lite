@@ -6,7 +6,7 @@ use std::{collections::HashMap, marker::PhantomData, ptr::NonNull};
 use smallvec::SmallVec;
 
 use crate::{
-    GcContext, GcNode, GcRef,
+    GcContext,
     gctype::GcTypeRegistry,
     node::{GcHead, GcNodeFlag, GcTriColor},
     partition::{GcPartition, GcPartitionId},
@@ -38,7 +38,7 @@ impl Drop for GcHeap {
         // heap world is gone, dealloc all nodes live in it, regardless their status.
         log::trace!("[heap::drop]");
 
-        for mut s in self.scope_stack.drain(..) {
+        for s in self.scope_stack.drain(..) {
             unsafe {
                 s.abort();
             }
@@ -206,9 +206,12 @@ impl GcHeap {
             .any(|p| p == node)
     }
 
-    #[inline(always)]
     pub(crate) fn do_protect_node(&mut self, mut n: NonNull<GcHead>) {
         let node = unsafe { n.as_mut() };
+
+        #[cfg(debug_assertions)]
+        node.debug_assert_node_valid_simple();
+
         let count = node.inc_protect_count();
 
         if count == 1 && !node.is_root() {
@@ -220,9 +223,12 @@ impl GcHeap {
         }
     }
 
-    #[inline(always)]
     pub(crate) fn do_unprotect_node(&mut self, mut n: NonNull<GcHead>) {
         let node = unsafe { n.as_mut() };
+
+        #[cfg(debug_assertions)]
+        node.debug_assert_node_valid_simple();
+
         let count = node.dec_protect_count();
 
         if count == 0
@@ -253,7 +259,6 @@ impl GcHeap {
         GcNodeGuard {
             nodes: lst,
             heap: heap_ptr,
-            simple: false,
             _mark: PhantomData,
         }
     }
@@ -292,7 +297,6 @@ impl GcHeap {
         let sg = GcNodeGuard {
             nodes: SmallVec::new(),
             heap: NonNull::from_ref(self),
-            simple: false,
             _mark: PhantomData,
         };
         self.alloc_guard_stack.push(sg);
@@ -343,44 +347,25 @@ pub struct GcNodeGuard<'a> {
     nodes: SmallVec<[NonNull<GcHead>; 8]>,
     heap: NonNull<GcHeap>,
 
-    #[deprecated]
-    /// simple protect: prohobit being collected, but do not trace into descendants,
-    /// full protect: prohobit being collected, and trace into descendants,
-    simple: bool,
-
     _mark: PhantomData<&'a ()>,
 }
 
 impl<'a> Drop for GcNodeGuard<'a> {
     fn drop(&mut self) {
         for node in self.nodes.drain(..) {
-            if self.simple {
-                let mut node = node;
-                unsafe {
-                    node.as_mut().dec_protect_count();
-                }
-            } else {
-                let heap = unsafe { self.heap.as_mut() };
-                heap.do_unprotect_node(node);
-            }
+            let heap = unsafe { self.heap.as_mut() };
+            heap.do_unprotect_node(node);
         }
     }
 }
 
 impl<'a> GcNodeGuard<'a> {
     /// add an extra node to guard
-    pub fn add(&mut self, mut node: NonNull<GcHead>) {
+    pub fn add(&mut self, node: NonNull<GcHead>) {
         if !self.nodes.contains(&node) {
-            if self.simple {
-                unsafe {
-                    node.as_mut().inc_protect_count();
-                }
-            } else {
-                unsafe {
-                    self.heap.as_mut().do_protect_node(node);
-                }
+            unsafe {
+                self.heap.as_mut().do_protect_node(node);
             }
-
             self.nodes.push(node);
         }
     }
@@ -397,7 +382,7 @@ impl<'a> GcNodeGuard<'a> {
 
 #[cfg(test)]
 mod heap_tests {
-    use crate::{GcLocal, GcTraceCtx, trace::GcTrace};
+    use crate::{GcLocal, GcRef, GcTraceCtx, trace::GcTrace};
 
     use super::*;
 
