@@ -8,7 +8,7 @@ use smallvec::SmallVec;
 use crate::{
     GcContext, GcNode, GcRef,
     gctype::GcTypeRegistry,
-    node::{GcHead, GcTriColor},
+    node::{GcHead, GcNodeFlag, GcTriColor},
     partition::{GcPartition, GcPartitionId},
 };
 
@@ -173,6 +173,20 @@ impl GcHeap {
         let par = self.partitions.get_mut(&partition_id).unwrap();
         n.next = par.nodes.take();
         par.nodes = Some(node);
+    }
+
+    pub fn set_root_node(&mut self, mut node: NonNull<GcHead>) {
+        let n = unsafe { node.as_mut() };
+        if !n.is_root() {
+            let partition_id = n.partition_id();
+            if let Some(p) = self.partitions.get_mut(&partition_id) {
+                n.insert_flag(GcNodeFlag::ROOT);
+                p.root_nodes.push(node);
+                if p.is_marking() {
+                    p.add_gray_node(node);
+                }
+            }
+        }
     }
 
     pub fn get_roots(
