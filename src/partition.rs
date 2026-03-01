@@ -5,7 +5,7 @@ use std::{cell::Cell, ptr::NonNull};
 
 use smallvec::SmallVec;
 
-use crate::{GcHead, GcHeap, node::GcTriColor};
+use crate::{GcHead, GcHeap, node::GcTriColor, node_iterator::GcNodeLink};
 
 /// Partition ID
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -30,7 +30,7 @@ impl std::fmt::Debug for GcPartitionId {
 #[derive(Debug)]
 pub struct GcPartition {
     /// link of nodes in this partition
-    pub(crate) nodes: Option<NonNull<GcHead>>,
+    pub(crate) nodes: GcNodeLink,
     /// root nodes in this partition
     pub(crate) root_nodes: SmallVec<[NonNull<GcHead>; 8]>,
     /// gray nodes to be traced in this partition
@@ -53,7 +53,7 @@ impl GcPartition {
             memory_used: 0,
             memory_limit,
             gc_threshold: 0, // Default threshold is 0 bytes (disable automatic GC)
-            nodes: None,
+            nodes: GcNodeLink::default(),
             root_nodes: SmallVec::new(),
             gray_list: Vec::new(),
             marking: false,
@@ -212,9 +212,8 @@ impl GcHeap {
 
         let mut freed_bytes = 0;
 
-        if let Some(mut par) = self.partitions.remove(&partition_id)
-            && let Some(link) = par.nodes.take()
-        {
+        if let Some(mut par) = self.partitions.remove(&partition_id) {
+            let link = std::mem::take(&mut par.nodes);
             freed_bytes += self.dispose_all_nodes(link, &on_dispose);
         }
 

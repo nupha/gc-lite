@@ -6,7 +6,7 @@ use std::ptr::NonNull;
 use crate::{
     GcHeap,
     node::{GcHead, GcTriColor},
-    node_iterator::NodeLinkIter,
+    node_iterator::{GcNodeLink, NodeLinkIter},
     partition::GcPartitionId,
 };
 
@@ -23,28 +23,30 @@ impl GcHeap {
         if let Some(par) = self.partition_mut(partition_id) {
             par.set_marking(false);
             par.gray_list.clear();
-            for mut n in par.nodes() {
-                unsafe {
-                    n.as_mut().set_color(GcTriColor::White);
-                }
+            for n in par.nodes_mut() {
+                n.set_color(GcTriColor::White);
             }
         }
     }
 
-    pub fn mark(&mut self, partition_id: GcPartitionId, max_steps: usize) -> bool {
-        let heap_ptr = self as *mut Self;
-
+    /// ensure marking cycle is started:
+    /// if marking is in progress, exit do nothing;
+    /// if marking is done, start new cycle, add initialize gray list with root nodes.
+    pub fn ensure_mark_cycle(&mut self, partition_id: GcPartitionId) {
         if let Some(par) = self.partitions.get_mut(&partition_id) {
             if !par.is_marking() {
                 debug_assert!(par.gray_list.is_empty());
 
-                for mut n in par.nodes() {
+                // reset nodes color to white
+                for mut n in par.nodes.iter() {
                     unsafe {
                         n.as_mut().set_color(GcTriColor::White);
                     }
                 }
+
                 par.set_marking(true);
 
+                // add root nodes
                 for n in par.root_nodes.iter() {
                     let mut root = *n;
                     unsafe {
@@ -53,58 +55,77 @@ impl GcHeap {
                     par.gray_list.push(root);
                 }
             }
+        }
+    }
 
-            if max_steps > 0 {
-                let mut gcx = unsafe { (*heap_ptr).create_trace_ctx() };
-                let mut cnt = 0;
+    pub fn mark_grays(&mut self, partition_id: GcPartitionId, max_steps: usize) -> bool {
+        if max_steps == 0 {
+            return false;
+        }
 
-                while let Some(mut node_ptr) = par.gray_list.pop() {
-                    let node = unsafe { node_ptr.as_mut() };
-                    debug_assert_eq!(node.partition_id(), partition_id);
+        let heap_ptr = self as *mut Self;
 
-                    if node.color() == GcTriColor::Gray {
-                        if cnt >= max_steps {
-                            par.gray_list.push(node_ptr);
-                            return false;
-                        }
+        if let Some(par) = self.partitions.get_mut(&partition_id)
+            && !par.gray_list.is_empty()
+        {
+            let mut gcx = unsafe { (*heap_ptr).create_trace_ctx() };
+            let mut cnt = 0;
 
-                        // Trace for children.
-                        (self.node_dtypes.type_info_list[node.dtype() as usize].trace_fn)(
-                            node_ptr, &mut gcx,
-                        );
+            while let Some(mut node_ptr) = par.gray_list.pop() {
+                let node = unsafe { node_ptr.as_mut() };
+                debug_assert_eq!(node.partition_id(), partition_id);
 
-                        while let Some(mut ch) = gcx.traced_nodes.pop_front() {
-                            let child = unsafe { ch.as_mut() };
+                if node.color() == GcTriColor::Gray {
+                    if cnt >= max_steps {
+                        par.gray_list.push(node_ptr);
+                        return false;
+                    }
 
-                            #[cfg(debug_assertions)]
-                            child.debug_assert_node_valid_simple();
+                    // Trace for children.
+                    (self.node_dtypes.type_info_list[node.dtype() as usize].trace_fn)(
+                        node_ptr, &mut gcx,
+                    );
 
-                            let pid = child.partition_id();
-                            if pid == partition_id {
-                                if matches!(child.color(), GcTriColor::White | GcTriColor::Gray) {
-                                    child.set_color(GcTriColor::Gray);
-                                    par.gray_list.push(ch);
-                                }
-                            } else {
-                                let p2 = unsafe { (*heap_ptr).partition(pid).unwrap() };
-                                if p2.is_marking() {
-                                    unsafe {
-                                        (*heap_ptr).add_gray_node(ch);
-                                    }
+                    while let Some(mut ch) = gcx.traced_nodes.pop_front() {
+                        let child = unsafe { ch.as_mut() };
+
+                        #[cfg(debug_assertions)]
+                        child.debug_assert_node_valid_simple();
+
+                        let pid = child.partition_id();
+                        if pid == partition_id {
+                            if matches!(child.color(), GcTriColor::White | GcTriColor::Gray) {
+                                child.set_color(GcTriColor::Gray);
+                                par.gray_list.push(ch);
+                            }
+                        } else {
+                            let p2 = unsafe { (*heap_ptr).partition(pid).unwrap() };
+                            if p2.is_marking() {
+                                unsafe {
+                                    (*heap_ptr).add_gray_node(ch);
                                 }
                             }
                         }
-
-                        // Mark current node as black.
-                        node.set_color(GcTriColor::Black);
-
-                        cnt += 1;
                     }
+
+                    // Mark current node as black.
+                    node.set_color(GcTriColor::Black);
+
+                    cnt += 1;
                 }
             }
         }
 
         true
+    }
+
+    pub fn mark(&mut self, partition_id: GcPartitionId, max_steps: usize) -> bool {
+        self.ensure_mark_cycle(partition_id);
+        if max_steps > 0 {
+            self.mark_grays(partition_id, max_steps)
+        } else {
+            false
+        }
     }
 
     /// dispose white nodes in the partition
@@ -116,7 +137,7 @@ impl GcHeap {
         if let Some(link0) = self.partition_mut(partition_id).and_then(|p| {
             if p.is_marking() && p.gray_list.is_empty() {
                 p.set_marking(false);
-                p.nodes.take()
+                std::mem::take(&mut p.nodes).into_inner()
             } else {
                 None // mark cycle not done
             }
@@ -208,7 +229,7 @@ impl GcHeap {
                 }
 
                 let p = self.partition_mut(partition_id).unwrap();
-                p.nodes = link1;
+                p.nodes = crate::node_iterator::GcNodeLink::new(link1);
             }
 
             // Decrease partitions memory usage
@@ -243,11 +264,11 @@ impl GcHeap {
     /// Dispose all nodes along chain
     pub(crate) fn dispose_all_nodes(
         &mut self,
-        head: NonNull<GcHead>,
+        link: GcNodeLink,
         on_dispose: impl Fn(&GcHeap, &GcHead),
     ) -> usize {
         let call_on_dispose = !std::ptr::addr_eq(&on_dispose, &Self::DUMMY_DISPOSE_CALLBACK);
-        let mut link = Some(head);
+        let mut link = link.into_inner();
         let mut freed_bytes = 0;
 
         let pass_slice = self.node_dtypes.drop_passes;
@@ -319,9 +340,17 @@ mod sweep_test {
 
     /// Helper function to count nodes in a partition
     fn count_nodes_in_partition(heap: &GcHeap, partition_id: GcPartitionId) -> usize {
+        heap.nodes(partition_id).count()
+    }
+
+    fn count_black_nodes(heap: &GcHeap, partition_id: GcPartitionId) -> usize {
         let mut count = 0;
-        if let Some(head) = heap.partitions.get(&partition_id).unwrap().nodes {
-            count = NodeLinkIter::new(Some(head)).count();
+        for node in heap.nodes(partition_id) {
+            unsafe {
+                if node.as_ref().color() == GcTriColor::Black {
+                    count += 1;
+                }
+            }
         }
         count
     }
@@ -331,19 +360,7 @@ mod sweep_test {
         heap: &GcHeap,
         partition_id: GcPartitionId,
     ) -> Vec<NonNull<GcHead>> {
-        let mut nodes: Vec<NonNull<GcHead>> = Vec::new();
-        if let Some(partition) = heap.partitions.get(&partition_id)
-            && let Some(head) = partition.nodes
-        {
-            let mut current = Some(head);
-            while let Some(node) = current {
-                unsafe {
-                    nodes.push(node);
-                    current = node.as_ref().next;
-                }
-            }
-        }
-        nodes
+        heap.nodes(partition_id).collect()
     }
 
     /// Test basic sweep functionality
@@ -417,7 +434,10 @@ mod sweep_test {
         assert_eq!(count_nodes_in_partition(&heap, partition_id), 2);
 
         // Verify chain head is now the node with value 4
-        let head = heap.partitions.get(&partition_id).and_then(|p| p.nodes);
+        let head = heap
+            .partitions
+            .get(&partition_id)
+            .and_then(|p| p.nodes.head());
         assert!(head.is_some(), "Chain head should exist");
 
         unsafe {
@@ -467,7 +487,10 @@ mod sweep_test {
         assert_eq!(count_nodes_in_partition(&heap, partition_id), 0);
 
         // Chain head should be None
-        let head = heap.partitions.get(&partition_id).and_then(|p| p.nodes);
+        let head = heap
+            .partitions
+            .get(&partition_id)
+            .and_then(|p| p.nodes.head());
         assert!(
             head.is_none(),
             "Chain head should be None after removing all nodes"

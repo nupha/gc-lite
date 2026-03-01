@@ -440,7 +440,7 @@ impl<T: GcNode> GcRef<T> {
     }
 
     #[inline(always)]
-    pub fn to_local(self, heap: &GcHeap) -> GcLocal<T> {
+    pub fn to_local(self, heap: &mut GcHeap) -> GcLocal<T> {
         GcLocal::new(heap, self)
     }
 }
@@ -494,15 +494,12 @@ impl<T: GcNode> From<GcLocal<T>> for GcRef<T> {
 }
 
 impl<T: GcNode> GcLocal<T> {
-    pub fn new(heap: &GcHeap, gc: GcRef<T>) -> Self {
-        let mut heap_ptr = NonNull::from_ref(heap);
-        let head: NonNull<GcHead> = (&gc).into();
-
-        unsafe {
-            heap_ptr.as_mut().do_protect_node(head);
+    pub(crate) fn new(heap: &mut GcHeap, gc_ref: GcRef<T>) -> Self {
+        heap.do_protect_node(gc_ref.gc_head_ptr());
+        Self {
+            gc: gc_ref,
+            heap: NonNull::from_ref(heap),
         }
-
-        Self { gc, heap: heap_ptr }
     }
 
     #[inline(always)]

@@ -220,14 +220,10 @@ mod tests {
     /// Helper function to count marked nodes in a partition
     fn count_non_white_nodes(heap: &GcHeap, partition_id: GcPartitionId) -> usize {
         let mut count = 0;
-        if let Some(partition) = heap.partitions.get(&partition_id) {
-            let mut current = partition.nodes;
-            while let Some(node) = current {
-                unsafe {
-                    if node.as_ref().color() != GcTriColor::White {
-                        count += 1;
-                    }
-                    current = node.as_ref().next;
+        for node in heap.nodes(partition_id) {
+            unsafe {
+                if node.as_ref().color() != GcTriColor::White {
+                    count += 1;
                 }
             }
         }
@@ -237,18 +233,14 @@ mod tests {
     /// Helper function to get all node IDs in a partition
     fn get_all_node_ids(heap: &GcHeap, partition_id: GcPartitionId) -> Vec<u32> {
         let mut ids = Vec::new();
-        if let Some(partition) = heap.partitions.get(&partition_id) {
-            let mut current = partition.nodes;
-            while let Some(node) = current {
-                unsafe {
-                    // Calculate pointer to TestNode payload
-                    let payload_ptr = node.as_ref().payload();
-                    // ID field is at offset 24 bytes within TestNode (due to field reordering)
-                    let id_addr = payload_ptr.add(24);
-                    let id = *(id_addr.as_ptr() as *const u32);
-                    ids.push(id);
-                    current = node.as_ref().next;
-                }
+        for node in heap.nodes(partition_id) {
+            unsafe {
+                // Calculate pointer to TestNode payload
+                let payload_ptr = node.as_ref().payload();
+                // ID field is at offset 24 bytes within TestNode (due to field reordering)
+                let id_addr = payload_ptr.add(24);
+                let id = *(id_addr.as_ptr() as *const u32);
+                ids.push(id);
             }
         }
         ids

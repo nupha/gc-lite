@@ -137,12 +137,9 @@ impl GcHeap {
     ) -> Result<GcRef<T>, (GcError, T)> {
         match unsafe { self.alloc_node_mem(partition_id, payload) } {
             Ok((head, _)) => {
-                log::trace!("[alloc] {:?}", unsafe { head.as_ref() });
-
                 self.attach_node(partition_id, head);
-                if let Some(guard) = self.current_alloc_guard() {
-                    guard.add(head);
-                }
+
+                log::trace!("[alloc] {:?}", unsafe { head.as_ref() });
 
                 Ok(GcRef {
                     head_ptr: head,
@@ -163,31 +160,26 @@ impl GcHeap {
         partition_id: GcPartitionId,
         payload: T,
     ) -> Result<GcRef<T>, (GcError, T)> {
-        match unsafe { self.alloc_node_mem(partition_id, payload) } {
-            Ok((mut head, gross_size)) => {
-                // Add to nodes link
-                self.attach_node(partition_id, head);
+        let (mut node, _) = unsafe { self.alloc_node_mem(partition_id, payload)? };
 
-                log::trace!("[alloc] {:?}", unsafe { head.as_ref() });
+        // Mark as root
+        unsafe { node.as_mut() }.insert_flag(crate::node::GcNodeFlag::ROOT);
 
-                if let Some(guard) = self.current_alloc_guard() {
-                    guard.add(head);
-                }
+        // Add to nodes link
+        self.attach_node(partition_id, node);
 
-                // Mark as root
-                unsafe { head.as_mut() }.insert_flag(crate::node::GcNodeFlag::ROOT);
-                self.partition_mut(partition_id)
-                    .unwrap()
-                    .root_nodes
-                    .push(head);
-
-                Ok(GcRef {
-                    head_ptr: head,
-                    _marker: PhantomData,
-                })
-            }
-            Err(e) => Err(e),
+        let par = self.partition_mut(partition_id).unwrap();
+        par.root_nodes.push(node);
+        if par.is_marking() {
+            par.add_gray_node(node);
         }
+
+        log::trace!("[alloc_root] {:?}", unsafe { node.as_ref() });
+
+        Ok(GcRef {
+            head_ptr: node,
+            _marker: PhantomData,
+        })
     }
 
     /// # SAFETY
@@ -200,10 +192,10 @@ impl GcHeap {
         partition_id: GcPartitionId,
         payload: T,
     ) -> Result<GcLocal<T>, (GcError, T)> {
-        match unsafe { self.alloc_raw(partition_id, payload) } {
-            Ok(gc_ref) => Ok(GcLocal::new(self, gc_ref)),
-            Err(e) => Err(e),
-        }
+        let r = unsafe { self.alloc_raw(partition_id, payload)? };
+        log::trace!("[local_node]: {:?}", r.gc_head());
+
+        Ok(GcLocal::new(self, r))
     }
 
     /// Dispose a node

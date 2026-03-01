@@ -5,25 +5,23 @@ use std::ptr::NonNull;
 
 use crate::{GcPartition, GcPartitionId, heap::GcHeap, node::GcHead};
 
-pub trait LinkNode {
-    fn next_mut(&mut self) -> &mut Option<NonNull<Self>>;
-}
-
-impl LinkNode for GcHead {
-    fn next_mut(&mut self) -> &mut Option<NonNull<Self>> {
-        &mut self.next
-    }
-}
-
 #[derive(Debug, Default)]
 #[repr(transparent)]
-pub struct GcNodeLink {
+pub(crate) struct GcNodeLink {
     link_head: Option<NonNull<GcHead>>,
 }
 
 impl GcNodeLink {
     pub fn new(head: Option<NonNull<GcHead>>) -> Self {
         Self { link_head: head }
+    }
+
+    pub fn into_inner(self) -> Option<NonNull<GcHead>> {
+        self.link_head
+    }
+
+    pub fn head(&self) -> Option<NonNull<GcHead>> {
+        self.link_head
     }
 
     /// Prepend node to the head of the link, link head is updated
@@ -102,25 +100,58 @@ impl<'a> Iterator for NodeLinkIter<'a> {
     type Item = NonNull<GcHead>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let cur = self.current?;
-        unsafe {
-            self.current = (*cur.as_ptr()).next;
+        if let Some(current) = self.current {
+            self.current = unsafe { current.as_ref().next };
+            Some(current)
+        } else {
+            None
         }
-        Some(cur)
     }
 }
 
 impl GcHeap {
     #[inline]
     pub fn nodes(&self, partition_id: GcPartitionId) -> NodeLinkIter<'_> {
-        NodeLinkIter::new(self.partitions.get(&partition_id).and_then(|p| p.nodes))
+        NodeLinkIter::new(
+            self.partitions
+                .get(&partition_id)
+                .and_then(|p| p.nodes.head()),
+        )
+    }
+}
+
+pub struct NodeLinkIterMut<'a> {
+    current: Option<NonNull<GcHead>>,
+    _marker: std::marker::PhantomData<&'a mut GcHead>,
+}
+
+impl<'a> NodeLinkIterMut<'a> {
+    pub fn new(head: Option<NonNull<GcHead>>) -> Self {
+        Self {
+            current: head,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<'a> Iterator for NodeLinkIterMut<'a> {
+    type Item = &'a mut GcHead;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(current) = self.current {
+            unsafe {
+                self.current = current.as_ref().next;
+                Some(&mut *current.as_ptr())
+            }
+        } else {
+            None
+        }
     }
 }
 
 impl GcPartition {
-    #[inline]
-    pub fn nodes(&self) -> NodeLinkIter<'_> {
-        NodeLinkIter::new(self.nodes)
+    pub fn nodes_mut(&mut self) -> NodeLinkIterMut<'_> {
+        NodeLinkIterMut::new(self.nodes.head())
     }
 }
 
