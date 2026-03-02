@@ -75,6 +75,8 @@ pub struct GcHead {
     pub(super) next: Option<NonNull<GcHead>>,
 
     #[cfg(debug_assertions)]
+    pub(crate) dbg_scope_level: u8,
+    #[cfg(debug_assertions)]
     pub(crate) dbg_string: std::borrow::Cow<'static, str>,
 }
 
@@ -85,20 +87,21 @@ impl std::fmt::Debug for GcHead {
             .field("partition", &self.partition_id())
             .field("color", &self.color());
 
+        if self.is_root() {
+            s.field("root", &true);
+        }
         if self.is_protected() {
-            s.field("protected", &self.protect_count());
+            s.field("protect", &self.protect_count());
         }
         if !self.weak_id.is_null() {
             let w = self.weak_id;
             s.field("weakref", &format!("{}#{}", w.index(), w.version()));
         }
-        // if !self.xref().is_null() {
-        //     s.field("xref", &self.xref());
-        // }
 
         #[cfg(debug_assertions)]
         {
-            s.field("dbg_string", &self.dbg_string);
+            s.field("scope", &self.dbg_scope_level)
+                .field("dbg_string", &self.dbg_string);
         }
 
         s.finish()

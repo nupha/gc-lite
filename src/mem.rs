@@ -109,6 +109,8 @@ impl GcHeap {
                         next: None,
 
                         #[cfg(debug_assertions)]
+                        dbg_scope_level: self.scope_level() as u8,
+                        #[cfg(debug_assertions)]
                         dbg_string: std::any::type_name::<T>().into(),
                     };
 
