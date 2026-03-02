@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-mod ctx;
 pub mod gctype;
 mod heap;
 mod helpers;
@@ -10,17 +9,18 @@ mod mem;
 mod node;
 mod node_iterator;
 mod partition;
+mod scope;
 mod trace;
 mod weak;
 mod xref;
 
 pub use {
-    ctx::GcContext,
     gctype::{GcTypeInfo, GcTypeRegistry, drop_fn as gctype_drop, trace_fn as gctype_trace},
     heap::{GcHeap, GcNodeGuard},
     helpers::{GcError, GcResult},
     node::{GcHead, GcLocal, GcNode, GcRef},
     partition::{GcPartition, GcPartitionId},
+    scope::GcContext,
     trace::{GcTrace, GcTraceCtx},
     weak::GcWeak,
 };
