@@ -42,10 +42,9 @@ impl Drop for GcHeap {
             }
         }
 
-        let mut pars = std::mem::take(&mut self.partitions);
-        for (_, mut partition) in pars.drain() {
-            let nodes = std::mem::take(&mut partition.nodes);
-            self.dispose_all_nodes(nodes, Self::DUMMY_DISPOSE_CALLBACK);
+        let pars = std::mem::take(&mut self.partitions);
+        for (_, partition) in pars {
+            self.dispose_all_nodes(partition.nodes, Self::DUMMY_DISPOSE_CALLBACK);
         }
 
         #[cfg(debug_assertions)]

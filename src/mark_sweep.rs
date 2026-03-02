@@ -29,14 +29,16 @@ impl GcHeap {
         }
     }
 
-    /// ensure marking cycle is started:
+    /// ensure marking is in progress,
     /// if marking is in progress, exit do nothing;
-    /// if marking is done, start new cycle, add initialize gray list with root nodes.
-    pub fn ensure_mark_cycle(&mut self, partition_id: GcPartitionId) {
+    /// if marking cycle is not started, start new cycle.
+    pub fn mark_prepare(&mut self, partition_id: GcPartitionId) {
         if let Some(par) = self.partitions.get_mut(&partition_id)
             && !par.is_marking()
         {
             debug_assert!(par.gray_list.is_empty());
+
+            par.set_marking(true);
 
             // reset nodes color to white
             for mut n in par.nodes.iter() {
@@ -45,9 +47,7 @@ impl GcHeap {
                 }
             }
 
-            par.set_marking(true);
-
-            // add root nodes
+            // tracing from root nodes
             for n in par.root_nodes.iter() {
                 let mut root = *n;
                 unsafe {
@@ -120,7 +120,7 @@ impl GcHeap {
     }
 
     pub fn mark(&mut self, partition_id: GcPartitionId, max_steps: usize) -> bool {
-        self.ensure_mark_cycle(partition_id);
+        self.mark_prepare(partition_id);
         if max_steps > 0 {
             self.mark_grays(partition_id, max_steps)
         } else {
