@@ -33,27 +33,27 @@ impl GcHeap {
     /// if marking is in progress, exit do nothing;
     /// if marking is done, start new cycle, add initialize gray list with root nodes.
     pub fn ensure_mark_cycle(&mut self, partition_id: GcPartitionId) {
-        if let Some(par) = self.partitions.get_mut(&partition_id) {
-            if !par.is_marking() {
-                debug_assert!(par.gray_list.is_empty());
+        if let Some(par) = self.partitions.get_mut(&partition_id)
+            && !par.is_marking()
+        {
+            debug_assert!(par.gray_list.is_empty());
 
-                // reset nodes color to white
-                for mut n in par.nodes.iter() {
-                    unsafe {
-                        n.as_mut().set_color(GcTriColor::White);
-                    }
+            // reset nodes color to white
+            for mut n in par.nodes.iter() {
+                unsafe {
+                    n.as_mut().set_color(GcTriColor::White);
                 }
+            }
 
-                par.set_marking(true);
+            par.set_marking(true);
 
-                // add root nodes
-                for n in par.root_nodes.iter() {
-                    let mut root = *n;
-                    unsafe {
-                        root.as_mut().set_color(GcTriColor::Gray);
-                    }
-                    par.gray_list.push(root);
+            // add root nodes
+            for n in par.root_nodes.iter() {
+                let mut root = *n;
+                unsafe {
+                    root.as_mut().set_color(GcTriColor::Gray);
                 }
+                par.gray_list.push(root);
             }
         }
     }
@@ -264,56 +264,44 @@ impl GcHeap {
     /// Dispose all nodes along chain
     pub(crate) fn dispose_all_nodes(
         &mut self,
-        link: GcNodeLink,
+        mut link: GcNodeLink,
         on_dispose: impl Fn(&GcHeap, &GcHead),
     ) -> usize {
         let call_on_dispose = !std::ptr::addr_eq(&on_dispose, &Self::DUMMY_DISPOSE_CALLBACK);
-        let mut link = link.into_inner();
         let mut freed_bytes = 0;
 
         let pass_slice = self.node_dtypes.drop_passes;
         for &pass in pass_slice {
-            log::trace!(
-                "[dipose_all] pass {pass}, count={}",
-                NodeLinkIter::new(link).count()
+            log::trace!("[dipose_all] pass {pass}, count={}", link.len());
+
+            let self_ptr: *mut GcHeap = self;
+
+            link.filter_remove_with(
+                |node| {
+                    #[cfg(debug_assertions)]
+                    unsafe {
+                        node.debug_assert_node_valid(&*self_ptr);
+                    }
+
+                    let dtype = node.dtype() as usize;
+                    let info = unsafe { &(*self_ptr).node_dtypes.type_info_list[dtype] };
+                    info.drop_pass == pass
+                },
+                |node_ptr| unsafe {
+                    if call_on_dispose {
+                        on_dispose(&*self_ptr, node_ptr.as_ref());
+                    }
+
+                    freed_bytes += (&mut *self_ptr).dispose(node_ptr);
+                },
             );
 
-            let mut current = link;
-            let mut prev: Option<NonNull<GcHead>> = None;
-
-            while let Some(this) = current {
-                unsafe {
-                    #[cfg(debug_assertions)]
-                    this.as_ref().debug_assert_node_valid(self);
-
-                    current = this.as_ref().next;
-
-                    let dtype = this.as_ref().dtype() as usize;
-                    let info = &self.node_dtypes.type_info_list[dtype];
-                    if info.drop_pass == pass {
-                        if let Some(mut p) = prev {
-                            p.as_mut().next = current;
-                        } else {
-                            link = current;
-                        }
-
-                        if call_on_dispose {
-                            on_dispose(self, this.as_ref());
-                        }
-
-                        freed_bytes += self.dispose(this);
-                    } else {
-                        prev = Some(this);
-                    }
-                }
-            }
-
-            if link.is_none() {
+            if link.head().is_none() {
                 break;
             }
         }
 
-        debug_assert!(link.is_none());
+        debug_assert!(link.head().is_none());
         log::trace!("[dipose_all] done, freed {} bytes", freed_bytes);
 
         freed_bytes
