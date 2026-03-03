@@ -5,7 +5,7 @@ use std::{cell::Cell, ptr::NonNull};
 
 use smallvec::SmallVec;
 
-use crate::{GcHead, GcHeap, node::GcTriColor, node_iterator::GcNodeLink};
+use crate::{GcHead, GcHeap, node::GcTriColor, node_link::GcNodeLink};
 
 /// Partition ID
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]

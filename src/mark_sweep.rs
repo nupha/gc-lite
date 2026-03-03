@@ -6,7 +6,7 @@ use std::ptr::NonNull;
 use crate::{
     GcHeap,
     node::{GcHead, GcTriColor},
-    node_iterator::{GcNodeLink, NodeLinkIter},
+    node_link::{GcNodeLink, NodeLinkIter},
     partition::GcPartitionId,
 };
 
@@ -229,7 +229,7 @@ impl GcHeap {
                 }
 
                 let p = self.partition_mut(partition_id).unwrap();
-                p.nodes = crate::node_iterator::GcNodeLink::new(link1);
+                p.nodes = crate::node_link::GcNodeLink::new(link1);
             }
 
             // Decrease partitions memory usage

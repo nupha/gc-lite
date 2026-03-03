@@ -7,7 +7,7 @@ mod helpers;
 mod mark_sweep;
 mod mem;
 mod node;
-mod node_iterator;
+mod node_link;
 mod partition;
 mod scope;
 mod trace;

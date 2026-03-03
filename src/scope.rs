@@ -55,6 +55,7 @@ impl<'heap> GcContext<'heap> {
         unsafe {
             let r = (*self.heap).alloc_raw(self.partition_id, payload)?;
             let mut head = r.head_ptr;
+
             #[cfg(debug_assertions)]
             {
                 let h = head.as_ref();
@@ -63,9 +64,9 @@ impl<'heap> GcContext<'heap> {
                     "node already in GcContext: {h:p}"
                 );
             }
-            unsafe {
-                head.as_mut().insert_flag(crate::node::GcNodeFlag::LOCAL);
-            }
+
+            head.as_mut().insert_flag(crate::node::GcNodeFlag::LOCAL);
+
             (*self.heap).do_protect_node(head);
             self.cache.borrow_mut().push(head);
             Ok(r)
@@ -175,6 +176,7 @@ impl<'heap> GcContext<'heap> {
 
 impl GcHeap {
     /// get max scope level
+    #[inline(always)]
     pub fn scope_level(&self) -> usize {
         self.scope_stack.len()
     }
@@ -196,10 +198,12 @@ impl GcHeap {
         self.scope_stack.push(static_ctx);
     }
 
+    #[inline(always)]
     pub fn pop_gc_scope(&mut self) -> Option<GcContext<'_>> {
         self.scope_stack.pop()
     }
 
+    #[inline]
     pub fn current_gc_scope(&self) -> Option<&GcContext<'_>> {
         let s = self.scope_stack.last();
         // SAFETY: It is safe because the GcHeap owns the GcContext, and we ensure that
@@ -207,6 +211,7 @@ impl GcHeap {
         unsafe { std::mem::transmute::<Option<&GcContext<'static>>, Option<&GcContext<'_>>>(s) }
     }
 
+    #[inline]
     pub fn with_current_scope<R>(&mut self, f: impl FnOnce(&mut GcContext) -> R) -> Option<R> {
         self.scope_stack.last_mut().map(f)
     }
