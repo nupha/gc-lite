@@ -51,15 +51,45 @@ impl<'heap> GcContext<'heap> {
         unsafe { &mut *self.heap }
     }
 
-    /// Allocate a node, and put it to scope cache to protect it.
     pub fn alloc<T: GcNode>(&mut self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
         unsafe {
             let r = (*self.heap).alloc_raw(self.partition_id, payload)?;
-            let head = r.head_ptr;
+            let mut head = r.head_ptr;
+            #[cfg(debug_assertions)]
+            {
+                let h = head.as_ref();
+                debug_assert!(
+                    !h.contains_flag(crate::node::GcNodeFlag::LOCAL),
+                    "node already in GcContext: {h:p}"
+                );
+            }
+            unsafe {
+                head.as_mut().insert_flag(crate::node::GcNodeFlag::LOCAL);
+            }
             (*self.heap).do_protect_node(head);
             self.cache.borrow_mut().push(head);
             Ok(r)
         }
+    }
+
+    pub fn add_non_local(&self, mut node: NonNull<GcHead>) -> bool {
+        unsafe {
+            if node.as_ref().is_local() {
+                return false;
+            }
+
+            #[cfg(debug_assertions)]
+            {
+                let heap = &*self.heap;
+                debug_assert!(heap.contains(node));
+            }
+
+            node.as_mut().insert_flag(crate::node::GcNodeFlag::LOCAL);
+            (*self.heap).do_protect_node(node);
+        }
+
+        self.cache.borrow_mut().push(node);
+        true
     }
 
     pub fn alloc_root<T: GcNode>(&mut self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
@@ -77,11 +107,14 @@ impl<'heap> GcContext<'heap> {
     /// this behaves like to drop current scope, and start a new scope.
     pub fn commit(&mut self) {
         let nodes = std::mem::take(self.cache.borrow_mut().deref_mut());
-        for n in nodes {
+        for mut n in nodes {
             #[cfg(debug_assertions)]
             unsafe {
-                let mut n = n;
                 n.as_mut().dbg_scope_level = 0;
+            }
+
+            unsafe {
+                n.as_mut().remove_flag(crate::node::GcNodeFlag::LOCAL);
             }
 
             self.heap_mut().do_unprotect_node(n);
@@ -131,12 +164,12 @@ impl<'heap> GcContext<'heap> {
     /// `nodes` 中节点的保护计数更新与根集合维护逻辑。
     /// 调用方必须保证这些节点即将被整体释放，不再通过 GC 访问。
     pub(super) unsafe fn abort(&self) {
-        // #[cfg(debug_assertions)]
-        // for n in self.cache.iter() {
-        //     println!("[O.o]    abort scope node: {:?}", n);
-        // }
-
-        self.cache.borrow_mut().clear();
+        let nodes = std::mem::take(self.cache.borrow_mut().deref_mut());
+        for mut n in nodes {
+            unsafe {
+                n.as_mut().remove_flag(crate::node::GcNodeFlag::LOCAL);
+            }
+        }
     }
 }
 
@@ -220,6 +253,40 @@ mod tests {
     }
 
     #[test]
+    fn test_gc_context_local_flag_set_and_cleared_on_commit() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition(4096);
+
+        let head;
+
+        {
+            let mut ctx = GcContext::new(&mut heap, partition_id);
+            let node: GcRef<Node> = ctx
+                .alloc(Node {
+                    next: None,
+                    value: 1,
+                })
+                .unwrap();
+
+            head = node.head_ptr;
+
+            unsafe {
+                assert!(head.as_ref().is_local());
+            }
+
+            ctx.commit();
+
+            unsafe {
+                assert!(!head.as_ref().is_local());
+            }
+        }
+
+        unsafe {
+            assert!(!head.as_ref().is_local());
+        }
+    }
+
+    #[test]
     fn test_gc_context_alloc_protects_and_unprotects_on_drop() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
@@ -237,6 +304,7 @@ mod tests {
             head = node.head_ptr;
 
             unsafe {
+                assert!(head.as_ref().is_local());
                 assert_eq!(head.as_ref().protect_count(), 1);
             }
 
@@ -249,12 +317,100 @@ mod tests {
         }
 
         unsafe {
+            assert!(!head.as_ref().is_local());
             assert_eq!(head.as_ref().protect_count(), 0);
         }
 
         while !heap.mark(partition_id, 64) {}
         let removed_after = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
         assert!(removed_after > 0);
+    }
+
+    #[test]
+    fn test_gc_context_add_sets_local_and_clears_on_commit() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition(4096);
+
+        let node: GcRef<Node> = unsafe {
+            heap.alloc_raw(
+                partition_id,
+                Node {
+                    next: None,
+                    value: 1,
+                },
+            )
+        }
+        .unwrap();
+
+        let head = node.head_ptr;
+
+        unsafe {
+            assert!(!head.as_ref().is_local());
+            assert_eq!(head.as_ref().protect_count(), 0);
+        }
+
+        {
+            let mut ctx = GcContext::new(&mut heap, partition_id);
+            let added = ctx.add_non_local(head);
+            assert!(added);
+
+            unsafe {
+                assert!(head.as_ref().is_local());
+                assert_eq!(head.as_ref().protect_count(), 1);
+            }
+
+            ctx.commit();
+
+            unsafe {
+                assert!(!head.as_ref().is_local());
+                assert_eq!(head.as_ref().protect_count(), 0);
+            }
+        }
+
+        unsafe {
+            assert!(!head.as_ref().is_local());
+            assert_eq!(head.as_ref().protect_count(), 0);
+        }
+
+        while !heap.mark(partition_id, 64) {}
+        let removed_after = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert!(removed_after > 0);
+    }
+
+    #[test]
+    fn test_gc_context_add_on_local_node_returns_false() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition(4096);
+
+        let mut ctx = GcContext::new(&mut heap, partition_id);
+        let node: GcRef<Node> = ctx
+            .alloc(Node {
+                next: None,
+                value: 1,
+            })
+            .unwrap();
+
+        let head = node.head_ptr;
+
+        unsafe {
+            assert!(head.as_ref().is_local());
+            assert_eq!(head.as_ref().protect_count(), 1);
+        }
+
+        let added = ctx.add_non_local(head);
+        assert!(!added);
+
+        unsafe {
+            assert!(head.as_ref().is_local());
+            assert_eq!(head.as_ref().protect_count(), 1);
+        }
+
+        ctx.commit();
+
+        unsafe {
+            assert!(!head.as_ref().is_local());
+            assert_eq!(head.as_ref().protect_count(), 0);
+        }
     }
 
     #[test]
@@ -279,6 +435,7 @@ mod tests {
             unsafe {
                 assert!(node.is_root());
                 assert!(head.as_ref().is_root());
+                assert!(!head.as_ref().is_local());
                 assert_eq!(head.as_ref().protect_count(), 0);
             }
         }
@@ -435,6 +592,7 @@ mod tests {
             head = node.head_ptr;
 
             unsafe {
+                assert!(head.as_ref().is_local());
                 assert_eq!(head.as_ref().protect_count(), 1);
             }
 
@@ -442,6 +600,8 @@ mod tests {
             assert!(promoted);
 
             unsafe {
+                assert!(heap.scope_stack[0].contains(head));
+                assert!(head.as_ref().is_local());
                 assert_eq!(head.as_ref().protect_count(), 1);
             }
         }
@@ -461,6 +621,7 @@ mod tests {
         }
 
         unsafe {
+            assert!(!head.as_ref().is_local());
             assert_eq!(head.as_ref().protect_count(), 0);
         }
     }

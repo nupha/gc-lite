@@ -92,18 +92,7 @@ impl GcHeap {
                     }
 
                     let node_info = GcHead {
-                        attrs: {
-                            #[cfg(debug_assertions)]
-                            {
-                                0xFF00_0000
-                                    | ((gc_type as u32) << 8)
-                                    | (crate::node::GcNodeFlag::MAGIC_NUM.bits() as u32)
-                            }
-                            #[cfg(not(debug_assertions))]
-                            {
-                                0xFF00_0000 | ((gc_type as u32) << 8)
-                            }
-                        },
+                        attrs: { 0xFF00_0000 | ((gc_type as u32) << 8) },
                         partition: 0,
                         weak_id: GcWeakRawId::NULL,
                         next: None,

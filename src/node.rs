@@ -47,11 +47,11 @@ bitflags::bitflags! {
         /// is root node
         const ROOT = 1 << 5;
 
-        /// internal traversal visited flag
-        const TRAVERSE_VISITED = 1 << 6;
+        /// node is inside a GcContext
+        const LOCAL = 1 << 6;
 
-        #[cfg(debug_assertions)]
-        const MAGIC_NUM = 1 << 7;
+        /// internal traversal visited flag
+        const TRAVERSE_VISITED = 1 << 7;
     }
 }
 
@@ -85,7 +85,8 @@ impl std::fmt::Debug for GcHead {
         let mut s = f.debug_struct("GcNode");
         s.field("ptr", &(self as *const Self))
             .field("partition", &self.partition_id())
-            .field("color", &self.color());
+            .field("color", &self.color())
+            .field("local", &self.is_local());
 
         if self.is_root() {
             s.field("root", &true);
@@ -192,6 +193,11 @@ impl GcHead {
     #[inline(always)]
     pub fn is_root(&self) -> bool {
         self.contains_flag(GcNodeFlag::ROOT)
+    }
+
+    #[inline(always)]
+    pub fn is_local(&self) -> bool {
+        self.contains_flag(GcNodeFlag::LOCAL)
     }
 
     #[inline(always)]
@@ -567,8 +573,7 @@ impl GcHead {
     pub fn debug_assert_node_valid_simple(&self) {
         if !std::thread::panicking() {
             debug_assert!(
-                self.flags().contains(GcNodeFlag::MAGIC_NUM)
-                    && self.next.is_none_or(|n| n.is_aligned()),
+                ((self.attrs >> 24) & 0xFF) == 0xFF && self.next.is_none_or(|n| n.is_aligned()),
                 "bad node: {self:p}"
             );
         }
