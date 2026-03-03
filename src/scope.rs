@@ -141,8 +141,18 @@ impl<'heap> GcContext<'heap> {
 }
 
 impl GcHeap {
+    /// get max scope level
     pub fn scope_level(&self) -> usize {
         self.scope_stack.len()
+    }
+
+    /// get scope by level
+    pub fn scope(&self, level: usize) -> Option<&GcContext<'_>> {
+        if level > 0 {
+            self.scope_stack.get(level - 1)
+        } else {
+            None
+        }
     }
 
     pub fn push_gc_scope(&mut self, partition_id: GcPartitionId) {
