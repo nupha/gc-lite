@@ -200,6 +200,12 @@ impl GcHead {
         self.contains_flag(GcNodeFlag::LOCAL)
     }
 
+    #[inline]
+    pub fn is_root_or_local(&self) -> bool {
+        let f = self.flags();
+        f.intersects(GcNodeFlag::ROOT | GcNodeFlag::LOCAL)
+    }
+
     #[inline(always)]
     pub(super) fn traverse_visited(&self) -> bool {
         self.contains_flag(GcNodeFlag::TRAVERSE_VISITED)

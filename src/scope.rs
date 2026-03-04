@@ -1,4 +1,4 @@
-use std::ops::DerefMut;
+use std::{num::NonZeroU8, ops::DerefMut};
 
 use {core::ptr::NonNull, std::cell::RefCell, std::marker::PhantomData};
 
@@ -13,25 +13,31 @@ use crate::{
 
 #[derive(Debug)]
 pub struct GcContext<'heap> {
-    heap: *mut GcHeap,
+    heap: NonNull<GcHeap>,
     partition_id: GcPartitionId,
+    depth: NonZeroU8,
     cache: RefCell<SmallVec<[NonNull<GcHead>; 8]>>,
+    promote: RefCell<Option<NonNull<GcHead>>>,
     _marker: PhantomData<&'heap mut GcHeap>,
 }
 
 impl<'heap> Drop for GcContext<'heap> {
     fn drop(&mut self) {
-        self.commit();
+        self.flush();
     }
 }
 
 impl<'heap> GcContext<'heap> {
     pub fn new(heap: &'heap mut GcHeap, partition_id: GcPartitionId) -> Self {
         debug_assert!(!partition_id.is_null());
+        let depth = heap.scope_stack.len() + 1;
+
         Self {
-            heap: heap as *mut _,
+            heap: NonNull::from_ref(heap),
             partition_id,
+            depth: NonZeroU8::new(depth as u8).unwrap(),
             cache: RefCell::new(SmallVec::new()),
+            promote: RefCell::new(None),
             _marker: PhantomData,
         }
     }
@@ -43,17 +49,39 @@ impl<'heap> GcContext<'heap> {
 
     #[inline(always)]
     pub fn heap(&self) -> &GcHeap {
-        unsafe { &*self.heap }
+        unsafe { self.heap.as_ref() }
     }
 
     #[inline(always)]
     pub fn heap_mut(&mut self) -> &mut GcHeap {
-        unsafe { &mut *self.heap }
+        unsafe { self.heap.as_mut() }
     }
 
-    pub fn alloc<T: GcNode>(&mut self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
+    #[inline(always)]
+    pub fn depth(&self) -> u8 {
+        self.depth.get()
+    }
+
+    /// get parent scope, and its level.
+    pub fn parent(&self) -> Option<(&GcContext<'_>, u8)> {
+        let d = self.depth();
+        if d > 1 {
+            let parent_index = d - 2;
+
+            self.heap().scope_stack.get(parent_index as usize).map(|s| {
+                (
+                    unsafe { std::mem::transmute::<&GcContext<'static>, &GcContext<'_>>(s) },
+                    d - 1,
+                )
+            })
+        } else {
+            None
+        }
+    }
+
+    pub fn alloc<T: GcNode>(&self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
         unsafe {
-            let r = (*self.heap).alloc_raw(self.partition_id, payload)?;
+            let r = (*self.heap.as_ptr()).alloc_raw(self.partition_id, payload)?;
             let mut head = r.head_ptr;
 
             #[cfg(debug_assertions)]
@@ -67,12 +95,25 @@ impl<'heap> GcContext<'heap> {
 
             head.as_mut().insert_flag(crate::node::GcNodeFlag::LOCAL);
 
-            (*self.heap).do_protect_node(head);
+            (*self.heap.as_ptr()).do_protect_node(head);
             self.cache.borrow_mut().push(head);
+
             Ok(r)
         }
     }
 
+    pub fn alloc_root<T: GcNode>(&self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
+        unsafe { (*self.heap.as_ptr()).alloc_root_raw(self.partition_id, payload) }
+    }
+
+    #[deprecated]
+    pub fn alloc_local<T: GcNode>(&self, payload: T) -> Result<GcLocal<T>, (GcError, T)> {
+        //  unsafe { (*self.heap).alloc_local_raw(self.partition_id, payload) }
+        let r = self.alloc(payload)?;
+        Ok(GcLocal::new(unsafe { &mut *self.heap.as_ptr() }, r))
+    }
+
+    // if node is not local, then add it to `self` scope
     pub fn add_non_local(&self, mut node: NonNull<GcHead>) -> bool {
         unsafe {
             if node.as_ref().is_local() {
@@ -81,50 +122,82 @@ impl<'heap> GcContext<'heap> {
 
             #[cfg(debug_assertions)]
             {
-                let heap = &*self.heap;
-                debug_assert!(heap.contains(node));
+                node.as_mut().dbg_scope_level = 0;
             }
 
             node.as_mut().insert_flag(crate::node::GcNodeFlag::LOCAL);
-            (*self.heap).do_protect_node(node);
+            (*self.heap.as_ptr()).do_protect_node(node);
         }
 
         self.cache.borrow_mut().push(node);
         true
     }
 
-    pub fn alloc_root<T: GcNode>(&mut self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
-        unsafe { (*self.heap).alloc_root_raw(self.partition_id, payload) }
+    /// Set a node to be promoted.
+    ///
+    /// Promote means when the scope is dropped, the node will be added to upper scope.
+    pub fn set_promote(&self, node: Option<NonNull<GcHead>>) {
+        if let Some(mut n) = node {
+            unsafe {
+                n.as_mut().insert_flag(crate::node::GcNodeFlag::LOCAL);
+                (*self.heap.as_ptr()).do_protect_node(n);
+            }
+        }
+
+        *self.promote.borrow_mut() = node;
     }
 
-    #[deprecated]
-    pub fn alloc_local<T: GcNode>(&mut self, payload: T) -> Result<GcLocal<T>, (GcError, T)> {
-        //  unsafe { (*self.heap).alloc_local_raw(self.partition_id, payload) }
-        let r = self.alloc(payload)?;
-        Ok(GcLocal::new(unsafe { &mut *self.heap }, r))
-    }
-
-    /// confirm and clear current cached nodes, restart to cache new nodes.
+    /// clear and unprotect cached nodes.
     /// this behaves like to drop current scope, and start a new scope.
-    pub fn commit(&mut self) {
-        let nodes = std::mem::take(self.cache.borrow_mut().deref_mut());
-        for mut n in nodes {
-            #[cfg(debug_assertions)]
-            unsafe {
-                n.as_mut().dbg_scope_level = 0;
+    pub fn flush(&self) {
+        let promote: Option<NonNull<GcHead>> = self.promote.borrow_mut().take();
+
+        if let Some(mut p) = promote {
+            if let Some((up, _lev)) = self.parent() {
+                // put to upper scope cache
+                up.cache.borrow_mut().push(p);
+
+                #[cfg(debug_assertions)]
+                unsafe {
+                    p.as_mut().dbg_scope_level = _lev as _;
+                }
+            } else {
+                // can't promote, unprotect it
+                unsafe {
+                    p.as_mut().remove_flag(crate::node::GcNodeFlag::LOCAL);
+
+                    (*self.heap.as_ptr()).do_unprotect_node(p);
+
+                    #[cfg(debug_assertions)]
+                    {
+                        p.as_mut().dbg_scope_level = 0;
+                    }
+                }
+            }
+        }
+
+        for mut n in std::mem::take(self.cache.borrow_mut().deref_mut()) {
+            if promote.is_none_or(|p| !std::ptr::eq(n.as_ptr(), p.as_ptr())) {
+                unsafe {
+                    n.as_mut().remove_flag(crate::node::GcNodeFlag::LOCAL);
+
+                    #[cfg(debug_assertions)]
+                    {
+                        n.as_mut().dbg_scope_level = 0;
+                    }
+                }
             }
 
             unsafe {
-                n.as_mut().remove_flag(crate::node::GcNodeFlag::LOCAL);
+                (*self.heap.as_ptr()).do_unprotect_node(n);
             }
-
-            self.heap_mut().do_unprotect_node(n);
         }
     }
 
     /// promote node
+    #[deprecated]
     pub fn promote(&self, node: NonNull<GcHead>) -> bool {
-        let heap = unsafe { &mut *self.heap };
+        let heap = unsafe { &mut *self.heap.as_ptr() };
         let self_ptr = self as *const Self as *mut ();
 
         if heap.scope_stack.len() > 1
@@ -165,6 +238,8 @@ impl<'heap> GcContext<'heap> {
     /// `nodes` 中节点的保护计数更新与根集合维护逻辑。
     /// 调用方必须保证这些节点即将被整体释放，不再通过 GC 访问。
     pub(super) unsafe fn abort(&self) {
+        self.promote.borrow_mut().take();
+
         let nodes = std::mem::take(self.cache.borrow_mut().deref_mut());
         for mut n in nodes {
             unsafe {
@@ -175,27 +250,28 @@ impl<'heap> GcContext<'heap> {
 }
 
 impl GcHeap {
-    /// get max scope level
     #[inline(always)]
-    pub fn scope_level(&self) -> usize {
-        self.scope_stack.len()
+    pub fn scope_max_depth(&self) -> u8 {
+        self.scope_stack.len() as _
     }
 
-    /// get scope by level
-    pub fn scope(&self, level: usize) -> Option<&GcContext<'_>> {
-        if level > 0 {
-            self.scope_stack.get(level - 1)
+    /// get scope by depth
+    pub fn scope(&self, depth: u8) -> Option<&GcContext<'_>> {
+        if depth > 0 {
+            self.scope_stack.get(depth as usize - 1)
         } else {
             None
         }
     }
 
-    pub fn push_gc_scope(&mut self, partition_id: GcPartitionId) {
+    pub fn push_gc_scope(&mut self, partition_id: GcPartitionId) -> &GcContext<'_> {
         let ctx = GcContext::new(self, partition_id);
         // SAFETY: It is safe because the GcHeap owns the GcContext, and we ensure that
         // the GcContext does not outlive the GcHeap.
         let static_ctx = unsafe { std::mem::transmute::<GcContext<'_>, GcContext<'static>>(ctx) };
         self.scope_stack.push(static_ctx);
+
+        self.scope_stack.last().unwrap()
     }
 
     #[inline(always)]
@@ -204,7 +280,7 @@ impl GcHeap {
     }
 
     #[inline]
-    pub fn current_gc_scope(&self) -> Option<&GcContext<'_>> {
+    pub fn current_scope(&self) -> Option<&GcContext<'_>> {
         let s = self.scope_stack.last();
         // SAFETY: It is safe because the GcHeap owns the GcContext, and we ensure that
         // the GcContext does not outlive the GcHeap.
@@ -219,13 +295,14 @@ impl GcHeap {
     pub fn with_new_scope<R>(
         &mut self,
         partition_id: GcPartitionId,
-        f: impl FnOnce(&mut GcContext<'_>) -> R,
+        f: impl FnOnce(&GcContext<'_>) -> R,
     ) -> R {
         self.push_gc_scope(partition_id);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             f(self.scope_stack.last_mut().unwrap())
         }));
         self.pop_gc_scope();
+
         match result {
             Ok(r) => r,
             Err(e) => std::panic::resume_unwind(e),
@@ -279,7 +356,7 @@ mod tests {
                 assert!(head.as_ref().is_local());
             }
 
-            ctx.commit();
+            ctx.flush();
 
             unsafe {
                 assert!(!head.as_ref().is_local());
@@ -318,7 +395,7 @@ mod tests {
                 .heap_mut()
                 .sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
             assert_eq!(removed, 0);
-            ctx.commit();
+            ctx.flush();
         }
 
         unsafe {
@@ -364,7 +441,7 @@ mod tests {
                 assert_eq!(head.as_ref().protect_count(), 1);
             }
 
-            ctx.commit();
+            ctx.flush();
 
             unsafe {
                 assert!(!head.as_ref().is_local());
@@ -410,7 +487,7 @@ mod tests {
             assert_eq!(head.as_ref().protect_count(), 1);
         }
 
-        ctx.commit();
+        ctx.flush();
 
         unsafe {
             assert!(!head.as_ref().is_local());
@@ -488,7 +565,7 @@ mod tests {
                 .heap_mut()
                 .sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
             assert_eq!(removed, 0);
-            ctx.commit();
+            ctx.flush();
         }
 
         unsafe {
@@ -561,7 +638,7 @@ mod tests {
                 assert_eq!(head.as_ref().protect_count(), 1);
             }
 
-            ctx.commit();
+            ctx.flush();
 
             unsafe {
                 assert_eq!(head.as_ref().protect_count(), 0);
@@ -573,6 +650,70 @@ mod tests {
                 .sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
             assert!(removed_before > 0);
         }
+    }
+
+    #[test]
+    fn test_gc_context_level_for_heap_scopes() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition(4096);
+
+        assert_eq!(heap.scope_max_depth(), 0);
+
+        heap.push_gc_scope(partition_id);
+        heap.push_gc_scope(partition_id);
+        heap.push_gc_scope(partition_id);
+
+        assert_eq!(heap.scope_max_depth(), 3);
+
+        for level in 1..=3 {
+            let ctx = heap.scope(level).unwrap();
+            assert_eq!(ctx.depth(), level);
+        }
+
+        heap.pop_gc_scope();
+        assert_eq!(heap.scope_max_depth(), 2);
+        for level in 1..=2 {
+            let ctx = heap.scope(level).unwrap();
+            assert_eq!(ctx.depth(), level);
+        }
+
+        heap.pop_gc_scope();
+        assert_eq!(heap.scope_max_depth(), 1);
+        let ctx = heap.scope(1).unwrap();
+        assert_eq!(ctx.depth(), 1);
+    }
+
+    #[test]
+    fn test_gc_context_parent_mut_returns_parent_and_level() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition(4096);
+
+        heap.push_gc_scope(partition_id);
+        heap.push_gc_scope(partition_id);
+        heap.push_gc_scope(partition_id);
+
+        heap.with_current_scope(|ctx| {
+            assert_eq!(ctx.depth(), 3);
+            let (parent, parent_level) = ctx.parent().unwrap();
+            assert_eq!(parent_level, 2);
+            assert_eq!(parent.depth(), 2);
+        });
+
+        heap.pop_gc_scope();
+
+        heap.with_current_scope(|ctx| {
+            assert_eq!(ctx.depth(), 2);
+            let (parent, parent_level) = ctx.parent().unwrap();
+            assert_eq!(parent_level, 1);
+            assert_eq!(parent.depth(), 1);
+        });
+
+        heap.pop_gc_scope();
+
+        heap.with_current_scope(|ctx| {
+            assert_eq!(ctx.depth(), 1);
+            assert!(ctx.parent().is_none());
+        });
     }
 
     #[test]
@@ -632,6 +773,75 @@ mod tests {
     }
 
     #[test]
+    fn test_set_promote_moves_node_to_parent_scope_and_keeps_protection() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition(4096);
+
+        heap.push_gc_scope(partition_id);
+        heap.push_gc_scope(partition_id);
+
+        let promoted_head;
+        let other_head;
+
+        {
+            let ctx = heap.scope_stack.last_mut().unwrap();
+            let promoted: GcRef<Node> = ctx
+                .alloc(Node {
+                    next: None,
+                    value: 1,
+                })
+                .unwrap();
+            let other: GcRef<Node> = ctx
+                .alloc(Node {
+                    next: None,
+                    value: 2,
+                })
+                .unwrap();
+
+            promoted_head = promoted.head_ptr;
+            other_head = other.head_ptr;
+
+            unsafe {
+                assert!(promoted_head.as_ref().is_local());
+                assert!(other_head.as_ref().is_local());
+                assert_eq!(promoted_head.as_ref().protect_count(), 1);
+                assert_eq!(other_head.as_ref().protect_count(), 1);
+            }
+
+            ctx.set_promote(Some(promoted_head));
+        }
+
+        heap.with_current_scope(|ctx| ctx.flush());
+
+        unsafe {
+            assert!(promoted_head.as_ref().is_local());
+            assert_eq!(promoted_head.as_ref().protect_count(), 1);
+            assert!(!other_head.as_ref().is_local());
+            assert_eq!(other_head.as_ref().protect_count(), 0);
+        }
+
+        {
+            let parent_ctx = heap.scope_stack.first().unwrap();
+            assert!(parent_ctx.contains(promoted_head));
+        }
+
+        {
+            let child_ctx = heap.scope_stack.last().unwrap();
+            assert!(!child_ctx.contains(promoted_head));
+        }
+
+        {
+            let parent_ctx = heap.scope_stack.first_mut().unwrap();
+            parent_ctx.flush();
+        }
+
+        unsafe {
+            assert!(!promoted_head.as_ref().is_local());
+            assert_eq!(promoted_head.as_ref().protect_count(), 0);
+        }
+    }
+
+    #[test]
     fn test_scope_promote_in_top_level_scope_returns_false() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
@@ -669,6 +879,41 @@ mod tests {
         }
 
         unsafe {
+            assert_eq!(head.as_ref().protect_count(), 0);
+        }
+    }
+
+    #[test]
+    fn test_set_promote_in_top_level_scope_is_noop() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition(4096);
+
+        heap.push_gc_scope(partition_id);
+
+        let head;
+
+        {
+            let ctx = heap.scope_stack.last_mut().unwrap();
+            let node: GcRef<Node> = ctx
+                .alloc(Node {
+                    next: None,
+                    value: 1,
+                })
+                .unwrap();
+
+            head = node.head_ptr;
+
+            unsafe {
+                assert!(head.as_ref().is_local());
+                assert_eq!(head.as_ref().protect_count(), 1);
+            }
+
+            ctx.set_promote(Some(head));
+            ctx.flush();
+        }
+
+        unsafe {
+            assert!(!head.as_ref().is_local());
             assert_eq!(head.as_ref().protect_count(), 0);
         }
     }

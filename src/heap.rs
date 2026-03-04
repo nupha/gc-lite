@@ -218,7 +218,6 @@ impl GcHeap {
         node.debug_assert_node_valid_simple();
 
         let count = node.dec_protect_count();
-
         if count == 0
             && !node.is_root()
             && let Some(par) = self.partition_mut(node.partition_id())
@@ -229,7 +228,39 @@ impl GcHeap {
         }
     }
 
+    /// Protec node from being gc collected.
+    ///
+    /// 1. if node is local or root, it's protected, returns true
+    /// 1. otherwise if has current scope, add node to current scope and returns true
+    /// 1. can't protect, returns false
+    pub fn protect_node_v2(&mut self, node: NonNull<GcHead>) -> bool {
+        self.current_scope().is_some_and(|s| s.add_non_local(node))
+    }
+
+    /// Protec nodes from being gc collected, for each node do following steps:
+    ///
+    /// 1. if node is local or root, do nothing
+    /// 1. if has current scope, add node to current scope
+    /// 1. can't protect, returns false
+    pub fn protect_nodes_iter_v2(&mut self, nodes: impl Iterator<Item = NonNull<GcHead>>) {
+        if let Some(s) = self.current_scope() {
+            for n in nodes {
+                s.add_non_local(n);
+            }
+        }
+    }
+
+    /// Protec nodes from being gc collected, for each node do following steps:
+    ///
+    /// 1. if node is local or root, do nothing
+    /// 1. if has current scope, add node to current scope
+    /// 1. can't protect, returns false
+    pub fn protect_nodes_v2(&mut self, nodes: &[NonNull<GcHead>]) {
+        self.protect_nodes_iter_v2(nodes.iter().copied());
+    }
+
     /// full protect
+    #[deprecated]
     #[must_use]
     pub fn protect_nodes_iter(
         &self,
@@ -252,12 +283,13 @@ impl GcHeap {
         }
     }
 
+    #[deprecated]
     #[must_use]
     pub fn protect_nodes(&self, nodes: &[NonNull<GcHead>]) -> GcNodeGuard<'_> {
         self.protect_nodes_iter(nodes.iter().copied())
     }
 
-    /// full protect
+    #[deprecated]
     #[must_use]
     pub fn protect_node(&self, node: NonNull<GcHead>) -> GcNodeGuard<'_> {
         self.protect_nodes(&[node])
@@ -493,7 +525,7 @@ mod heap_tests {
                     value: 1,
                 })
                 .unwrap();
-            ctx.commit();
+            ctx.flush();
             node.head_ptr
         });
 
