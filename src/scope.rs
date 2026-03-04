@@ -342,7 +342,7 @@ mod tests {
         let head;
 
         {
-            let mut ctx = GcContext::new(&mut heap, partition_id);
+            let ctx = GcContext::new(&mut heap, partition_id);
             let node: GcRef<Node> = ctx
                 .alloc(Node {
                     next: None,
@@ -464,7 +464,7 @@ mod tests {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
 
-        let mut ctx = GcContext::new(&mut heap, partition_id);
+        let ctx = GcContext::new(&mut heap, partition_id);
         let node: GcRef<Node> = ctx
             .alloc(Node {
                 next: None,
@@ -503,14 +503,13 @@ mod tests {
         let head;
 
         {
-            let mut ctx = GcContext::new(&mut heap, partition_id);
-            let node: GcRef<Node> = unsafe {
-                ctx.alloc_root(Node {
+            let ctx = GcContext::new(&mut heap, partition_id);
+            let node: GcRef<Node> = ctx
+                .alloc_root(Node {
                     next: None,
                     value: 1,
                 })
-                .unwrap()
-            };
+                .unwrap();
 
             head = node.head_ptr;
 

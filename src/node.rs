@@ -442,7 +442,6 @@ impl<T: GcNode> GcRef<T> {
     }
 
     /// get node raw pointer
-    #[deprecated(note = "this may break write barrier. this is unsafe.")]
     #[inline(always)]
     pub fn node_ptr(&self) -> NonNull<GcHead> {
         self.head_ptr

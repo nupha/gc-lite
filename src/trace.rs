@@ -359,7 +359,7 @@ mod tests {
         let mut root = TestNode::new(0);
         root.add_child(a_ref);
         root.add_child(b_ref);
-        let root_ref = unsafe { heap.alloc_root_raw(partition_id, root) }.unwrap();
+        unsafe { heap.alloc_root_raw(partition_id, root) }.unwrap();
 
         // Mark reachable nodes
         while !heap.mark(partition_id, 8) {}

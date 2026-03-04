@@ -292,7 +292,7 @@ fn test_set_unlimited_memory() {
             heap.alloc_raw(
                 id,
                 TestData {
-                    value: allocated_count as i32,
+                    value: allocated_count,
                     name: format!("obj_{}", allocated_count),
                 },
             )
@@ -359,7 +359,7 @@ fn test_memory_usage_increases_with_allocation() {
             heap.alloc_raw(
                 id,
                 TestData {
-                    value: i as i32,
+                    value: i,
                     name: format!("obj_{}", i),
                 },
             )
@@ -383,7 +383,7 @@ fn test_memory_usage_increases_with_allocation() {
     assert!(final_memory > 0);
 
     // Verify memory was freed after GC
-    let root_obj = unsafe {
+    unsafe {
         heap.alloc_root_raw(
             id,
             TestData {
@@ -731,7 +731,7 @@ fn test_weak_reference_after_partition_removal() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
 
     // 创建两个同级的 partitions
-    let root_id = heap.create_partition(2048);
+    heap.create_partition(2048);
     let child_id = heap.create_partition(2048);
 
     // 在下属partition创建对象

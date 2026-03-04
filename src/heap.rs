@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{collections::HashMap, marker::PhantomData, ptr::NonNull};
-
-use smallvec::SmallVec;
+use std::{collections::HashMap, ptr::NonNull};
 
 use crate::{
     GcContext,
@@ -259,42 +257,6 @@ impl GcHeap {
         self.protect_nodes_iter_v2(nodes.iter().copied());
     }
 
-    /// full protect
-    #[deprecated]
-    #[must_use]
-    pub fn protect_nodes_iter(
-        &self,
-        nodes: impl Iterator<Item = NonNull<GcHead>>,
-    ) -> GcNodeGuard<'_> {
-        let mut lst = SmallVec::<[NonNull<GcHead>; 8]>::new();
-        let mut heap_ptr = NonNull::from_ref(self); // as *const Self as *mut Self;
-
-        for n in nodes {
-            unsafe {
-                heap_ptr.as_mut().do_protect_node(n);
-            }
-            lst.push(n);
-        }
-
-        GcNodeGuard {
-            nodes: lst,
-            heap: heap_ptr,
-            _mark: PhantomData,
-        }
-    }
-
-    #[deprecated]
-    #[must_use]
-    pub fn protect_nodes(&self, nodes: &[NonNull<GcHead>]) -> GcNodeGuard<'_> {
-        self.protect_nodes_iter(nodes.iter().copied())
-    }
-
-    #[deprecated]
-    #[must_use]
-    pub fn protect_node(&self, node: NonNull<GcHead>) -> GcNodeGuard<'_> {
-        self.protect_nodes(&[node])
-    }
-
     /// Update memory usage with rollup to parent partitions
     pub(crate) fn update_mem_use(&mut self, id: GcPartitionId, delta: i32) -> usize {
         if id.is_null() {
@@ -312,43 +274,6 @@ impl GcHeap {
         } else {
             0
         }
-    }
-}
-
-pub struct GcNodeGuard<'a> {
-    nodes: SmallVec<[NonNull<GcHead>; 8]>,
-    heap: NonNull<GcHeap>,
-
-    _mark: PhantomData<&'a ()>,
-}
-
-impl<'a> Drop for GcNodeGuard<'a> {
-    fn drop(&mut self) {
-        for node in self.nodes.drain(..) {
-            let heap = unsafe { self.heap.as_mut() };
-            heap.do_unprotect_node(node);
-        }
-    }
-}
-
-impl<'a> GcNodeGuard<'a> {
-    /// add an extra node to guard
-    pub fn add(&mut self, node: NonNull<GcHead>) {
-        if !self.nodes.contains(&node) {
-            unsafe {
-                self.heap.as_mut().do_protect_node(node);
-            }
-            self.nodes.push(node);
-        }
-    }
-
-    /// # Safety
-    ///
-    /// 仅供 `GcHeap::drop` 在销毁事务栈时调用，用于跳过对
-    /// `nodes` 中节点的保护计数更新与根集合维护逻辑。
-    /// 调用方必须保证这些节点即将被整体释放，不再通过 GC 访问。
-    unsafe fn abort(&mut self) {
-        self.nodes.clear();
     }
 }
 
@@ -374,40 +299,6 @@ mod heap_tests {
 
     crate::gc_type_register! {
         Node, drop_pass = 0;
-    }
-
-    #[test]
-    fn test_protect_count_and_guard_lifecycle() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
-
-        let node: GcRef<Node> = unsafe {
-            heap.alloc_raw(
-                partition_id,
-                Node {
-                    next: None,
-                    value: 1,
-                },
-            )
-        }
-        .unwrap();
-
-        let head = node.head_ptr;
-
-        unsafe {
-            assert_eq!(head.as_ref().protect_count(), 0);
-        }
-
-        {
-            let _g1 = heap.protect_nodes(&[head]);
-            unsafe {
-                assert_eq!(head.as_ref().protect_count(), 1);
-            }
-        }
-
-        unsafe {
-            assert_eq!(head.as_ref().protect_count(), 0);
-        }
     }
 
     #[test]

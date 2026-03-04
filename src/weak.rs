@@ -201,7 +201,7 @@ mod tests {
         let weak1 = GcWeak::<TestData1>::new(10, 1);
 
         // Test Clone
-        let weak2 = weak1.clone();
+        let weak2 = weak1;
         assert_eq!(weak1.index(), weak2.index());
 
         // Test Copy

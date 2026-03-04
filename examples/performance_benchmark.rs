@@ -234,19 +234,19 @@ fn benchmark_auto_gc_threshold() {
                 object_count += 1;
 
                 // Check if approaching threshold
-                if let Some(partition_info) = context.partition(partition) {
-                    if partition_info.memory_used() >= 1500 {
-                        println!(
-                            "  Reached automatic GC threshold, allocated {} objects",
-                            object_count
-                        );
-                        println!("  Estimated allocated memory: {} bytes", allocated_bytes);
-                        println!(
-                            "  Actual memory usage: {} bytes",
-                            partition_info.memory_used()
-                        );
-                        break;
-                    }
+                if let Some(partition_info) = context.partition(partition)
+                    && partition_info.memory_used() >= 1500
+                {
+                    println!(
+                        "  Reached automatic GC threshold, allocated {} objects",
+                        object_count
+                    );
+                    println!("  Estimated allocated memory: {} bytes", allocated_bytes);
+                    println!(
+                        "  Actual memory usage: {} bytes",
+                        partition_info.memory_used()
+                    );
+                    break;
                 }
             }
             Err(_) => {
