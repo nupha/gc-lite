@@ -174,7 +174,8 @@ impl GcHeap {
 
                         if drop_pass == pass
                             && this.as_ref().color() == GcTriColor::White
-                            && !this.as_ref().is_protected()
+                            && !this.as_ref().is_local()
+                        // && !this.as_ref().is_protected()
                         {
                             if let Some(mut p) = prev {
                                 p.as_mut().next = current;
@@ -221,8 +222,7 @@ impl GcHeap {
                     unsafe {
                         debug_assert!(
                             n.as_ref().color() == GcTriColor::Black
-                                || n.as_ref().is_root()
-                                || n.as_ref().is_protected(),
+                                || n.as_ref().is_root_or_local(),
                             "live nodes should be black, root or protected"
                         );
                     }

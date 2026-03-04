@@ -91,9 +91,6 @@ impl std::fmt::Debug for GcHead {
         if self.is_root() {
             s.field("root", &true);
         }
-        if self.is_protected() {
-            s.field("protect", &self.protect_count());
-        }
         if !self.weak_id.is_null() {
             let w = self.weak_id;
             s.field("weakref", &format!("{}#{}", w.index(), w.version()));
@@ -129,14 +126,15 @@ impl GcHead {
         self.attrs = (self.attrs & !COLOR_MASK) | (color as u32);
     }
 
-    #[inline(always)]
-    pub fn protect_count(&self) -> u8 {
-        ((self.attrs & PROTECT_COUNT_MASK) >> PROTECT_COUNT_SHIFT) as u8
-    }
-
+    #[deprecated(note = "use is_local() instead")]
     #[inline(always)]
     pub fn is_protected(&self) -> bool {
         (self.attrs & PROTECT_COUNT_MASK) != 0
+    }
+
+    #[inline(always)]
+    pub fn protect_count(&self) -> u8 {
+        ((self.attrs & PROTECT_COUNT_MASK) >> PROTECT_COUNT_SHIFT) as u8
     }
 
     #[inline(always)]
