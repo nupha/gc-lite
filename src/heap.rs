@@ -226,21 +226,21 @@ impl GcHeap {
         }
     }
 
-    /// Protec node from being gc collected.
+    /// Protect node from being gc collected.
     ///
     /// 1. if node is local or root, it's protected, returns true
     /// 1. otherwise if has current scope, add node to current scope and returns true
     /// 1. can't protect, returns false
-    pub fn protect_node_v2(&mut self, node: NonNull<GcHead>) -> bool {
+    pub fn protect_node(&mut self, node: NonNull<GcHead>) -> bool {
         self.current_scope().is_some_and(|s| s.add_non_local(node))
     }
 
-    /// Protec nodes from being gc collected, for each node do following steps:
+    /// Protect nodes from being gc collected, for each node do following steps:
     ///
     /// 1. if node is local or root, do nothing
     /// 1. if has current scope, add node to current scope
     /// 1. can't protect, returns false
-    pub fn protect_nodes_iter_v2(&mut self, nodes: impl Iterator<Item = NonNull<GcHead>>) {
+    pub fn protect_nodes_iter(&mut self, nodes: impl Iterator<Item = NonNull<GcHead>>) {
         if let Some(s) = self.current_scope() {
             for n in nodes {
                 s.add_non_local(n);
@@ -248,13 +248,13 @@ impl GcHeap {
         }
     }
 
-    /// Protec nodes from being gc collected, for each node do following steps:
+    /// Protect nodes from being gc collected, for each node do following steps:
     ///
     /// 1. if node is local or root, do nothing
     /// 1. if has current scope, add node to current scope
     /// 1. can't protect, returns false
-    pub fn protect_nodes_v2(&mut self, nodes: &[NonNull<GcHead>]) {
-        self.protect_nodes_iter_v2(nodes.iter().copied());
+    pub fn protect_nodes(&mut self, nodes: &[NonNull<GcHead>]) {
+        self.protect_nodes_iter(nodes.iter().copied());
     }
 
     /// Update memory usage with rollup to parent partitions
