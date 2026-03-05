@@ -12,7 +12,7 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub struct GcContext<'heap> {
+pub struct GcScope<'heap> {
     heap: NonNull<GcHeap>,
     partition_id: GcPartitionId,
     depth: NonZeroU8,
@@ -21,13 +21,13 @@ pub struct GcContext<'heap> {
     _marker: PhantomData<&'heap mut GcHeap>,
 }
 
-impl<'heap> Drop for GcContext<'heap> {
+impl<'heap> Drop for GcScope<'heap> {
     fn drop(&mut self) {
         self.flush();
     }
 }
 
-impl<'heap> GcContext<'heap> {
+impl<'heap> GcScope<'heap> {
     pub fn new(heap: &'heap mut GcHeap, partition_id: GcPartitionId) -> Self {
         debug_assert!(!partition_id.is_null());
         let depth = heap.scope_stack.len() + 1;
@@ -63,14 +63,14 @@ impl<'heap> GcContext<'heap> {
     }
 
     /// get parent scope, and its level.
-    pub fn parent(&self) -> Option<(&GcContext<'_>, u8)> {
+    pub fn parent(&self) -> Option<(&GcScope<'_>, u8)> {
         let d = self.depth();
         if d > 1 {
             let parent_index = d - 2;
 
             self.heap().scope_stack.get(parent_index as usize).map(|s| {
                 (
-                    unsafe { std::mem::transmute::<&GcContext<'static>, &GcContext<'_>>(s) },
+                    unsafe { std::mem::transmute::<&GcScope<'static>, &GcScope<'_>>(s) },
                     d - 1,
                 )
             })
@@ -284,7 +284,7 @@ impl GcHeap {
     }
 
     /// get scope by depth
-    pub fn scope(&self, depth: u8) -> Option<&GcContext<'_>> {
+    pub fn scope(&self, depth: u8) -> Option<&GcScope<'_>> {
         if depth > 0 {
             self.scope_stack.get(depth as usize - 1)
         } else {
@@ -292,38 +292,38 @@ impl GcHeap {
         }
     }
 
-    pub fn push_gc_scope(&mut self, partition_id: GcPartitionId) -> &GcContext<'_> {
-        let ctx = GcContext::new(self, partition_id);
+    pub fn push_gc_scope(&mut self, partition_id: GcPartitionId) -> &GcScope<'_> {
+        let ctx = GcScope::new(self, partition_id);
         // SAFETY: It is safe because the GcHeap owns the GcContext, and we ensure that
         // the GcContext does not outlive the GcHeap.
-        let static_ctx = unsafe { std::mem::transmute::<GcContext<'_>, GcContext<'static>>(ctx) };
+        let static_ctx = unsafe { std::mem::transmute::<GcScope<'_>, GcScope<'static>>(ctx) };
         self.scope_stack.push(static_ctx);
 
         self.scope_stack.last().unwrap()
     }
 
     #[inline(always)]
-    pub fn pop_gc_scope(&mut self) -> Option<GcContext<'_>> {
+    pub fn pop_gc_scope(&mut self) -> Option<GcScope<'_>> {
         self.scope_stack.pop()
     }
 
     #[inline]
-    pub fn current_scope(&self) -> Option<&GcContext<'_>> {
+    pub fn current_scope(&self) -> Option<&GcScope<'_>> {
         let s = self.scope_stack.last();
         // SAFETY: It is safe because the GcHeap owns the GcContext, and we ensure that
         // the GcContext does not outlive the GcHeap.
-        unsafe { std::mem::transmute::<Option<&GcContext<'static>>, Option<&GcContext<'_>>>(s) }
+        unsafe { std::mem::transmute::<Option<&GcScope<'static>>, Option<&GcScope<'_>>>(s) }
     }
 
     #[inline]
-    pub fn with_current_scope<R>(&mut self, f: impl FnOnce(&mut GcContext) -> R) -> Option<R> {
+    pub fn with_current_scope<R>(&mut self, f: impl FnOnce(&mut GcScope) -> R) -> Option<R> {
         self.scope_stack.last_mut().map(f)
     }
 
     pub fn with_new_scope<R>(
         &mut self,
         partition_id: GcPartitionId,
-        f: impl FnOnce(&GcContext<'_>) -> R,
+        f: impl FnOnce(&GcScope<'_>) -> R,
     ) -> R {
         self.push_gc_scope(partition_id);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -370,7 +370,7 @@ mod tests {
         let head;
 
         {
-            let ctx = GcContext::new(&mut heap, partition_id);
+            let ctx = GcScope::new(&mut heap, partition_id);
             let node: GcRef<Node> = ctx
                 .alloc(Node {
                     next: None,
@@ -403,7 +403,7 @@ mod tests {
 
         let head;
         {
-            let mut ctx = GcContext::new(&mut heap, partition_id);
+            let mut ctx = GcScope::new(&mut heap, partition_id);
             let node: GcRef<Node> = ctx
                 .alloc(Node {
                     next: None,
@@ -460,7 +460,7 @@ mod tests {
         }
 
         {
-            let mut ctx = GcContext::new(&mut heap, partition_id);
+            let mut ctx = GcScope::new(&mut heap, partition_id);
             let added = ctx.add_non_local(head);
             assert!(added);
 
@@ -492,7 +492,7 @@ mod tests {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
 
-        let ctx = GcContext::new(&mut heap, partition_id);
+        let ctx = GcScope::new(&mut heap, partition_id);
         let node: GcRef<Node> = ctx
             .alloc(Node {
                 next: None,
@@ -531,7 +531,7 @@ mod tests {
         let head;
 
         {
-            let ctx = GcContext::new(&mut heap, partition_id);
+            let ctx = GcScope::new(&mut heap, partition_id);
             let node: GcRef<Node> = ctx
                 .alloc_root(Node {
                     next: None,
@@ -565,7 +565,7 @@ mod tests {
         let head2;
 
         {
-            let mut ctx = GcContext::new(&mut heap, partition_id);
+            let mut ctx = GcScope::new(&mut heap, partition_id);
             let n1: GcRef<Node> = ctx
                 .alloc(Node {
                     next: None,
@@ -613,7 +613,7 @@ mod tests {
         let head;
 
         {
-            let mut ctx = GcContext::new(&mut heap, partition_id);
+            let mut ctx = GcScope::new(&mut heap, partition_id);
             let local: GcLocal<Node> = ctx
                 .alloc_local(Node {
                     next: None,
@@ -651,7 +651,7 @@ mod tests {
         let head;
 
         {
-            let mut ctx = GcContext::new(&mut heap, partition_id);
+            let mut ctx = GcScope::new(&mut heap, partition_id);
             let node: GcRef<Node> = ctx
                 .alloc(Node {
                     next: None,

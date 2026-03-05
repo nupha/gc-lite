@@ -4,7 +4,7 @@
 use std::{collections::HashMap, ptr::NonNull};
 
 use crate::{
-    GcContext,
+    GcScope,
     gctype::GcTypeRegistry,
     node::{GcHead, GcNodeFlag, GcTriColor},
     partition::{GcPartition, GcPartitionId},
@@ -16,7 +16,7 @@ pub struct GcHeap {
 
     /// Partition management
     pub(super) partitions: HashMap<GcPartitionId, GcPartition>,
-    pub(crate) scope_stack: Vec<GcContext<'static>>,
+    pub(crate) scope_stack: Vec<GcScope<'static>>,
     /// Weak reference list, each slot stores (version, GcHeader)
     pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
 
