@@ -89,7 +89,7 @@ impl<'heap> GcScope<'heap> {
                 let h = head.as_ref();
                 debug_assert!(
                     !h.contains_flag(crate::node::GcNodeFlag::LOCAL),
-                    "node already in GcContext: {h:p}"
+                    "node already in GcScope: {h:p}"
                 );
             }
 
@@ -294,8 +294,8 @@ impl GcHeap {
 
     pub fn push_gc_scope(&mut self, partition_id: GcPartitionId) -> &GcScope<'_> {
         let ctx = GcScope::new(self, partition_id);
-        // SAFETY: It is safe because the GcHeap owns the GcContext, and we ensure that
-        // the GcContext does not outlive the GcHeap.
+        // SAFETY: It is safe because the GcHeap owns the GcScope, and we ensure that
+        // the GcScope does not outlive the GcHeap.
         let static_ctx = unsafe { std::mem::transmute::<GcScope<'_>, GcScope<'static>>(ctx) };
         self.scope_stack.push(static_ctx);
 
@@ -310,8 +310,8 @@ impl GcHeap {
     #[inline]
     pub fn current_scope(&self) -> Option<&GcScope<'_>> {
         let s = self.scope_stack.last();
-        // SAFETY: It is safe because the GcHeap owns the GcContext, and we ensure that
-        // the GcContext does not outlive the GcHeap.
+        // SAFETY: It is safe because the GcHeap owns the GcScope, and we ensure that
+        // the GcScope does not outlive the GcHeap.
         unsafe { std::mem::transmute::<Option<&GcScope<'static>>, Option<&GcScope<'_>>>(s) }
     }
 
