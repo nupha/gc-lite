@@ -17,7 +17,7 @@ pub struct GcContext<'heap> {
     partition_id: GcPartitionId,
     depth: NonZeroU8,
     cache: RefCell<SmallVec<[NonNull<GcHead>; 8]>>,
-    promote: RefCell<Option<NonNull<GcHead>>>,
+    promote: RefCell<Option<(NonNull<GcHead>, bool)>>,
     _marker: PhantomData<&'heap mut GcHeap>,
 }
 
@@ -136,18 +136,18 @@ impl<'heap> GcContext<'heap> {
     /// Set a node to be promoted.
     ///
     /// Promote means when the scope is dropped, the node will be added to upper scope.
-    pub fn set_promote(&self, mut node: Option<NonNull<GcHead>>) {
+    pub fn set_promote(&self, node: Option<NonNull<GcHead>>) {
+        debug_assert_eq!(
+            self.depth(),
+            self.heap().scope_max_depth(),
+            "only inner-most scope can set_promote"
+        );
+
         // check current promote value
-        let cur = self.promote.borrow_mut().take();
-        if cur == node {
-            *self.promote.borrow_mut() = node;
-            return;
-        } else if let Some(mut p) = cur
-            && !self
-                .cache
-                .borrow()
-                .iter()
-                .any(|q| std::ptr::eq(p.as_ptr(), q.as_ptr()))
+        let prev = self.promote.borrow_mut().take();
+
+        if let Some((mut p, was_non_scoped)) = prev
+            && was_non_scoped
         {
             // avoid leak protect
             unsafe {
@@ -157,14 +157,17 @@ impl<'heap> GcContext<'heap> {
         }
 
         if self.depth() == 1 {
-            // has no upper scope, don't promote
-            node = None;
-        } else if let Some(mut n) = node {
+            return; // has no upper scope, don't promote
+        }
+
+        if let Some(mut n) = node {
             let h = unsafe { n.as_ref() };
+
             if h.is_root() {
-                // root node don't promote
-                node = None
-            } else if h.is_local() {
+                return; // root node don't promote
+            }
+
+            let was_non_scope = if h.is_local() {
                 if !self
                     .cache
                     .borrow()
@@ -172,24 +175,26 @@ impl<'heap> GcContext<'heap> {
                     .any(|p| std::ptr::eq(n.as_ptr(), p.as_ptr()))
                 {
                     // node is in other scope, don't promote
-                    node = None;
+                    return;
                 }
+                false
             } else {
                 // node is neither root nor local, protect it first
                 unsafe {
                     n.as_mut().insert_flag(crate::node::GcNodeFlag::LOCAL);
                     (*self.heap.as_ptr()).do_protect_node(n);
                 }
-            }
-        }
+                true
+            };
 
-        *self.promote.borrow_mut() = node;
+            *self.promote.borrow_mut() = Some((n, was_non_scope));
+        }
     }
 
     /// clear and unprotect cached nodes.
     /// this behaves like to drop current scope, and start a new scope.
     pub fn flush(&self) {
-        let promote: Option<NonNull<GcHead>> = self.promote.borrow_mut().take();
+        let promote: Option<NonNull<GcHead>> = self.promote.borrow_mut().take().map(|(p, _)| p);
 
         if let Some(mut p) = promote {
             let (up, _lev) = self.parent().unwrap();
