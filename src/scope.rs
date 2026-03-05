@@ -136,11 +136,50 @@ impl<'heap> GcContext<'heap> {
     /// Set a node to be promoted.
     ///
     /// Promote means when the scope is dropped, the node will be added to upper scope.
-    pub fn set_promote(&self, node: Option<NonNull<GcHead>>) {
-        if let Some(mut n) = node {
+    pub fn set_promote(&self, mut node: Option<NonNull<GcHead>>) {
+        // check current promote value
+        let cur = self.promote.borrow_mut().take();
+        if cur == node {
+            *self.promote.borrow_mut() = node;
+            return;
+        } else if let Some(mut p) = cur
+            && !self
+                .cache
+                .borrow()
+                .iter()
+                .any(|q| std::ptr::eq(p.as_ptr(), q.as_ptr()))
+        {
+            // avoid leak protect
             unsafe {
-                n.as_mut().insert_flag(crate::node::GcNodeFlag::LOCAL);
-                (*self.heap.as_ptr()).do_protect_node(n);
+                p.as_mut().remove_flag(crate::node::GcNodeFlag::LOCAL);
+                (*self.heap.as_ptr()).do_unprotect_node(p);
+            }
+        }
+
+        if self.depth() == 1 {
+            // has no upper scope, don't promote
+            node = None;
+        } else if let Some(mut n) = node {
+            let h = unsafe { n.as_ref() };
+            if h.is_root() {
+                // root node don't promote
+                node = None
+            } else if h.is_local() {
+                if !self
+                    .cache
+                    .borrow()
+                    .iter()
+                    .any(|p| std::ptr::eq(n.as_ptr(), p.as_ptr()))
+                {
+                    // node is in other scope, don't promote
+                    node = None;
+                }
+            } else {
+                // node is neither root nor local, protect it first
+                unsafe {
+                    n.as_mut().insert_flag(crate::node::GcNodeFlag::LOCAL);
+                    (*self.heap.as_ptr()).do_protect_node(n);
+                }
             }
         }
 
@@ -153,43 +192,27 @@ impl<'heap> GcContext<'heap> {
         let promote: Option<NonNull<GcHead>> = self.promote.borrow_mut().take();
 
         if let Some(mut p) = promote {
-            if let Some((up, _lev)) = self.parent() {
-                // put to upper scope cache
-                up.cache.borrow_mut().push(p);
+            let (up, _lev) = self.parent().unwrap();
+            // put to upper scope cache
+            up.cache.borrow_mut().push(p);
 
-                #[cfg(debug_assertions)]
-                unsafe {
-                    p.as_mut().dbg_scope_level = _lev as _;
-                }
-            } else {
-                // can't promote, unprotect it
-                unsafe {
-                    p.as_mut().remove_flag(crate::node::GcNodeFlag::LOCAL);
-
-                    (*self.heap.as_ptr()).do_unprotect_node(p);
-
-                    #[cfg(debug_assertions)]
-                    {
-                        p.as_mut().dbg_scope_level = 0;
-                    }
-                }
+            #[cfg(debug_assertions)]
+            unsafe {
+                p.as_mut().dbg_scope_level = _lev as _;
             }
         }
 
-        for mut n in std::mem::take(self.cache.borrow_mut().deref_mut()) {
-            if promote.is_none_or(|p| !std::ptr::eq(n.as_ptr(), p.as_ptr())) {
-                unsafe {
-                    n.as_mut().remove_flag(crate::node::GcNodeFlag::LOCAL);
-
-                    #[cfg(debug_assertions)]
-                    {
-                        n.as_mut().dbg_scope_level = 0;
-                    }
-                }
-            }
-
+        // unprotect non-promoted nodes
+        let lst = std::mem::take(self.cache.borrow_mut().deref_mut());
+        for mut n in lst.into_iter().filter(|&p| promote.is_none_or(|x| x != p)) {
             unsafe {
+                n.as_mut().remove_flag(crate::node::GcNodeFlag::LOCAL);
                 (*self.heap.as_ptr()).do_unprotect_node(n);
+
+                #[cfg(debug_assertions)]
+                {
+                    n.as_mut().dbg_scope_level = 0;
+                }
             }
         }
     }
@@ -909,6 +932,56 @@ mod tests {
 
             ctx.set_promote(Some(head));
             ctx.flush();
+        }
+
+        unsafe {
+            assert!(!head.as_ref().is_local());
+            assert_eq!(head.as_ref().protect_count(), 0);
+        }
+    }
+
+    #[test]
+    fn test_set_promote_reset_on_non_local_restores_state() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition(4096);
+
+        let node: GcRef<Node> = unsafe {
+            heap.alloc_raw(
+                partition_id,
+                Node {
+                    next: None,
+                    value: 1,
+                },
+            )
+        }
+        .unwrap();
+
+        let head = node.head_ptr;
+
+        unsafe {
+            assert!(!head.as_ref().is_local());
+            assert_eq!(head.as_ref().protect_count(), 0);
+        }
+
+        heap.push_gc_scope(partition_id);
+        heap.push_gc_scope(partition_id);
+
+        {
+            let ctx = heap.scope_stack.last_mut().unwrap();
+            ctx.set_promote(Some(head));
+
+            unsafe {
+                assert!(head.as_ref().is_local());
+                assert_eq!(head.as_ref().protect_count(), 1);
+            }
+
+            ctx.set_promote(None);
+            ctx.flush();
+        }
+
+        {
+            let parent_ctx = heap.scope_stack.first().unwrap();
+            assert!(!parent_ctx.contains(head));
         }
 
         unsafe {
