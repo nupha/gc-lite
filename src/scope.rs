@@ -62,6 +62,10 @@ impl<'heap> GcScope<'heap> {
         self.depth.get()
     }
 
+    pub fn count(&self) -> usize {
+        self.cache.borrow().len()
+    }
+
     /// get parent scope, and its level.
     pub fn parent(&self) -> Option<(&GcScope<'_>, u8)> {
         let d = self.depth();
@@ -131,6 +135,10 @@ impl<'heap> GcScope<'heap> {
 
         self.cache.borrow_mut().push(node);
         true
+    }
+
+    pub fn get_promote(&self) -> Option<NonNull<GcHead>> {
+        self.promote.borrow().map(|(p, _)| p)
     }
 
     /// Set a node to be promoted.
