@@ -3,9 +3,7 @@
 
 use std::{alloc::Layout, marker::PhantomData, ptr::NonNull};
 
-use crate::{
-    GcError, GcHead, GcHeap, GcNode, GcPartitionId, GcRef, unlikely, weak::GcWeakRawId,
-};
+use crate::{GcError, GcHead, GcHeap, GcNode, GcPartitionId, GcRef, unlikely, weak::GcWeakRawId};
 
 impl GcHeap {
     fn mem_alloc(&mut self, size: usize) -> Option<NonNull<u8>> {
@@ -116,7 +114,7 @@ impl GcHeap {
         }
     }
 
-    /// Allocate a typed gc node with payload data,  scope is not.
+    /// Allocate a typed gc node with payload data, do not put to any scope, even if the current scope is present.
     ///
     /// # SAFETY
     ///
@@ -174,7 +172,6 @@ impl GcHeap {
             _marker: PhantomData,
         })
     }
-
 
     /// Dispose a node
     pub(crate) fn dispose(&mut self, node: NonNull<GcHead>) -> usize {

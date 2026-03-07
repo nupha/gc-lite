@@ -83,52 +83,40 @@ impl<'heap> GcScope<'heap> {
         }
     }
 
-    /// alloc a local node in scope.
-    pub fn alloc_local<T: GcNode>(&self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
-        unsafe {
-            let r = (*self.heap.as_ptr()).alloc_raw(self.partition_id, payload)?;
-            let mut head = r.head_ptr;
-
-            #[cfg(debug_assertions)]
-            {
-                let h = head.as_ref();
-                debug_assert!(
-                    !h.contains_flag(crate::node::GcNodeFlag::LOCAL),
-                    "node already in GcScope: {h:p}"
-                );
-            }
-
-            head.as_mut().insert_flag(crate::node::GcNodeFlag::LOCAL);
-
-            (*self.heap.as_ptr()).do_protect_node(head);
-            self.cache.borrow_mut().push(head);
-
-            Ok(r)
-        }
-    }
-
     pub fn alloc_root<T: GcNode>(&self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
         unsafe { (*self.heap.as_ptr()).alloc_root_raw(self.partition_id, payload) }
     }
 
-    // if node is neither root, nor local, then add it to `self` scope
-    pub fn add_non_local(&self, mut node: NonNull<GcHead>) -> bool {
+    /// alloc a local node in scope.
+    pub fn alloc_local<T: GcNode>(&self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
+        let r = unsafe { (*self.heap.as_ptr()).alloc_raw(self.partition_id, payload)? };
+        self.add_node(r.head_ptr);
+        Ok(r)
+    }
+
+    // add node to `self` scope and protect it
+    fn add_node(&self, mut node: NonNull<GcHead>) {
+        #[cfg(debug_assertions)]
         unsafe {
-            if node.as_ref().is_root_or_local() {
-                return false;
-            }
-
-            node.as_mut().insert_flag(crate::node::GcNodeFlag::LOCAL);
-            (*self.heap.as_ptr()).do_protect_node(node);
-
-            #[cfg(debug_assertions)]
-            {
-                node.as_mut().dbg_scope_depth = self.depth();
-            }
+            debug_assert!(!node.as_ref().is_root_or_local());
+            node.as_mut().dbg_scope_depth = self.depth();
         }
 
+        unsafe {
+            node.as_mut().insert_flag(crate::node::GcNodeFlag::LOCAL);
+            (*self.heap.as_ptr()).do_protect_node(node);
+        }
         self.cache.borrow_mut().push(node);
-        true
+    }
+
+    // if node is neither root, nor local, then add it to `self` scope
+    pub fn add_non_local(&self, node: NonNull<GcHead>) -> bool {
+        if unsafe { node.as_ref().is_root_or_local() } {
+            false
+        } else {
+            self.add_node(node);
+            true
+        }
     }
 
     pub fn get_promote(&self) -> Option<NonNull<GcHead>> {
