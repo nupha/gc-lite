@@ -201,7 +201,7 @@ mod tests {
             weak_id: crate::weak::GcWeakRawId::NULL,
             next: None,
             #[cfg(debug_assertions)]
-            dbg_scope_level: 0,
+            dbg_scope_depth: 0,
             #[cfg(debug_assertions)]
             dbg_string: "".into(),
         };
@@ -220,7 +220,7 @@ mod tests {
             weak_id: crate::weak::GcWeakRawId::NULL,
             next: None,
             #[cfg(debug_assertions)]
-            dbg_scope_level: 0,
+            dbg_scope_depth: 0,
             #[cfg(debug_assertions)]
             dbg_string: "node3".into(),
         };
@@ -232,7 +232,7 @@ mod tests {
             weak_id: crate::weak::GcWeakRawId::NULL,
             next: Some(node3_ptr),
             #[cfg(debug_assertions)]
-            dbg_scope_level: 0,
+            dbg_scope_depth: 0,
             #[cfg(debug_assertions)]
             dbg_string: "node2".into(),
         };
@@ -244,7 +244,7 @@ mod tests {
             weak_id: crate::weak::GcWeakRawId::NULL,
             next: Some(node2_ptr),
             #[cfg(debug_assertions)]
-            dbg_scope_level: 0,
+            dbg_scope_depth: 0,
             #[cfg(debug_assertions)]
             dbg_string: "node1".into(),
         };
@@ -267,7 +267,7 @@ mod tests {
                 weak_id: crate::weak::GcWeakRawId::NULL,
                 next: None,
                 #[cfg(debug_assertions)]
-                dbg_scope_level: 0,
+                dbg_scope_depth: 0,
                 #[cfg(debug_assertions)]
                 dbg_string: format!("node{}", i).into(),
             })

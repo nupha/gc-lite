@@ -75,7 +75,7 @@ pub struct GcHead {
     pub(super) next: Option<NonNull<GcHead>>,
 
     #[cfg(debug_assertions)]
-    pub(crate) dbg_scope_level: u8,
+    pub(crate) dbg_scope_depth: u8,
     #[cfg(debug_assertions)]
     pub(crate) dbg_string: std::borrow::Cow<'static, str>,
 }
@@ -98,7 +98,7 @@ impl std::fmt::Debug for GcHead {
 
         #[cfg(debug_assertions)]
         {
-            s.field("scope", &self.dbg_scope_level)
+            s.field("scope", &self.dbg_scope_depth)
                 .field("dbg_string", &self.dbg_string);
         }
 
@@ -449,74 +449,6 @@ impl<T: GcNode> GcRef<T> {
     #[inline(always)]
     pub fn node_info(&self) -> &GcHead {
         unsafe { self.head_ptr.as_ref() }
-    }
-
-    #[inline(always)]
-    pub fn to_local(self, heap: &mut GcHeap) -> GcLocal<T> {
-        GcLocal::new(heap, self)
-    }
-}
-
-pub struct GcLocal<T: GcNode> {
-    gc: GcRef<T>,
-    heap: NonNull<GcHeap>,
-}
-
-impl<T: GcNode> Drop for GcLocal<T> {
-    fn drop(&mut self) {
-        let heap = unsafe { self.heap.as_mut() };
-        let node = self.gc.head_ptr;
-        heap.do_unprotect_node(node);
-    }
-}
-
-impl<T: GcNode> std::ops::Deref for GcLocal<T> {
-    type Target = T;
-
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        &self.gc
-    }
-}
-
-impl<T: GcNode> std::ops::DerefMut for GcLocal<T> {
-    #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.gc
-    }
-}
-
-impl<T: GcNode + std::fmt::Debug> std::fmt::Debug for GcLocal<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", std::ops::Deref::deref(&self))
-    }
-}
-
-impl<T: GcNode + std::fmt::Display> std::fmt::Display for GcLocal<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", std::ops::Deref::deref(&self))
-    }
-}
-
-impl<T: GcNode> From<GcLocal<T>> for GcRef<T> {
-    #[inline(always)]
-    fn from(value: GcLocal<T>) -> Self {
-        value.gc
-    }
-}
-
-impl<T: GcNode> GcLocal<T> {
-    pub(crate) fn new(heap: &mut GcHeap, gc_ref: GcRef<T>) -> Self {
-        heap.do_protect_node(gc_ref.gc_head_ptr());
-        Self {
-            gc: gc_ref,
-            heap: NonNull::from_ref(heap),
-        }
-    }
-
-    #[inline(always)]
-    pub fn get(&self) -> GcRef<T> {
-        self.gc
     }
 }
 

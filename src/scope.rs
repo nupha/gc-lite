@@ -7,7 +7,7 @@ use smallvec::SmallVec;
 use crate::{
     heap::GcHeap,
     helpers::GcError,
-    node::{GcHead, GcLocal, GcNode, GcRef},
+    node::{GcHead, GcNode, GcRef},
     partition::GcPartitionId,
 };
 
@@ -83,7 +83,8 @@ impl<'heap> GcScope<'heap> {
         }
     }
 
-    pub fn alloc<T: GcNode>(&self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
+    /// alloc a local node in scope.
+    pub fn alloc_local<T: GcNode>(&self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
         unsafe {
             let r = (*self.heap.as_ptr()).alloc_raw(self.partition_id, payload)?;
             let mut head = r.head_ptr;
@@ -110,27 +111,20 @@ impl<'heap> GcScope<'heap> {
         unsafe { (*self.heap.as_ptr()).alloc_root_raw(self.partition_id, payload) }
     }
 
-    #[deprecated]
-    pub fn alloc_local<T: GcNode>(&self, payload: T) -> Result<GcLocal<T>, (GcError, T)> {
-        //  unsafe { (*self.heap).alloc_local_raw(self.partition_id, payload) }
-        let r = self.alloc(payload)?;
-        Ok(GcLocal::new(unsafe { &mut *self.heap.as_ptr() }, r))
-    }
-
-    // if node is not local, then add it to `self` scope
+    // if node is neither root, nor local, then add it to `self` scope
     pub fn add_non_local(&self, mut node: NonNull<GcHead>) -> bool {
         unsafe {
-            if node.as_ref().is_local() {
+            if node.as_ref().is_root_or_local() {
                 return false;
-            }
-
-            #[cfg(debug_assertions)]
-            {
-                node.as_mut().dbg_scope_level = 0;
             }
 
             node.as_mut().insert_flag(crate::node::GcNodeFlag::LOCAL);
             (*self.heap.as_ptr()).do_protect_node(node);
+
+            #[cfg(debug_assertions)]
+            {
+                node.as_mut().dbg_scope_depth = self.depth();
+            }
         }
 
         self.cache.borrow_mut().push(node);
@@ -154,8 +148,8 @@ impl<'heap> GcScope<'heap> {
         // check current promote value
         let prev = self.promote.borrow_mut().take();
 
-        if let Some((mut p, was_non_scoped)) = prev
-            && was_non_scoped
+        if let Some((mut p, was_heap_node)) = prev
+            && was_heap_node
         {
             // avoid leak protect
             unsafe {
@@ -211,7 +205,7 @@ impl<'heap> GcScope<'heap> {
 
             #[cfg(debug_assertions)]
             unsafe {
-                p.as_mut().dbg_scope_level = _lev as _;
+                p.as_mut().dbg_scope_depth = _lev as _;
             }
         }
 
@@ -224,7 +218,7 @@ impl<'heap> GcScope<'heap> {
 
                 #[cfg(debug_assertions)]
                 {
-                    n.as_mut().dbg_scope_level = 0;
+                    n.as_mut().dbg_scope_depth = 0;
                 }
             }
         }
@@ -251,7 +245,7 @@ impl<'heap> GcScope<'heap> {
                 #[cfg(debug_assertions)]
                 unsafe {
                     let mut n = node;
-                    n.as_mut().dbg_scope_level = idx as _;
+                    n.as_mut().dbg_scope_depth = idx as _;
                 }
 
                 heap.scope_stack[idx - 1].cache.borrow_mut().push(node);
@@ -380,7 +374,7 @@ mod tests {
         {
             let ctx = GcScope::new(&mut heap, partition_id);
             let node: GcRef<Node> = ctx
-                .alloc(Node {
+                .alloc_local(Node {
                     next: None,
                     value: 1,
                 })
@@ -413,7 +407,7 @@ mod tests {
         {
             let mut ctx = GcScope::new(&mut heap, partition_id);
             let node: GcRef<Node> = ctx
-                .alloc(Node {
+                .alloc_local(Node {
                     next: None,
                     value: 1,
                 })
@@ -502,7 +496,7 @@ mod tests {
 
         let ctx = GcScope::new(&mut heap, partition_id);
         let node: GcRef<Node> = ctx
-            .alloc(Node {
+            .alloc_local(Node {
                 next: None,
                 value: 1,
             })
@@ -575,13 +569,13 @@ mod tests {
         {
             let mut ctx = GcScope::new(&mut heap, partition_id);
             let n1: GcRef<Node> = ctx
-                .alloc(Node {
+                .alloc_local(Node {
                     next: None,
                     value: 1,
                 })
                 .unwrap();
             let n2: GcRef<Node> = ctx
-                .alloc(Node {
+                .alloc_local(Node {
                     next: None,
                     value: 2,
                 })
@@ -614,44 +608,6 @@ mod tests {
     }
 
     #[test]
-    fn test_gc_context_alloc_local() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
-
-        let head;
-
-        {
-            let mut ctx = GcScope::new(&mut heap, partition_id);
-            let local: GcLocal<Node> = ctx
-                .alloc_local(Node {
-                    next: None,
-                    value: 1,
-                })
-                .unwrap();
-
-            head = local.get().head_ptr;
-
-            unsafe {
-                assert_eq!(head.as_ref().protect_count(), 2);
-            }
-
-            drop(local);
-
-            unsafe {
-                assert_eq!(head.as_ref().protect_count(), 1);
-            }
-        }
-
-        unsafe {
-            assert_eq!(head.as_ref().protect_count(), 0);
-        }
-
-        while !heap.mark(partition_id, 64) {}
-        let removed_after = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
-        assert!(removed_after > 0);
-    }
-
-    #[test]
     fn test_gc_context_reset_unprotects_and_clears_cache() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
@@ -661,7 +617,7 @@ mod tests {
         {
             let mut ctx = GcScope::new(&mut heap, partition_id);
             let node: GcRef<Node> = ctx
-                .alloc(Node {
+                .alloc_local(Node {
                     next: None,
                     value: 1,
                 })
@@ -764,7 +720,7 @@ mod tests {
         {
             let ctx = heap.scope_stack.last_mut().unwrap();
             let node: GcRef<Node> = ctx
-                .alloc(Node {
+                .alloc_local(Node {
                     next: None,
                     value: 1,
                 })
@@ -821,13 +777,13 @@ mod tests {
         {
             let ctx = heap.scope_stack.last_mut().unwrap();
             let promoted: GcRef<Node> = ctx
-                .alloc(Node {
+                .alloc_local(Node {
                     next: None,
                     value: 1,
                 })
                 .unwrap();
             let other: GcRef<Node> = ctx
-                .alloc(Node {
+                .alloc_local(Node {
                     next: None,
                     value: 2,
                 })
@@ -888,7 +844,7 @@ mod tests {
         {
             let ctx = heap.scope_stack.last_mut().unwrap();
             let node: GcRef<Node> = ctx
-                .alloc(Node {
+                .alloc_local(Node {
                     next: None,
                     value: 1,
                 })
@@ -930,7 +886,7 @@ mod tests {
         {
             let ctx = heap.scope_stack.last_mut().unwrap();
             let node: GcRef<Node> = ctx
-                .alloc(Node {
+                .alloc_local(Node {
                     next: None,
                     value: 1,
                 })

@@ -279,7 +279,7 @@ impl GcHeap {
 
 #[cfg(test)]
 mod heap_tests {
-    use crate::{GcLocal, GcRef, GcTraceCtx, trace::GcTrace};
+    use crate::{GcRef, GcTraceCtx, trace::GcTrace};
 
     use super::*;
 
@@ -330,88 +330,13 @@ mod heap_tests {
     }
 
     #[test]
-    fn test_gc_local_keeps_node_alive_during_scope() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
-
-        let node: GcRef<Node> = unsafe {
-            heap.alloc_raw(
-                partition_id,
-                Node {
-                    next: None,
-                    value: 1,
-                },
-            )
-        }
-        .unwrap();
-
-        let head = node.head_ptr;
-
-        {
-            unsafe {
-                assert_eq!(head.as_ref().protect_count(), 0);
-            }
-
-            {
-                let _local = GcLocal::new(&mut heap, node);
-                unsafe {
-                    assert_eq!(head.as_ref().protect_count(), 1);
-                }
-
-                let par = heap.partitions.get(&partition_id).unwrap();
-                assert!(par.root_nodes.contains(&head));
-            }
-
-            unsafe {
-                assert_eq!(head.as_ref().protect_count(), 0);
-            }
-
-            let par = heap.partitions.get(&partition_id).unwrap();
-            assert!(!par.root_nodes.contains(&head));
-        }
-    }
-
-    #[test]
-    fn test_alloc_local_behaves_like_alloc_plus_gc_local() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
-
-        let local: GcLocal<Node> = unsafe {
-            heap.alloc_local_raw(
-                partition_id,
-                Node {
-                    next: None,
-                    value: 1,
-                },
-            )
-            .unwrap()
-        };
-
-        let head = local.get().head_ptr;
-
-        unsafe {
-            assert_eq!(head.as_ref().protect_count(), 1);
-        }
-
-        drop(local);
-
-        unsafe {
-            assert_eq!(head.as_ref().protect_count(), 0);
-        }
-
-        while !heap.mark(partition_id, 64) {}
-        let removed_after = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
-        assert!(removed_after > 0);
-    }
-
-    #[test]
     fn test_heap_with_context_alloc_and_cleanup() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
 
         let head = heap.with_new_scope(partition_id, |ctx| {
             let node: GcRef<Node> = ctx
-                .alloc(Node {
+                .alloc_local(Node {
                     next: None,
                     value: 1,
                 })

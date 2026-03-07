@@ -4,7 +4,7 @@
 use std::{alloc::Layout, marker::PhantomData, ptr::NonNull};
 
 use crate::{
-    GcError, GcHead, GcHeap, GcLocal, GcNode, GcPartitionId, GcRef, unlikely, weak::GcWeakRawId,
+    GcError, GcHead, GcHeap, GcNode, GcPartitionId, GcRef, unlikely, weak::GcWeakRawId,
 };
 
 impl GcHeap {
@@ -98,7 +98,7 @@ impl GcHeap {
                         next: None,
 
                         #[cfg(debug_assertions)]
-                        dbg_scope_level: self.scope_max_depth(),
+                        dbg_scope_depth: self.scope_max_depth(),
                         #[cfg(debug_assertions)]
                         dbg_string: std::any::type_name::<T>().into(),
                     };
@@ -116,6 +116,8 @@ impl GcHeap {
         }
     }
 
+    /// Allocate a typed gc node with payload data,  scope is not.
+    ///
     /// # SAFETY
     ///
     /// This function is unsafe because it directly manipulates raw pointers and memory allocation.
@@ -173,21 +175,6 @@ impl GcHeap {
         })
     }
 
-    /// # SAFETY
-    ///
-    /// This function is unsafe because it directly manipulates raw pointers and memory allocation.
-    /// The caller must ensure that the `partition_id` is valid and that the returned `GcLocal` is
-    /// properly managed to avoid memory leaks or use-after-free errors.
-    pub unsafe fn alloc_local_raw<T: GcNode>(
-        &mut self,
-        partition_id: GcPartitionId,
-        payload: T,
-    ) -> Result<GcLocal<T>, (GcError, T)> {
-        let r = unsafe { self.alloc_raw(partition_id, payload)? };
-        log::trace!("[local_node]: {:?}", r.gc_head());
-
-        Ok(GcLocal::new(self, r))
-    }
 
     /// Dispose a node
     pub(crate) fn dispose(&mut self, node: NonNull<GcHead>) -> usize {
