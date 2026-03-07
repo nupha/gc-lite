@@ -12,7 +12,7 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub struct GcScope<'heap> {
+pub struct GcScopeState<'heap> {
     heap: NonNull<GcHeap>,
     partition_id: GcPartitionId,
     depth: NonZeroU8,
@@ -21,13 +21,13 @@ pub struct GcScope<'heap> {
     _marker: PhantomData<&'heap mut GcHeap>,
 }
 
-impl<'heap> Drop for GcScope<'heap> {
+impl<'heap> Drop for GcScopeState<'heap> {
     fn drop(&mut self) {
         self.flush();
     }
 }
 
-impl<'heap> GcScope<'heap> {
+impl<'heap> GcScopeState<'heap> {
     pub fn new(heap: &'heap mut GcHeap, partition_id: GcPartitionId) -> Self {
         debug_assert!(!partition_id.is_null());
         let depth = heap.scope_stack.len() + 1;
@@ -67,14 +67,14 @@ impl<'heap> GcScope<'heap> {
     }
 
     /// get parent scope, and its level.
-    pub fn parent(&self) -> Option<(&GcScope<'_>, u8)> {
+    pub fn parent(&self) -> Option<(&GcScopeState<'_>, u8)> {
         let d = self.depth();
         if d > 1 {
             let parent_index = d - 2;
 
             self.heap().scope_stack.get(parent_index as usize).map(|s| {
                 (
-                    unsafe { std::mem::transmute::<&GcScope<'static>, &GcScope<'_>>(s) },
+                    unsafe { std::mem::transmute::<&GcScopeState<'static>, &GcScopeState<'_>>(s) },
                     d - 1,
                 )
             })
@@ -267,47 +267,198 @@ impl<'heap> GcScope<'heap> {
     }
 }
 
+pub struct GcScope<'heap> {
+    heap: NonNull<GcHeap>,
+    index: u8,
+    _marker: PhantomData<&'heap mut GcHeap>,
+}
+
+impl<'heap> GcScope<'heap> {
+    fn heap_raw(&self) -> &GcHeap {
+        unsafe { self.heap.as_ref() }
+    }
+
+    fn heap_raw_mut(&mut self) -> &mut GcHeap {
+        unsafe { self.heap.as_mut() }
+    }
+
+    fn inner_static(&self) -> &GcScopeState<'static> {
+        let heap = self.heap_raw();
+        &heap.scope_stack[self.index as usize]
+    }
+
+    fn inner_static_mut(&mut self) -> &mut GcScopeState<'static> {
+        let index = self.index as usize;
+        let heap = self.heap_raw_mut();
+        &mut heap.scope_stack[index]
+    }
+
+    fn inner(&self) -> &GcScopeState<'heap> {
+        unsafe {
+            std::mem::transmute::<&GcScopeState<'static>, &GcScopeState<'heap>>(self.inner_static())
+        }
+    }
+
+    fn inner_mut(&mut self) -> &mut GcScopeState<'heap> {
+        unsafe {
+            std::mem::transmute::<&mut GcScopeState<'static>, &mut GcScopeState<'heap>>(
+                self.inner_static_mut(),
+            )
+        }
+    }
+
+    pub fn new(heap: &'heap mut GcHeap, partition_id: GcPartitionId) -> Self {
+        heap.new_scope(partition_id)
+    }
+
+    pub fn new_scope<'child>(&'child mut self) -> GcScope<'child>
+    where
+        'heap: 'child,
+    {
+        let partition_id = self.partition_id();
+        self.heap_raw_mut().new_scope(partition_id)
+    }
+
+    #[inline(always)]
+    pub fn partition_id(&self) -> GcPartitionId {
+        self.inner().partition_id()
+    }
+
+    #[inline(always)]
+    pub fn heap(&self) -> &GcHeap {
+        self.inner().heap()
+    }
+
+    #[inline(always)]
+    pub fn heap_mut(&mut self) -> &mut GcHeap {
+        self.inner_mut().heap_mut()
+    }
+
+    #[inline(always)]
+    pub fn depth(&self) -> u8 {
+        self.inner().depth()
+    }
+
+    #[inline(always)]
+    pub fn count(&self) -> usize {
+        self.inner().count()
+    }
+
+    pub fn alloc_root<T: GcNode>(&self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
+        self.inner().alloc_root(payload)
+    }
+
+    pub fn alloc_local<T: GcNode>(&self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
+        self.inner().alloc_local(payload)
+    }
+
+    pub fn add_non_local(&self, node: NonNull<GcHead>) -> bool {
+        self.inner().add_non_local(node)
+    }
+
+    pub fn get_promote(&self) -> Option<NonNull<GcHead>> {
+        self.inner().get_promote()
+    }
+
+    pub fn set_promote(&self, node: Option<NonNull<GcHead>>) {
+        self.inner().set_promote(node)
+    }
+
+    pub fn flush(&self) {
+        self.inner().flush()
+    }
+
+    #[deprecated]
+    pub fn promote(&self, node: NonNull<GcHead>) -> bool {
+        self.inner().promote(node)
+    }
+
+    pub fn contains(&self, node: NonNull<GcHead>) -> bool {
+        self.inner().contains(node)
+    }
+}
+
+impl<'heap> std::ops::Deref for GcScope<'heap> {
+    type Target = GcScopeState<'heap>;
+
+    fn deref(&self) -> &Self::Target {
+        self.inner()
+    }
+}
+
+impl<'heap> std::ops::DerefMut for GcScope<'heap> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.inner_mut()
+    }
+}
+
+impl<'heap> Drop for GcScope<'heap> {
+    fn drop(&mut self) {
+        unsafe {
+            let heap = self.heap.as_mut();
+            debug_assert_eq!(heap.scope_stack.len() as u8 - 1, self.index);
+            if let Some(ctx) = heap.pop_gc_scope() {
+                drop(ctx);
+            }
+        }
+    }
+}
+
 impl GcHeap {
     #[inline(always)]
     pub fn scope_max_depth(&self) -> u8 {
         self.scope_stack.len() as _
     }
 
-    /// get scope by depth
-    pub fn scope(&self, depth: u8) -> Option<&GcScope<'_>> {
-        if depth > 0 {
-            self.scope_stack.get(depth as usize - 1)
-        } else {
-            None
+    /// get scope by depth (peek, without modifying stack)
+    pub fn scope(&self, depth: u8) -> Option<&GcScopeState<'_>> {
+        if depth == 0 {
+            return None;
         }
+
+        self.scope_stack.get(depth as usize - 1)
     }
 
-    pub fn push_gc_scope(&mut self, partition_id: GcPartitionId) -> &GcScope<'_> {
-        let ctx = GcScope::new(self, partition_id);
+    pub(crate) fn push_gc_scope(&mut self, partition_id: GcPartitionId) -> &GcScopeState<'_> {
+        let ctx = GcScopeState::new(self, partition_id);
         // SAFETY: It is safe because the GcHeap owns the GcScope, and we ensure that
         // the GcScope does not outlive the GcHeap.
-        let static_ctx = unsafe { std::mem::transmute::<GcScope<'_>, GcScope<'static>>(ctx) };
+        let static_ctx =
+            unsafe { std::mem::transmute::<GcScopeState<'_>, GcScopeState<'static>>(ctx) };
         self.scope_stack.push(static_ctx);
 
         self.scope_stack.last().unwrap()
     }
 
     #[inline(always)]
-    pub fn pop_gc_scope(&mut self) -> Option<GcScope<'_>> {
+    pub(crate) fn pop_gc_scope(&mut self) -> Option<GcScopeState<'_>> {
         self.scope_stack.pop()
     }
 
     #[inline]
-    pub fn current_scope(&self) -> Option<&GcScope<'_>> {
+    pub fn current_scope(&self) -> Option<&GcScopeState<'_>> {
         let s = self.scope_stack.last();
         // SAFETY: It is safe because the GcHeap owns the GcScope, and we ensure that
         // the GcScope does not outlive the GcHeap.
-        unsafe { std::mem::transmute::<Option<&GcScope<'static>>, Option<&GcScope<'_>>>(s) }
+        unsafe {
+            std::mem::transmute::<Option<&GcScopeState<'static>>, Option<&GcScopeState<'_>>>(s)
+        }
     }
 
     #[inline]
-    pub fn with_current_scope<R>(&mut self, f: impl FnOnce(&mut GcScope) -> R) -> Option<R> {
+    pub fn with_current_scope<R>(&mut self, f: impl FnOnce(&mut GcScopeState) -> R) -> Option<R> {
         self.scope_stack.last_mut().map(f)
+    }
+
+    pub fn new_scope<'s>(&'s mut self, partition_id: GcPartitionId) -> GcScope<'s> {
+        self.push_gc_scope(partition_id);
+        let index = self.scope_stack.len() as u8 - 1;
+        let heap_ptr = NonNull::from(self);
+        GcScope {
+            heap: heap_ptr,
+            index,
+            _marker: PhantomData,
+        }
     }
 
     pub fn with_new_scope<R>(
@@ -315,11 +466,8 @@ impl GcHeap {
         partition_id: GcPartitionId,
         f: impl FnOnce(&GcScope<'_>) -> R,
     ) -> R {
-        self.push_gc_scope(partition_id);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            f(self.scope_stack.last_mut().unwrap())
-        }));
-        self.pop_gc_scope();
+        let scope = self.new_scope(partition_id);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&scope)));
 
         match result {
             Ok(r) => r,
