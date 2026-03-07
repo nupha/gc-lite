@@ -452,12 +452,7 @@ mod tests {
             "Propagate should handle circular reference"
         );
 
-        // Reset and mark again to ensure stability
         heap.mark_reset(partition_id);
-        heap.partition_mut(partition_id).unwrap().root_nodes.clear();
-        let mut root = TestNode::new(100);
-        root.add_child(node1);
-        let _ = unsafe { heap.alloc_root_raw(partition_id, root) }.unwrap();
         while !heap.mark(partition_id, 1) {}
         assert_eq!(count_non_white_nodes(&heap, partition_id), 3);
     }

@@ -167,7 +167,6 @@ impl GcHeap {
             let partition_id = n.partition_id();
             if let Some(p) = self.partitions.get_mut(&partition_id) {
                 n.insert_flag(GcNodeFlag::ROOT);
-                p.root_nodes.push(node);
                 if p.is_marking() {
                     p.add_gray_node(node);
                 }
@@ -175,55 +174,10 @@ impl GcHeap {
         }
     }
 
-    pub fn get_roots(
-        &self,
-        partition_id: GcPartitionId,
-    ) -> impl Iterator<Item = NonNull<GcHead>> + '_ {
-        self.partitions
-            .get(&partition_id)
-            .map(|p| p.root_nodes.iter().copied())
-            .into_iter()
-            .flatten()
-    }
-
     /// Check if `node` was allocated in this heap
     pub fn contains(&self, node: NonNull<GcHead>) -> bool {
         self.nodes(unsafe { node.as_ref().partition_id() })
             .any(|p| p == node)
-    }
-
-    pub(crate) fn do_protect_node(&mut self, mut n: NonNull<GcHead>) {
-        let node = unsafe { n.as_mut() };
-
-        #[cfg(debug_assertions)]
-        node.debug_assert_node_valid_simple();
-
-        let count = node.inc_protect_count();
-
-        if count == 1 && !node.is_root() {
-            let par = self.partition_mut(node.partition_id()).unwrap();
-            par.root_nodes.push(n);
-            if par.is_marking() && node.color() == GcTriColor::White {
-                par.add_gray_node(n);
-            }
-        }
-    }
-
-    pub(crate) fn do_unprotect_node(&mut self, mut n: NonNull<GcHead>) {
-        let node = unsafe { n.as_mut() };
-
-        #[cfg(debug_assertions)]
-        node.debug_assert_node_valid_simple();
-
-        let count = node.dec_protect_count();
-        if count == 0
-            && !node.is_root()
-            && let Some(par) = self.partition_mut(node.partition_id())
-            && let Some(i) = par.root_nodes.iter().position(|&x| x == n)
-        {
-            par.root_nodes.swap_remove(i);
-            node.set_color(GcTriColor::White);
-        }
     }
 
     /// Protect node from being gc collected.
@@ -302,34 +256,6 @@ mod heap_tests {
     }
 
     #[test]
-    #[should_panic(expected = "GcHead protect count overflow")]
-    fn test_protect_count_overflow_panics() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
-
-        let node: GcRef<Node> = unsafe {
-            heap.alloc_raw(
-                partition_id,
-                Node {
-                    next: None,
-                    value: 1,
-                },
-            )
-        }
-        .unwrap();
-
-        let mut head = node.head_ptr;
-
-        unsafe {
-            let h = head.as_mut();
-            for _ in 0..7 {
-                h.inc_protect_count();
-            }
-            h.inc_protect_count();
-        }
-    }
-
-    #[test]
     fn test_heap_with_context_alloc_and_cleanup() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
@@ -344,10 +270,6 @@ mod heap_tests {
             ctx.flush();
             node.head_ptr
         });
-
-        unsafe {
-            assert_eq!(head.as_ref().protect_count(), 0);
-        }
 
         while !heap.mark(partition_id, 64) {}
         let removed_after = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);

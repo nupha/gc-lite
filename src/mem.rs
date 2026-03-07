@@ -153,14 +153,11 @@ impl GcHeap {
     ) -> Result<GcRef<T>, (GcError, T)> {
         let (mut node, _) = unsafe { self.alloc_node_mem(partition_id, payload)? };
 
-        // Mark as root
         unsafe { node.as_mut() }.insert_flag(crate::node::GcNodeFlag::ROOT);
 
-        // Add to nodes link
         self.attach_node(partition_id, node);
 
         let par = self.partition_mut(partition_id).unwrap();
-        par.root_nodes.push(node);
         if par.is_marking() {
             par.add_gray_node(node);
         }

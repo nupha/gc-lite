@@ -40,20 +40,14 @@ impl GcHeap {
 
             par.set_marking(true);
 
-            // reset nodes color to white
             for mut n in par.nodes.iter() {
-                unsafe {
-                    n.as_mut().set_color(GcTriColor::White);
+                let node = unsafe { n.as_mut() };
+                if node.is_root_or_local() {
+                    node.set_color(GcTriColor::Gray);
+                    par.gray_list.push(n);
+                } else {
+                    node.set_color(GcTriColor::White);
                 }
-            }
-
-            // tracing from root nodes
-            for n in par.root_nodes.iter() {
-                let mut root = *n;
-                unsafe {
-                    root.as_mut().set_color(GcTriColor::Gray);
-                }
-                par.gray_list.push(root);
             }
         }
     }
@@ -174,8 +168,7 @@ impl GcHeap {
 
                         if drop_pass == pass
                             && this.as_ref().color() == GcTriColor::White
-                            && !this.as_ref().is_local()
-                        // && !this.as_ref().is_protected()
+                            && !this.as_ref().is_root_or_local()
                         {
                             if let Some(mut p) = prev {
                                 p.as_mut().next = current;
@@ -183,20 +176,10 @@ impl GcHeap {
                                 link1 = current;
                             }
 
-                            let is_root = this.as_ref().is_root();
                             if call_on_dispose {
                                 on_dispose(self, this.as_ref());
                             }
-
                             freed_bytes += self.dispose(this);
-
-                            // If root node: remove from root list
-                            if is_root
-                                && let Some(par) = self.partition_mut(partition_id)
-                                && let Some(i) = par.root_nodes.iter().position(|&x| x == this)
-                            {
-                                par.root_nodes.swap_remove(i);
-                            }
                         } else {
                             prev = Some(this);
                         }
@@ -363,15 +346,10 @@ mod sweep_test {
 
         for (i, obj) in objects.iter().enumerate() {
             if i % 2 == 1 {
-                // Make existing nodes roots instead of creating new ones.
                 unsafe {
                     let head = obj.head_ptr.as_ptr();
                     let attrs = (*head).attrs | crate::node::GcNodeFlag::ROOT.bits() as u32;
                     std::ptr::write(&mut (*head).attrs, attrs);
-                    heap.partition_mut(partition_id)
-                        .unwrap()
-                        .root_nodes
-                        .push(obj.head_ptr);
                 }
             }
         }
@@ -552,15 +530,8 @@ mod sweep_test {
         // Should have 2 nodes left
         assert_eq!(count_nodes_in_partition(&heap, partition_id), 2);
 
-        // Root should be removed from root list
-        assert!(
-            !heap
-                .partitions
-                .get(&partition_id)
-                .unwrap()
-                .root_nodes
-                .contains(&root_obj.head_ptr)
-        );
+        let remaining = get_all_nodes_in_partition(&heap, partition_id);
+        assert!(!remaining.contains(&root_obj.head_ptr));
     }
 
     /// Test empty partition

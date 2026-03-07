@@ -94,7 +94,6 @@ impl<'heap> GcScopeState<'heap> {
         Ok(r)
     }
 
-    // add node to `self` scope and protect it
     fn add_node(&self, mut node: NonNull<GcHead>) {
         #[cfg(debug_assertions)]
         unsafe {
@@ -104,8 +103,14 @@ impl<'heap> GcScopeState<'heap> {
 
         unsafe {
             node.as_mut().insert_flag(crate::node::GcNodeFlag::LOCAL);
-            (*self.heap.as_ptr()).do_protect_node(node);
+
+            if let Some(par) = (*self.heap.as_ptr()).partition_mut(self.partition_id)
+                && par.is_marking()
+            {
+                par.add_gray_node(node);
+            }
         }
+
         self.cache.borrow_mut().push(node);
     }
 
@@ -133,51 +138,52 @@ impl<'heap> GcScopeState<'heap> {
             "only inner-most scope can set_promote"
         );
 
-        // check current promote value
-        let prev = self.promote.borrow_mut().take();
+        // Note: scope depth==1 indicates the top scope, which don't promote any node
+        if self.depth() == 1 {
+            debug_assert!(
+                self.promote.borrow().is_none(),
+                "top scope don't promote node"
+            );
+            return;
+        }
 
-        if let Some((mut p, was_heap_node)) = prev
-            && was_heap_node
+        // check current promote node
+        if let Some((mut p, was_non_local)) = self.promote.borrow_mut().take()
+            && was_non_local
         {
-            // avoid leak protect
             unsafe {
                 p.as_mut().remove_flag(crate::node::GcNodeFlag::LOCAL);
-                (*self.heap.as_ptr()).do_unprotect_node(p);
+
+                let mut lst = self.cache.borrow_mut();
+                if let Some(i) = lst.iter().position(|&n| n == p) {
+                    lst.swap_remove(i);
+                }
             }
         }
 
-        if self.depth() == 1 {
-            return; // has no upper scope, don't promote
-        }
-
-        if let Some(mut n) = node {
+        if let Some(n) = node {
             let h = unsafe { n.as_ref() };
-
             if h.is_root() {
-                return; // root node don't promote
+                return; // root node don't need to be promoted
             }
 
-            let was_non_scope = if h.is_local() {
+            let is_non_local = if h.is_local() {
                 if !self
                     .cache
                     .borrow()
                     .iter()
                     .any(|p| std::ptr::eq(n.as_ptr(), p.as_ptr()))
                 {
-                    // node is in other scope, don't promote
+                    // node is already in some other scope, can't promote by this
                     return;
                 }
                 false
             } else {
-                // node is neither root nor local, protect it first
-                unsafe {
-                    n.as_mut().insert_flag(crate::node::GcNodeFlag::LOCAL);
-                    (*self.heap.as_ptr()).do_protect_node(n);
-                }
+                self.add_node(n);
                 true
             };
 
-            *self.promote.borrow_mut() = Some((n, was_non_scope));
+            *self.promote.borrow_mut() = Some((n, is_non_local));
         }
     }
 
@@ -197,12 +203,10 @@ impl<'heap> GcScopeState<'heap> {
             }
         }
 
-        // unprotect non-promoted nodes
         let lst = std::mem::take(self.cache.borrow_mut().deref_mut());
         for mut n in lst.into_iter().filter(|&p| promote.is_none_or(|x| x != p)) {
             unsafe {
                 n.as_mut().remove_flag(crate::node::GcNodeFlag::LOCAL);
-                (*self.heap.as_ptr()).do_unprotect_node(n);
 
                 #[cfg(debug_assertions)]
                 {
@@ -565,7 +569,6 @@ mod tests {
 
             unsafe {
                 assert!(head.as_ref().is_local());
-                assert_eq!(head.as_ref().protect_count(), 1);
             }
 
             while !ctx.heap_mut().mark(partition_id, 64) {}
@@ -578,7 +581,6 @@ mod tests {
 
         unsafe {
             assert!(!head.as_ref().is_local());
-            assert_eq!(head.as_ref().protect_count(), 0);
         }
 
         while !heap.mark(partition_id, 64) {}
@@ -606,7 +608,6 @@ mod tests {
 
         unsafe {
             assert!(!head.as_ref().is_local());
-            assert_eq!(head.as_ref().protect_count(), 0);
         }
 
         {
@@ -616,20 +617,17 @@ mod tests {
 
             unsafe {
                 assert!(head.as_ref().is_local());
-                assert_eq!(head.as_ref().protect_count(), 1);
             }
 
             ctx.flush();
 
             unsafe {
                 assert!(!head.as_ref().is_local());
-                assert_eq!(head.as_ref().protect_count(), 0);
             }
         }
 
         unsafe {
             assert!(!head.as_ref().is_local());
-            assert_eq!(head.as_ref().protect_count(), 0);
         }
 
         while !heap.mark(partition_id, 64) {}
@@ -654,22 +652,18 @@ mod tests {
 
         unsafe {
             assert!(head.as_ref().is_local());
-            assert_eq!(head.as_ref().protect_count(), 1);
         }
-
         let added = ctx.add_non_local(head);
         assert!(!added);
 
         unsafe {
             assert!(head.as_ref().is_local());
-            assert_eq!(head.as_ref().protect_count(), 1);
         }
 
         ctx.flush();
 
         unsafe {
             assert!(!head.as_ref().is_local());
-            assert_eq!(head.as_ref().protect_count(), 0);
         }
     }
 
@@ -695,11 +689,8 @@ mod tests {
                 assert!(node.is_root());
                 assert!(head.as_ref().is_root());
                 assert!(!head.as_ref().is_local());
-                assert_eq!(head.as_ref().protect_count(), 0);
             }
         }
-
-        assert!(heap.get_roots(partition_id).any(|n| n == head));
 
         while !heap.mark(partition_id, 64) {}
         let removed_after = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
@@ -733,8 +724,8 @@ mod tests {
             head2 = n2.head_ptr;
 
             unsafe {
-                assert_eq!(head1.as_ref().protect_count(), 1);
-                assert_eq!(head2.as_ref().protect_count(), 1);
+                assert!(head1.as_ref().is_local());
+                assert!(head2.as_ref().is_local());
             }
 
             while !ctx.heap_mut().mark(partition_id, 64) {}
@@ -746,8 +737,8 @@ mod tests {
         }
 
         unsafe {
-            assert_eq!(head1.as_ref().protect_count(), 0);
-            assert_eq!(head2.as_ref().protect_count(), 0);
+            assert!(!head1.as_ref().is_local());
+            assert!(!head2.as_ref().is_local());
         }
 
         while !heap.mark(partition_id, 64) {}
@@ -774,13 +765,13 @@ mod tests {
             head = node.head_ptr;
 
             unsafe {
-                assert_eq!(head.as_ref().protect_count(), 1);
+                assert!(head.as_ref().is_local());
             }
 
             ctx.flush();
 
             unsafe {
-                assert_eq!(head.as_ref().protect_count(), 0);
+                assert!(!head.as_ref().is_local());
             }
 
             while !ctx.heap_mut().mark(partition_id, 64) {}
@@ -878,7 +869,6 @@ mod tests {
 
             unsafe {
                 assert!(head.as_ref().is_local());
-                assert_eq!(head.as_ref().protect_count(), 1);
             }
 
             let promoted = ctx.promote(head);
@@ -887,7 +877,6 @@ mod tests {
             unsafe {
                 assert!(heap.scope_stack[0].contains(head));
                 assert!(head.as_ref().is_local());
-                assert_eq!(head.as_ref().protect_count(), 1);
             }
         }
 
@@ -897,7 +886,7 @@ mod tests {
         }
 
         unsafe {
-            assert_eq!(head.as_ref().protect_count(), 1);
+            assert!(head.as_ref().is_local());
         }
 
         {
@@ -907,7 +896,6 @@ mod tests {
 
         unsafe {
             assert!(!head.as_ref().is_local());
-            assert_eq!(head.as_ref().protect_count(), 0);
         }
     }
 
@@ -943,8 +931,6 @@ mod tests {
             unsafe {
                 assert!(promoted_head.as_ref().is_local());
                 assert!(other_head.as_ref().is_local());
-                assert_eq!(promoted_head.as_ref().protect_count(), 1);
-                assert_eq!(other_head.as_ref().protect_count(), 1);
             }
 
             ctx.set_promote(Some(promoted_head));
@@ -954,9 +940,7 @@ mod tests {
 
         unsafe {
             assert!(promoted_head.as_ref().is_local());
-            assert_eq!(promoted_head.as_ref().protect_count(), 1);
             assert!(!other_head.as_ref().is_local());
-            assert_eq!(other_head.as_ref().protect_count(), 0);
         }
 
         {
@@ -976,7 +960,6 @@ mod tests {
 
         unsafe {
             assert!(!promoted_head.as_ref().is_local());
-            assert_eq!(promoted_head.as_ref().protect_count(), 0);
         }
     }
 
@@ -1001,14 +984,14 @@ mod tests {
             head = node.head_ptr;
 
             unsafe {
-                assert_eq!(head.as_ref().protect_count(), 1);
+                assert!(head.as_ref().is_local());
             }
 
             let promoted = ctx.promote(head);
             assert!(!promoted);
 
             unsafe {
-                assert_eq!(head.as_ref().protect_count(), 1);
+                assert!(head.as_ref().is_local());
             }
         }
 
@@ -1018,7 +1001,7 @@ mod tests {
         }
 
         unsafe {
-            assert_eq!(head.as_ref().protect_count(), 0);
+            assert!(!head.as_ref().is_local());
         }
     }
 
@@ -1044,7 +1027,6 @@ mod tests {
 
             unsafe {
                 assert!(head.as_ref().is_local());
-                assert_eq!(head.as_ref().protect_count(), 1);
             }
 
             ctx.set_promote(Some(head));
@@ -1053,7 +1035,6 @@ mod tests {
 
         unsafe {
             assert!(!head.as_ref().is_local());
-            assert_eq!(head.as_ref().protect_count(), 0);
         }
     }
 
@@ -1077,7 +1058,6 @@ mod tests {
 
         unsafe {
             assert!(!head.as_ref().is_local());
-            assert_eq!(head.as_ref().protect_count(), 0);
         }
 
         heap.push_gc_scope(partition_id);
@@ -1089,7 +1069,6 @@ mod tests {
 
             unsafe {
                 assert!(head.as_ref().is_local());
-                assert_eq!(head.as_ref().protect_count(), 1);
             }
 
             ctx.set_promote(None);
@@ -1103,7 +1082,6 @@ mod tests {
 
         unsafe {
             assert!(!head.as_ref().is_local());
-            assert_eq!(head.as_ref().protect_count(), 0);
         }
     }
 }

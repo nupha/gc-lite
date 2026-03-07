@@ -37,8 +37,6 @@ impl TryFrom<u32> for GcTriColor {
 }
 
 const COLOR_MASK: u32 = 0b11;
-const PROTECT_COUNT_SHIFT: u32 = 2;
-const PROTECT_COUNT_MASK: u32 = 0b111 << PROTECT_COUNT_SHIFT;
 
 bitflags::bitflags! {
     #[repr(transparent)]
@@ -62,7 +60,7 @@ pub struct GcHead {
     /// * bit 16-23: reserved
     /// * bit 8-15:  gc datatype id
     /// * bit 5-7:   flags
-    /// * bit 2-4:   protect count (1-7 means protected)
+    /// * bit 2-4:   reserved
     /// * bit 0-1:   TriColor state
     pub(super) attrs: u32,
 
@@ -124,44 +122,6 @@ impl GcHead {
     #[inline(always)]
     pub(crate) fn set_color(&mut self, color: GcTriColor) {
         self.attrs = (self.attrs & !COLOR_MASK) | (color as u32);
-    }
-
-    #[deprecated(note = "use is_local() instead")]
-    #[inline(always)]
-    pub fn is_protected(&self) -> bool {
-        (self.attrs & PROTECT_COUNT_MASK) != 0
-    }
-
-    #[inline(always)]
-    pub fn protect_count(&self) -> u8 {
-        ((self.attrs & PROTECT_COUNT_MASK) >> PROTECT_COUNT_SHIFT) as u8
-    }
-
-    #[inline(always)]
-    fn set_protect_count(&mut self, count: u8) {
-        debug_assert!(count <= 7);
-        let count = (count as u32) << PROTECT_COUNT_SHIFT;
-        self.attrs = (self.attrs & !PROTECT_COUNT_MASK) | count;
-    }
-
-    #[inline(always)]
-    pub(super) fn inc_protect_count(&mut self) -> u8 {
-        let mut count = self.protect_count();
-        if count >= 7 {
-            panic!("GcHead protect count overflow: {count}");
-        }
-        count += 1;
-        self.set_protect_count(count);
-        count
-    }
-
-    #[inline(always)]
-    pub(super) fn dec_protect_count(&mut self) -> u8 {
-        let mut count = self.protect_count();
-        debug_assert!(count > 0);
-        count -= 1;
-        self.set_protect_count(count);
-        count
     }
 
     #[inline(always)]

@@ -31,8 +31,6 @@ impl std::fmt::Debug for GcPartitionId {
 pub struct GcPartition {
     /// link of nodes in this partition
     pub(crate) nodes: GcNodeLink,
-    /// root nodes in this partition
-    pub(crate) root_nodes: SmallVec<[NonNull<GcHead>; 8]>,
     /// gray nodes to be traced in this partition
     pub(crate) gray_list: Vec<NonNull<GcHead>>,
     /// Is in a marking cycle
@@ -54,7 +52,6 @@ impl GcPartition {
             memory_limit,
             gc_threshold: 0, // Default threshold is 0 bytes (disable automatic GC)
             nodes: GcNodeLink::default(),
-            root_nodes: SmallVec::new(),
             gray_list: Vec::new(),
             marking: false,
         }
