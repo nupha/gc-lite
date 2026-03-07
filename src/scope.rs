@@ -319,6 +319,18 @@ impl<'heap> GcScope<'heap> {
         self.heap_raw_mut().new_scope(partition_id)
     }
 
+    pub fn with_new_scope<R>(&self, f: impl FnOnce(GcScope<'_>) -> R) -> R {
+        let partition_id = self.partition_id();
+        let heap = unsafe { &mut *self.heap.as_ptr() };
+        let scope = heap.new_scope(partition_id);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(scope)));
+
+        match result {
+            Ok(r) => r,
+            Err(e) => std::panic::resume_unwind(e),
+        }
+    }
+
     #[inline(always)]
     pub fn partition_id(&self) -> GcPartitionId {
         self.inner().partition_id()
@@ -464,10 +476,10 @@ impl GcHeap {
     pub fn with_new_scope<R>(
         &mut self,
         partition_id: GcPartitionId,
-        f: impl FnOnce(&GcScope<'_>) -> R,
+        f: impl FnOnce(GcScope<'_>) -> R,
     ) -> R {
         let scope = self.new_scope(partition_id);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&scope)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(scope)));
 
         match result {
             Ok(r) => r,
