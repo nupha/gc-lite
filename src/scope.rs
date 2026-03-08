@@ -466,17 +466,18 @@ impl GcHeap {
         self.scope_stack.last_mut().map(f)
     }
 
+    #[inline]
     pub fn new_scope<'s>(&'s mut self, partition_id: GcPartitionId) -> GcScope<'s> {
         self.push_gc_scope(partition_id);
         let index = self.scope_stack.len() as u8 - 1;
-        let heap_ptr = NonNull::from(self);
         GcScope {
-            heap: heap_ptr,
+            heap: NonNull::from(self),
             index,
             _marker: PhantomData,
         }
     }
 
+    #[inline]
     pub fn with_new_scope<R>(
         &mut self,
         partition_id: GcPartitionId,
