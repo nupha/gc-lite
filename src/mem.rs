@@ -66,7 +66,7 @@ impl GcHeap {
         payload: T,
     ) -> Result<(NonNull<GcHead>, usize), (GcError, T)> {
         match self.partition_mut(partition_id) {
-            Some(par) => {
+            Some(_) => {
                 let size = std::mem::size_of::<T>();
                 let gross_size = std::mem::size_of::<GcHead>() + size;
 
