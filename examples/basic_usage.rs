@@ -57,8 +57,8 @@ fn main() -> GcResult<()> {
 
     // Create two partitions
     println!("\nCreate partitions:");
-    let partition1 = heap.create_partition(1024);
-    let partition2 = heap.create_partition(512);
+    let partition1 = heap.create_partition();
+    let partition2 = heap.create_partition();
     println!("  Created partition1: {:?}", partition1);
     println!("  Created partition2: {:?}", partition2);
     println!("  Number of partitions: {}", heap.partition_ids().len());
@@ -88,7 +88,7 @@ fn main() -> GcResult<()> {
     println!("\nPartition status:");
     for partition_id in heap.partition_ids() {
         if let Some(partition) = heap.partition(partition_id) {
-            let limit = partition.memory_limit();
+            let limit = heap.memory_limit();
             let usage = if limit > 0 {
                 format!(
                     "{}/{} bytes ({:.1}%)",
@@ -103,7 +103,7 @@ fn main() -> GcResult<()> {
                 "  {:?}: {} [自动GC: {}]",
                 partition_id,
                 usage,
-                if partition.gc_threshold() > 0 {
+                if heap.gc_threshold() > 0 {
                     "Enabled"
                 } else {
                     "Disabled"
@@ -152,7 +152,7 @@ fn main() -> GcResult<()> {
     println!("\nDemonstrate automatic garbage collection...");
 
     // Create a small partition to demonstrate automatic GC
-    let small_partition = heap.create_partition(500);
+    let small_partition = heap.create_partition();
 
     // Allocate multiple objects to fill partition
     for i in 0..5 {
@@ -205,7 +205,7 @@ fn main() -> GcResult<()> {
     println!("\nDemonstrate partition deletion:");
 
     // Create an empty partition
-    let empty_partition = heap.create_partition(1024);
+    let empty_partition = heap.create_partition();
     println!("  Created empty partition: {:?}", empty_partition);
 
     // Delete empty partition

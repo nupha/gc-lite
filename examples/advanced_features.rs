@@ -48,7 +48,7 @@ fn main() -> GcResult<()> {
     println!("=== Advanced features example of partitioned garbage collection system ===");
 
     let mut heap = new_heap();
-    let partition = heap.create_partition(2048);
+    let partition = heap.create_partition();
 
     // Demonstrate weak reference functionality
     println!("\n=== Weak reference functionality demonstration ===");
@@ -277,8 +277,8 @@ fn demonstrate_cross_context_detection() -> GcResult<()> {
     let mut heap1 = new_heap();
     let mut heap2 = new_heap();
 
-    let partition1 = heap1.create_partition(1024);
-    let partition2 = heap2.create_partition(1024);
+    let partition1 = heap1.create_partition();
+    let partition2 = heap2.create_partition();
 
     let obj1 = unsafe {
         heap1.alloc_root_raw(

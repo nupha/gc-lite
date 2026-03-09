@@ -35,7 +35,8 @@ fn demonstrate_out_of_memory() -> GcResult<()> {
     println!("1. Create limited memory partition...");
 
     let mut context = GcHeap::new(&GC_TYPE_REGISTRY);
-    let partition_id = context.create_partition(2048); // 2KB limit
+    context.set_memory_limit(2048); // 2KB global limit
+    let partition_id = context.create_partition();
 
     // Allocate first large object (1KB + header)
     println!("2. Allocate first large object...");
@@ -121,7 +122,7 @@ fn demonstrate_partition_management_errors() -> GcResult<()> {
     println!("  ✓ Removing non-existent partition silently fails");
 
     println!("\n2. Test non-empty partition deletion...");
-    let partition_id = context.create_partition(1024);
+    let partition_id = context.create_partition();
 
     // Allocate objects in partition
     let obj = unsafe {
@@ -148,40 +149,34 @@ fn demonstrate_gc_threshold_errors() -> GcResult<()> {
     println!("1. Test GC threshold API...");
 
     let mut context = GcHeap::new(&GC_TYPE_REGISTRY);
-    let partition_id = context.create_partition(1024);
+    context.set_memory_limit(1024);
+    let _partition_id = context.create_partition();
 
     // Test default values
     println!("2. Test default threshold...");
-    assert_eq!(context.gc_threshold(partition_id), Some(0));
+    assert_eq!(context.gc_threshold(), 0);
     println!("  ✓ Default threshold is 0, automatic GC disabled");
 
     // Test setting threshold
     println!("3. Test setting threshold...");
-    context.set_gc_threshold(partition_id, 512);
-    assert_eq!(context.gc_threshold(partition_id), Some(512));
+    context.set_gc_threshold(512);
+    assert_eq!(context.gc_threshold(), 512);
     println!("  ✓ Successfully set threshold to 512, automatic GC enabled");
 
     // Test setting threshold exceeding memory limit
     println!("4. Test setting threshold exceeding memory limit...");
-    context.set_gc_threshold(partition_id, 2048);
+    context.set_gc_threshold(2048);
     // Since threshold exceeds memory limit, will be capped at 0.8x of limit (1024 * 8 / 10 = 819)
-    assert_eq!(context.gc_threshold(partition_id), Some(819));
+    assert_eq!(context.gc_threshold(), 819);
     println!(
         "  ✓ Setting threshold exceeding memory limit automatically adjusted to 0.8x of memory limit"
     );
 
     // Test disabling automatic GC
     println!("5. Test disabling automatic GC...");
-    context.set_gc_threshold(partition_id, 0);
-    assert_eq!(context.gc_threshold(partition_id), Some(0));
+    context.set_gc_threshold(0);
+    assert_eq!(context.gc_threshold(), 0);
     println!("  ✓ Successfully disabled automatic GC, threshold set to 0");
-
-    // Test threshold operations on non-existent partition
-    println!("6. Test threshold operations on non-existent partition...");
-    let invalid_partition = gc_lite::GcPartitionId(9999);
-    assert_eq!(context.gc_threshold(invalid_partition), None);
-    context.set_gc_threshold(invalid_partition, 100); // Do nothing, no error returned
-    println!("  ✓ Setting threshold on non-existent partition does nothing");
 
     Ok(())
 }

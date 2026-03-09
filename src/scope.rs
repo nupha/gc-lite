@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn test_gc_context_local_flag_set_and_cleared_on_commit() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         let head;
 
@@ -515,7 +515,7 @@ mod tests {
     #[test]
     fn test_gc_context_alloc_protects_and_unprotects_on_drop() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         let head;
         {
@@ -553,7 +553,7 @@ mod tests {
     #[test]
     fn test_gc_context_add_sets_local_and_clears_on_commit() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         let node: GcRef<Node> = unsafe {
             heap.alloc_raw(
@@ -600,7 +600,7 @@ mod tests {
     #[test]
     fn test_gc_context_add_on_local_node_returns_false() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         let ctx = GcScope::new(&mut heap, partition_id);
         let node: GcRef<Node> = ctx
@@ -632,7 +632,7 @@ mod tests {
     #[test]
     fn test_gc_context_alloc_root_creates_root_without_protection() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         let head;
 
@@ -662,7 +662,7 @@ mod tests {
     #[test]
     fn test_gc_context_alloc_multiple_nodes() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         let head1;
         let head2;
@@ -711,7 +711,7 @@ mod tests {
     #[test]
     fn test_gc_context_reset_unprotects_and_clears_cache() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         let head;
 
@@ -747,7 +747,7 @@ mod tests {
     #[test]
     fn test_gc_context_level_for_heap_scopes() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         assert_eq!(heap.scope_max_depth(), 0);
 
@@ -778,7 +778,7 @@ mod tests {
     #[test]
     fn test_gc_context_parent_mut_returns_parent_and_level() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         heap.push_gc_scope(partition_id);
         heap.push_gc_scope(partition_id);
@@ -811,7 +811,7 @@ mod tests {
     #[test]
     fn test_set_promote_moves_node_to_parent_scope_and_keeps_protection() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         heap.push_gc_scope(partition_id);
         heap.push_gc_scope(partition_id);
@@ -875,7 +875,7 @@ mod tests {
     #[test]
     fn test_set_promote_in_top_level_scope_is_noop() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         heap.push_gc_scope(partition_id);
 
@@ -908,7 +908,7 @@ mod tests {
     #[test]
     fn test_set_promote_reset_on_non_local_restores_state() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         let node: GcRef<Node> = unsafe {
             heap.alloc_raw(

@@ -18,6 +18,12 @@ pub struct GcHeap {
 
     /// Partition management
     pub(super) partitions: HashMap<GcPartitionId, GcPartition>,
+    /// Global memory usage limit for the entire heap, 0 for unlimited
+    pub(super) memory_limit: usize,
+    /// Global automatic GC threshold for the entire heap, 0 for disabled
+    pub(super) gc_threshold: usize,
+    /// Total memory used across all partitions
+    pub(super) total_memory_used: usize,
     pub(crate) scope_stack: SmallVec<[GcScopeState<'static>; 8]>,
     /// Weak reference list, each slot stores (version, GcHeader)
     pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
@@ -63,6 +69,9 @@ impl GcHeap {
     pub fn new(registry: &'static GcTypeRegistry) -> Self {
         Self {
             partitions: HashMap::new(),
+            memory_limit: 0,
+            gc_threshold: 0,
+            total_memory_used: 0,
             weak_slots: Vec::new(),
             opaque: std::ptr::null_mut(),
             node_dtypes: registry,
@@ -84,37 +93,48 @@ impl GcHeap {
         self.opaque = opaque;
     }
 
-    /// Get garbage collection threshold for partition (bytes)
-    ///
-    /// A return value of 0 means automatic GC is disabled
-    pub fn gc_threshold(&self, partition_id: GcPartitionId) -> Option<usize> {
-        self.partition(partition_id)
-            .map(|partition| partition.gc_threshold())
+    pub fn memory_limit(&self) -> usize {
+        self.memory_limit
     }
 
-    /// Set garbage collection threshold for partition (in bytes)
-    ///
-    /// # Parameters
-    /// - `partition_id`: Partition ID
-    /// - `threshold`: New garbage collection threshold (bytes)
-    ///   - A value of 0 disables automatic GC
-    ///   - If threshold exceeds partition memory limit, it's automatically set to the memory limit
-    ///
-    /// # Notes
-    /// - If the partition doesn't exist, this method does nothing
-    pub fn set_gc_threshold(&mut self, partition_id: GcPartitionId, threshold: usize) {
-        if let Some(partition) = self.partition_mut(partition_id) {
-            partition.set_gc_threshold(if threshold > 0 {
-                let lim = partition.memory_limit();
-                if lim > 0 && threshold > lim {
-                    lim
-                } else {
-                    threshold
-                }
-            } else {
-                threshold
-            });
+    pub fn set_memory_limit(&mut self, limit: usize) -> usize {
+        if limit == 0 {
+            self.memory_limit = 0;
+        } else {
+            let used = self.total_memory_used;
+            let applied = std::cmp::max(used, limit);
+            self.memory_limit = applied;
+
+            if self.gc_threshold > 0 && self.gc_threshold >= applied {
+                let adjusted = applied - (applied >> 2);
+                self.gc_threshold = adjusted;
+            }
         }
+
+        self.memory_limit
+    }
+
+    pub fn gc_threshold(&self) -> usize {
+        self.gc_threshold
+    }
+
+    pub fn set_gc_threshold(&mut self, threshold: usize) -> usize {
+        if threshold > 0 && self.memory_limit > 0 {
+            let capped = self.memory_limit.saturating_mul(8).saturating_div(10);
+            self.gc_threshold = std::cmp::min(threshold, capped);
+        } else {
+            self.gc_threshold = threshold;
+        }
+
+        self.gc_threshold
+    }
+
+    /// Check if garbage collection is needed
+    #[inline(always)]
+    pub fn should_gc(&self) -> bool {
+        // If GC threshold > 0 and memory usage reaches threshold, trigger GC
+        // gc_threshold = 0 means automatic GC is disabled
+        self.gc_threshold > 0 && self.total_memory_used >= self.gc_threshold
     }
 
     /// Attach a node to partition's nodes chain.
@@ -192,15 +212,25 @@ impl GcHeap {
 
         if let Some(par) = self.partitions.get_mut(&id) {
             if delta >= 0 {
-                par.memory_used += delta as usize;
+                let d = delta as usize;
+                par.memory_used += d;
+                self.total_memory_used += d;
             } else {
-                debug_assert!(par.memory_used >= (-delta) as usize);
-                par.memory_used -= (-delta) as usize;
+                let d = (-delta) as usize;
+                debug_assert!(par.memory_used >= d);
+                debug_assert!(self.total_memory_used >= d);
+                par.memory_used -= d;
+                self.total_memory_used -= d;
             }
             par.memory_used
         } else {
             0
         }
+    }
+
+    #[inline(always)]
+    pub const fn memory_used(&self) -> usize {
+        self.total_memory_used
     }
 }
 
@@ -231,7 +261,7 @@ mod heap_tests {
     #[test]
     fn test_heap_with_context_alloc_and_cleanup() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         let head = heap.with_new_scope(partition_id, |ctx| {
             let node: GcRef<Node> = ctx

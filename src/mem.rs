@@ -70,8 +70,10 @@ impl GcHeap {
                 let size = std::mem::size_of::<T>();
                 let gross_size = std::mem::size_of::<GcHead>() + size;
 
-                if unlikely(par.memory_limit > 0 && par.memory_used + gross_size > par.memory_limit)
-                {
+                if unlikely(
+                    self.memory_limit > 0
+                        && self.total_memory_used + gross_size > self.memory_limit,
+                ) {
                     Err((GcError::PartitionFull, payload))
                 } else {
                     let gc_type = T::GC_TYPE_ID;

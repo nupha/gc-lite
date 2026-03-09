@@ -34,21 +34,13 @@ pub struct GcPartition {
     /// Is in a marking cycle
     marking: bool,
 
-    /// Current memory usage
     pub(crate) memory_used: usize,
-    /// Memory usage limit, 0 for unlimited
-    pub(crate) memory_limit: usize,
-    /// Garbage collection threshold (triggers automatic GC when memory usage reaches this byte count)
-    /// A value of 0 means automatic GC is disabled
-    pub(crate) gc_threshold: usize,
 }
 
 impl GcPartition {
-    fn new(memory_limit: usize) -> Self {
+    fn new() -> Self {
         Self {
             memory_used: 0,
-            memory_limit,
-            gc_threshold: 0, // Default threshold is 0 bytes (disable automatic GC)
             nodes: GcNodeLink::default(),
             gray_list: Vec::new(),
             marking: false,
@@ -58,69 +50,6 @@ impl GcPartition {
     #[inline(always)]
     pub fn memory_used(&self) -> usize {
         self.memory_used
-    }
-
-    /// Get memory limit, 0 for unlimited.
-    #[inline(always)]
-    pub fn memory_limit(&self) -> usize {
-        self.memory_limit
-    }
-
-    /// Set memory limit, 0 for unlimited.
-    /// if `limit` is less than currently used memory, bring up limit to used memory instead.
-    /// Returns the actual memory limit applied.
-    pub fn set_memory_limit(&mut self, limit: usize) -> usize {
-        if limit == 0 {
-            self.memory_limit = 0;
-            0
-        } else {
-            let n = std::cmp::max(self.memory_used, limit);
-            self.memory_limit = n;
-            if self.gc_threshold >= n {
-                self.gc_threshold = n - (n >> 2); // 0.75x of
-            }
-            n
-        }
-    }
-
-    /// Check if garbage collection is needed
-    #[inline(always)]
-    pub fn should_gc(&self) -> bool {
-        // If GC threshold > 0 and memory usage reaches threshold, trigger GC
-        // gc_threshold = 0 means automatic GC is disabled
-        self.gc_threshold > 0 && self.memory_used >= self.gc_threshold
-    }
-
-    /// Get garbage collection threshold (bytes)
-    ///
-    /// A return value of 0 means automatic GC is disabled
-    #[inline(always)]
-    pub fn gc_threshold(&self) -> usize {
-        self.gc_threshold
-    }
-
-    /// Set garbage collection threshold (bytes)
-    ///
-    /// # Parameters
-    /// - `threshold`: New garbage collection threshold (bytes)
-    ///   - A value of 0 disables automatic GC
-    ///   - Value must be > 0 and <= partition memory limit (if memory limit is set)
-    ///
-    /// # Notes
-    /// This method does not perform validation, caller should ensure threshold validity
-    pub fn set_gc_threshold(&mut self, threshold: usize) -> usize {
-        let limit = self.memory_limit;
-        if threshold > 0 && limit > 0 {
-            let n = std::cmp::min(
-                threshold,
-                limit * 8 / 10, // 0.8x of max
-            );
-            self.gc_threshold = n;
-            n
-        } else {
-            self.gc_threshold = threshold;
-            threshold
-        }
     }
 
     #[inline(always)]
@@ -154,13 +83,7 @@ impl GcPartition {
 
 impl GcHeap {
     /// Create a new partition.
-    ///
-    /// # Parameters
-    /// - `memory_limit`: Optional memory limit (0 for unlimited)
-    ///
-    /// # Returns
-    /// The ID of the newly created partition
-    pub fn create_partition(&mut self, memory_limit: usize) -> GcPartitionId {
+    pub fn create_partition(&mut self) -> GcPartitionId {
         thread_local! {
             static NEXT_PARTITION_ID: Cell<u16> = const { Cell::new(1) };
         }
@@ -188,7 +111,7 @@ impl GcHeap {
             }
         });
 
-        let partition = GcPartition::new(memory_limit);
+        let partition = GcPartition::new();
         self.partitions.insert(id, partition);
 
         log::trace!("[new_scope] {id:?}");
@@ -265,11 +188,10 @@ mod tests {
     #[test]
     fn test_partition_creation() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let id = heap.create_partition(1024);
+        let id = heap.create_partition();
 
         let partition = heap.partition(id).unwrap();
-        assert_eq!(partition.memory_limit(), 1024);
-        assert_eq!(partition.gc_threshold(), 0); // Default threshold is 0, automatic GC disabled
+        assert_eq!(partition.memory_used(), 0);
 
         // Clean up partition
         heap.remove_partition(id, |_, n| {
@@ -281,37 +203,45 @@ mod tests {
     #[test]
     fn test_gc_threshold() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let id = heap.create_partition(1024);
+        heap.set_memory_limit(1024);
 
-        let partition = heap.partition_mut(id).unwrap();
-        assert_eq!(partition.gc_threshold(), 0);
+        assert_eq!(heap.gc_threshold(), 0);
 
-        partition.set_gc_threshold(512);
-        assert_eq!(partition.gc_threshold(), 512);
+        heap.set_gc_threshold(512);
+        assert_eq!(heap.gc_threshold(), 512);
 
-        partition.set_gc_threshold(0);
-        assert_eq!(partition.gc_threshold(), 0);
+        heap.set_gc_threshold(2048);
+        assert_eq!(heap.gc_threshold(), 819);
 
-        // Clean up
-        heap.remove_partition(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        heap.set_gc_threshold(0);
+        assert_eq!(heap.gc_threshold(), 0);
     }
 
     #[test]
     fn test_memory_limit() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let id = heap.create_partition(1024);
+        let id = heap.create_partition();
 
-        let partition = heap.partition_mut(id).unwrap();
-        assert_eq!(partition.memory_limit(), 1024);
+        assert_eq!(heap.memory_limit(), 0);
 
-        partition.set_memory_limit(2048);
-        assert_eq!(partition.memory_limit(), 2048);
+        // Simulate some allocations in a single partition
+        heap.update_mem_use(id, 100);
+        assert_eq!(heap.memory_limit(), 0);
 
-        partition.set_memory_limit(0);
-        assert_eq!(partition.memory_limit(), 0);
+        // Set limit larger than used memory
+        let applied = heap.set_memory_limit(512);
+        assert_eq!(applied, 512);
+        assert_eq!(heap.memory_limit(), 512);
 
-        // Clean up
-        heap.remove_partition(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        // Set limit smaller than used memory should clamp to used
+        let applied_small = heap.set_memory_limit(80);
+        assert_eq!(applied_small, 100);
+        assert_eq!(heap.memory_limit(), 100);
+
+        // Set unlimited
+        let applied_zero = heap.set_memory_limit(0);
+        assert_eq!(applied_zero, 0);
+        assert_eq!(heap.memory_limit(), 0);
     }
 
     #[test]
@@ -327,8 +257,8 @@ mod tests {
     #[test]
     fn test_update_mem_use() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p1 = heap.create_partition(0);
-        let p2 = heap.create_partition(0);
+        let p1 = heap.create_partition();
+        let p2 = heap.create_partition();
 
         heap.update_mem_use(p1, 100);
         assert_eq!(heap.partition(p1).unwrap().memory_used(), 100);

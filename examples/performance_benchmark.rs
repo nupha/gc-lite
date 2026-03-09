@@ -42,7 +42,7 @@ fn benchmark_object_sizes() {
         println!("\nTest object count: {}", size);
 
         let mut context = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition = context.create_partition(1024 * 1024 * 10); // 10MB
+        let partition = context.create_partition();
 
         // Measure allocation performance
         let alloc_start = Instant::now();
@@ -92,7 +92,7 @@ fn benchmark_complex_graphs() {
         println!("\nTest complex object graph size: {} nodes", size);
 
         let mut context = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition = context.create_partition(1024 * 1024 * 10);
+        let partition = context.create_partition();
 
         // Create complex object graph
         let graph_start = Instant::now();
@@ -151,7 +151,8 @@ fn benchmark_memory_efficiency() {
     println!("\nTesting memory usage efficiency...");
 
     let mut context = GcHeap::new(&GC_TYPE_REGISTRY);
-    let partition = context.create_partition(1024 * 1024); // 1MB
+    context.set_memory_limit(1024 * 1024); // 1MB global limit
+    let partition = context.create_partition();
 
     // Allocate many small objects
     let small_objects_count = 1000;
@@ -162,10 +163,9 @@ fn benchmark_memory_efficiency() {
         small_objects.push(obj);
     }
 
-    // Get partition memory usage
     if let Some(partition_info) = context.partition(partition) {
         let used = partition_info.memory_used();
-        let limit = partition_info.memory_limit();
+        let limit = context.memory_limit();
         let efficiency = if limit > 0 {
             (used as f64 / limit as f64) * 100.0
         } else {
@@ -211,10 +211,11 @@ fn benchmark_auto_gc_threshold() {
     println!("\nTesting automatic GC threshold performance...");
 
     let mut context = GcHeap::new(&GC_TYPE_REGISTRY);
-    let partition = context.create_partition(2048); // 2KB limit
+    context.set_memory_limit(2048); // 2KB global limit
+    let partition = context.create_partition();
 
     // Set automatic GC threshold to 1.5KB
-    context.set_gc_threshold(partition, 1500);
+    context.set_gc_threshold(1500);
 
     // Allocate objects until automatic GC is triggered
     let mut allocated_bytes = 0;

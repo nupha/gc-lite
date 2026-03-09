@@ -325,7 +325,7 @@ mod sweep_test {
     #[test]
     fn test_sweep_with_basic() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         let objects: Vec<GcRef<MyI32>> = (0..5)
             .map(|i| unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap())
@@ -368,7 +368,7 @@ mod sweep_test {
     #[test]
     fn test_sweep_with_chain_head_removal() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         let objects: Vec<GcRef<MyI32>> = (0..5)
             .map(|i| unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap())
@@ -422,7 +422,7 @@ mod sweep_test {
     #[test]
     fn test_sweep_with_all_chain_head_removal() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         let _objects: Vec<GcRef<MyI32>> = (0..3)
             .map(|i| unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap())
@@ -454,7 +454,7 @@ mod sweep_test {
     #[test]
     fn test_sweep_with_middle_node_removal() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         let _objects: Vec<GcRef<MyI32>> = (0..5)
             .map(|i| {
@@ -497,7 +497,7 @@ mod sweep_test {
     #[test]
     fn test_sweep_with_root_node_removal() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         let root_obj = unsafe { heap.alloc_raw(partition_id, MyI32(0)) }.unwrap();
         let _objects: Vec<GcRef<MyI32>> = (1..3)
@@ -525,7 +525,7 @@ mod sweep_test {
     #[test]
     fn test_sweep_with_empty_partition() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
+        let partition_id = heap.create_partition();
 
         while !heap.mark(partition_id, 64) {}
 

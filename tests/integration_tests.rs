@@ -72,22 +72,21 @@ fn test_partition_creation_and_retrieval() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
 
     // Create partitions
-    let id1 = heap.create_partition(1024);
-    let id2 = heap.create_partition(0); // 0 for unlimited
+    let id1 = heap.create_partition();
+    let id2 = heap.create_partition();
 
     assert_ne!(id1, id2);
     assert_eq!(heap.partition_ids().len(), 2);
 
     // Verify partition info
     let partition = heap.partition(id1).unwrap();
-    assert_eq!(partition.memory_limit(), 1024);
     assert_eq!(partition.memory_used(), 0);
 }
 
 #[test]
 fn test_partition_removal() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(1024);
+    let id = heap.create_partition();
 
     assert!(heap.partition(id).is_some());
     assert_eq!(heap.partition_ids().len(), 1);
@@ -101,19 +100,19 @@ fn test_partition_removal() {
 #[test]
 fn test_partition_gc_threshold() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(1024);
+    heap.set_memory_limit(1024);
 
     // Default threshold should be 0 (disabled)
-    assert_eq!(heap.gc_threshold(id), Some(0));
+    assert_eq!(heap.gc_threshold(), 0);
 
     // Set threshold
-    heap.set_gc_threshold(id, 512);
-    assert_eq!(heap.gc_threshold(id), Some(512));
+    heap.set_gc_threshold(512);
+    assert_eq!(heap.gc_threshold(), 512);
 
     // Set threshold exceeding limit should auto-adjust to 0.8x of limit
-    heap.set_gc_threshold(id, 2048);
+    heap.set_gc_threshold(2048);
     // 1024 * 8 / 10 = 819
-    assert_eq!(heap.gc_threshold(id), Some(819));
+    assert_eq!(heap.gc_threshold(), 819);
 }
 
 // ============ Memory Limit Tests ============
@@ -121,7 +120,8 @@ fn test_partition_gc_threshold() {
 #[test]
 fn test_allocation_fails_when_limit_exceeded() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(256); // Small limit
+    heap.set_memory_limit(256); // Small global limit
+    let id = heap.create_partition();
 
     // Allocate objects until we hit the limit
     let mut allocated_count = 0;
@@ -168,7 +168,7 @@ fn test_allocation_fails_when_limit_exceeded() {
 #[test]
 fn test_set_memory_limit_above_used_memory() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(1024);
+    let id = heap.create_partition();
 
     // Allocate some objects to use memory
     let _obj1 = unsafe {
@@ -198,10 +198,11 @@ fn test_set_memory_limit_above_used_memory() {
 
     // Set limit larger than used memory - should work
     let new_limit = used_memory + 512;
-    heap.partition_mut(id).unwrap().set_memory_limit(new_limit);
+    let applied = heap.set_memory_limit(new_limit);
+    assert_eq!(applied, new_limit);
 
     // Verify limit was set correctly
-    assert_eq!(heap.partition(id).unwrap().memory_limit(), new_limit);
+    assert_eq!(heap.memory_limit(), new_limit);
 
     // Should be able to allocate more objects
     let _obj3 = unsafe {
@@ -219,7 +220,7 @@ fn test_set_memory_limit_above_used_memory() {
 #[test]
 fn test_set_memory_limit_below_used_memory() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(2048);
+    let id = heap.create_partition();
 
     // Allocate some objects to use memory
     let _obj1 = unsafe {
@@ -249,14 +250,11 @@ fn test_set_memory_limit_below_used_memory() {
 
     // Set limit smaller than used memory - should be adjusted to used memory
     let smaller_limit = used_memory - 1;
-    let applied_limit = heap
-        .partition_mut(id)
-        .unwrap()
-        .set_memory_limit(smaller_limit);
+    let applied_limit = heap.set_memory_limit(smaller_limit);
 
     // The limit should be adjusted to at least the used memory
     assert_eq!(applied_limit, used_memory);
-    assert_eq!(heap.partition(id).unwrap().memory_limit(), used_memory);
+    assert_eq!(heap.memory_limit(), used_memory);
 
     // Should still be able to allocate (because limit >= used_memory)
     // But not more than the limit allows
@@ -277,13 +275,13 @@ fn test_set_memory_limit_below_used_memory() {
 #[test]
 fn test_set_unlimited_memory() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(512);
+    let id = heap.create_partition();
 
     // Set limit to 0 (unlimited)
-    heap.partition_mut(id).unwrap().set_memory_limit(0);
+    heap.set_memory_limit(0);
 
     // Verify limit is 0 (unlimited)
-    assert_eq!(heap.partition(id).unwrap().memory_limit(), 0);
+    assert_eq!(heap.memory_limit(), 0);
 
     // Should be able to allocate many objects without hitting limit
     let mut allocated_count = 0;
@@ -318,7 +316,7 @@ fn test_set_unlimited_memory() {
 #[test]
 fn test_object_allocation() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(2048);
+    let id = heap.create_partition();
 
     // Get initial memory usage
     let initial_memory = heap.partition(id).unwrap().memory_used();
@@ -348,7 +346,7 @@ fn test_object_allocation() {
 #[test]
 fn test_memory_usage_increases_with_allocation() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(8192);
+    let id = heap.create_partition();
 
     // Track memory usage after each allocation
     let mut memory_after_each_alloc: Vec<usize> = Vec::new();
@@ -403,7 +401,7 @@ fn test_memory_usage_increases_with_allocation() {
 #[test]
 fn test_multiple_object_allocation() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(4096);
+    let id = heap.create_partition();
 
     // Allocate multiple objects
     let mut objs: Vec<GcRef<TestData>> = Vec::new();
@@ -435,7 +433,9 @@ fn test_multiple_object_allocation() {
 #[test]
 fn test_partition_full_error() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(512); // Very small limit
+    // Use a small global heap limit so allocations will eventually fail
+    heap.set_memory_limit(512);
+    let id = heap.create_partition();
 
     // Try to allocate objects until partition is full
     let mut result = unsafe {
@@ -490,7 +490,7 @@ fn test_invalid_partition_allocation() {
 #[test]
 fn test_root_object_management() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(2048);
+    let id = heap.create_partition();
 
     let obj = unsafe {
         heap.alloc_root_raw(
@@ -510,7 +510,7 @@ fn test_root_object_management() {
 #[test]
 fn test_root_objects_preserve_during_gc() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(2048);
+    let id = heap.create_partition();
 
     let obj = unsafe {
         heap.alloc_root_raw(
@@ -534,7 +534,7 @@ fn test_root_objects_preserve_during_gc() {
 #[test]
 fn test_non_root_objects_collected() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(2048);
+    let id = heap.create_partition();
 
     // Create two objects, one is root, one is not
     let root_obj = unsafe {
@@ -572,7 +572,7 @@ fn test_non_root_objects_collected() {
 #[test]
 fn test_manual_garbage_collection() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(2048);
+    let id = heap.create_partition();
 
     // Create objects with some as roots
     for i in 0..5 {
@@ -619,7 +619,7 @@ fn test_manual_garbage_collection() {
 #[test]
 fn test_circular_reference_handling() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(4096);
+    let id = heap.create_partition();
 
     // Allocate nodes and create a circular reference
     let mut node1 = unsafe { heap.alloc_raw(id, TestNode::new(1)) }.unwrap();
@@ -648,7 +648,7 @@ fn test_circular_reference_handling() {
 #[test]
 fn test_weak_reference_creation_and_upgrade() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(2048);
+    let id = heap.create_partition();
 
     // Create object and weak reference
     let obj = unsafe {
@@ -675,7 +675,7 @@ fn test_weak_reference_creation_and_upgrade() {
 #[test]
 fn test_weak_reference_after_collection() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(2048);
+    let id = heap.create_partition();
 
     // Create object and weak reference
     let obj = unsafe {
@@ -702,7 +702,7 @@ fn test_weak_reference_after_collection() {
 #[test]
 fn test_multiple_weak_references() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let id = heap.create_partition(2048);
+    let id = heap.create_partition();
 
     let obj = unsafe {
         heap.alloc_root_raw(
@@ -731,8 +731,8 @@ fn test_weak_reference_after_partition_removal() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
 
     // 创建两个同级的 partitions
-    heap.create_partition(2048);
-    let child_id = heap.create_partition(2048);
+    heap.create_partition();
+    let child_id = heap.create_partition();
 
     // 在下属partition创建对象
     let obj = unsafe {
@@ -768,8 +768,8 @@ fn test_contains_method() {
     let mut heap1 = GcHeap::new(&GC_TYPE_REGISTRY);
     let mut heap2 = GcHeap::new(&GC_TYPE_REGISTRY);
 
-    let id1 = heap1.create_partition(1024);
-    let id2 = heap2.create_partition(1024);
+    let id1 = heap1.create_partition();
+    let id2 = heap2.create_partition();
 
     let obj1 = unsafe {
         heap1.alloc_raw(
