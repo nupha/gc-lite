@@ -4,131 +4,129 @@ A Partitioned Garbage Collector.
 
 ## Features
 
-1. **Flat Partition**: Supports multiple independent partitions without parent-child hierarchical relationships
-2. **Root Objects**: Objects within each partition can be independently set as root objects
-3. **Mark-Sweep**: Implements classic garbage collection algorithm
-4. **Weak Reference**: Provides weak reference mechanism to avoid memory leaks caused by circular references
-5. **Type Safety**: Ensures memory safety through Rust's type system
+1. **Flat partitions**: Multiple independent partitions without parent–child hierarchy
+2. **Tri-color marking**: Classic tri-color mark–sweep algorithm with gray lists per partition
+3. **Root and scope based lifetime**: Root nodes and stack scopes define node reachability
+4. **Weak references**: Non-owning references that do not prevent collection
+5. **Global memory limit and GC threshold**: Heap-wide memory limit with automatic GC triggering
+6. **Type-safe tracing**: All managed types implement `GcTrace` and are registered in a static type table
 
 ## Core Components
 
-- **GcHeap**: Garbage collection heap, manages the lifecycle of all partitions and objects
-- **GcPartitionId**: Partition identifier
-- **GcPartition**: Partition information including memory usage
-- **Gc<T>**: GC pointer wrapper providing safe object access
-- **GcRef<T>**: Underlying GC reference for internal operations
-- **GcWeak<T>**: Weak reference that doesn't prevent object collection
-- **GcTrace** trait: Defines behavior that objects to be garbage collected must implement
-- **GcTraceCtx**: Unified trace context for traversal and marking reachable objects
+- **GcHeap**: Owns all partitions, tracks memory usage and runs garbage collection
+- **GcPartitionId / GcPartition**: Partition identifier and per-partition statistics
+- **GcRef<T>**: Typed GC reference that dereferences to `&T`
+- **GcWeak<T>**: Weak reference that can be upgraded to `GcRef<T>`
+- **GcTrace / GcTraceCtx**: Tracing trait and context used by the collector
+- **GcScope**: Scoped allocation context for local nodes to be protected from being garbage collected
+- **GcTypeRegistry / gc_type_register!**: Static type table and helper macro used to register GC types
+
+Before using the heap, every GC-managed type must be registered through the `gc_type_register!` macro. This macro generates a static `GC_TYPE_REGISTRY` variable that holds all type metadata and automatically defines `GC_TYPE_ID` and helper constructors (such as `alloc_node`) for each registered type. The symbol name `GC_TYPE_REGISTRY` is created by the macro itself and is passed to `GcHeap::new(&GC_TYPE_REGISTRY)` in all examples below.
 
 ## Basic Usage
 
 ```rust
-use gc_lite::{GcHeap, GcResult, GcTrace};
+use gc_lite::{GcHeap, GcRef, GcResult, GcTrace, GcTraceCtx, gc_type_register};
+
+#[derive(Debug)]
+struct MyData {
+    value: i32,
+}
+
+impl GcTrace for MyData {
+    fn trace(&self, _: &mut GcTraceCtx) {}
+}
+
+// Register gc managed data types
+gc_type_register! {
+    MyData;
+}
 
 fn main() -> GcResult<()> {
-    // Create garbage collection heap
-    let mut heap = GcHeap::new();
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+    let partition = heap.create_partition();
 
-    // Create new partition
-    let partition_id = heap.create_partition("my_partition".to_string(), Some(1024));
+    let value: GcRef<MyData> =
+        unsafe { heap.alloc_root_raw(partition, MyData { value: 42 }) }
+            .map_err(|(err, _)| err)?;
 
-    // Create object in specified partition
-    let obj = heap.alloc(partition_id, String::from("Hello")).map_err(|(err, _)| err)?;
+    println!("value = {}", value.value);
 
-    // Create root object
-    heap.set_root(obj, true);
-    let root_obj = heap.alloc(partition_id, 42).map_err(|(err, _)| err)?;
-
-    // Manually trigger garbage collection
-    let freed = heap.collect_garbage(partition_id);
-    println!("Freed {} bytes", freed);
+    let freed = heap.garbage_collect(partition, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    println!("freed {} bytes", freed);
 
     Ok(())
 }
 ```
 
+All subsequent examples assume that types have been registered with `gc_type_register!`
+and that a `GcHeap` instance and at least one partition already exist.
+
 ## Partition Management
 
 ```rust
-use gc_lite::{GcHeap, GcResult};
+use gc_lite::GcHeap;
 
-let mut heap = GcHeap::new();
+let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
 
-// Create partitions
-let partition1 = heap.create_partition("partition1".to_string(), Some(1024));
-let partition2 = heap.create_partition("partition2".to_string(), Some(512));
+let partition1 = heap.create_partition();
+let partition2 = heap.create_partition();
 
-// Get partition information
-if let Some(partition) = heap.partition(partition1) {
-    println!("Partition: {}, Memory usage: {}/{}",
-        partition.name(),
-        partition.memory_used(),
-        partition.memory_limit());
+for id in heap.partition_ids() {
+    if let Some(partition) = heap.partition(id) {
+        println!("partition {:?}, used {} bytes", id, partition.memory_used());
+    }
 }
 
-// Set memory limit (0 means unlimited)
-heap.partition_mut(partition1).unwrap().set_memory_limit(2048);
+heap.set_memory_limit(2048);
+heap.set_gc_threshold(1024);
 
-// Get/set GC threshold
-heap.set_gc_threshold(partition1, 1024);
-let threshold = heap.gc_threshold(partition1).unwrap();
-
-// Delete partition (must be empty)
-heap.remove_partition(partition2);
-
-// Automatic garbage collection (all partitions needing GC)
-let total_freed = heap.collect_garbage_auto();
+heap.remove_partition(partition2, GcHeap::DUMMY_DISPOSE_CALLBACK);
 ```
 
-## Root Object Management
+## Root Objects and Scopes
 
 ```rust
-use gc_lite::{GcHeap, GcResult};
+use gc_lite::{GcHeap, GcRef, GcScope};
 
-// Create regular object
-let obj = heap.alloc(partition_id, String::from("test")).map_err(|(err, _)| err)?;
+let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+let partition = heap.create_partition();
 
-// Set as root object
-heap.set_root(obj, true);
+let scope = GcScope::new(&mut heap, partition);
 
-// Clear root object status
-heap.set_root(obj, false);
+let root: GcRef<MyData> = scope.alloc_root(MyData { value: 1 }).unwrap();
+let local: GcRef<MyData> = scope.alloc_local(MyData { value: 2 }).unwrap();
 
-// Directly create root object
-let root_obj = heap.alloc(partition_id, 42).map_err(|(err, _)| err)?;
-heap.set_root(root_obj, true);
+scope.flush();
+
+let freed = heap.garbage_collect(partition, GcHeap::DUMMY_DISPOSE_CALLBACK);
+println!("freed {} bytes", freed);
 ```
 
 ## Weak References
 
 ```rust
-use gc_lite::{GcHeap, GcResult};
+use gc_lite::{GcHeap, GcRef, GcWeak};
 
-let obj = heap.alloc(partition_id, String::from("weak test")).map_err(|(err, _)| err)?;
-heap.set_root(obj, true);
+let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+let partition = heap.create_partition();
 
-// Create weak reference
-let weak_ref = heap.downgrade(&obj);
+let strong: GcRef<MyData> =
+    unsafe { heap.alloc_root_raw(partition, MyData { value: 10 }) }
+        .map_err(|(err, _)| err)?;
 
-// Try to upgrade weak reference
-match weak_ref.upgrade(&heap) {
-    Some(strong_ref) => {
-        let value = unsafe { strong_ref.as_ref() };
-        println!("Weak reference upgrade successful: {}", value);
-    }
-    None => {
-        println!("Weak reference upgrade failed (object has been collected)");
-    }
+let weak: GcWeak<MyData> = heap.downgrade(&strong);
+
+match weak.upgrade(&heap) {
+    Some(value) => println!("upgraded: {}", value.value),
+    None => println!("node collected"),
 }
 ```
 
-## Custom Types
-
-To use custom types, implement the `GcTrace` trait:
+## Data Types
 
 ```rust
-use gc_lite::{GcTrace, GcTraceCtx, GcPartitionId};
+use gc_lite::{GcRef, GcTrace, GcTraceCtx, gc_type_register};
 
 #[derive(Debug)]
 struct MyNode {
@@ -143,9 +141,13 @@ impl MyNode {
             children: Vec::new(),
         }
     }
+
+    fn add_child(&mut self, child: GcRef<MyNode>) {
+        self.children.push(child);
+    }
 }
 
-  impl GcTrace for MyNode {
+impl GcTrace for MyNode {
     fn trace(&self, ctx: &mut GcTraceCtx) {
         for child in &self.children {
             ctx.add(*child);
@@ -153,113 +155,60 @@ impl MyNode {
     }
 }
 
-// Traverse and collect the whole subtree starting from a node:
-// let mut heap = GcHeap::new();
-// let partition_id = heap.create_partition("p".to_string(), Some(1024));
-// let root = heap.alloc(partition_id, MyNode::new("root")).unwrap();
-// let (nodes, edges) = heap.collect_subtree(root.node_ptr(), GcPartitionId::NONE);
+gc_type_register! {
+    MyNode;
+}
+```
+
+## Errors
+
+```rust
+use gc_lite::{GcError, GcHeap, GcResult, GcTrace, GcTraceCtx, gc_type_register};
+
+#[derive(Debug)]
+struct Large([u8; 1024]);
+
+impl GcTrace for Large {
+    fn trace(&self, _: &mut GcTraceCtx) {}
+}
+
+gc_type_register! {
+    Large;
+}
+
+fn main() -> GcResult<()> {
+    let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+    heap.set_memory_limit(64);
+    let partition = heap.create_partition();
+
+    match unsafe { heap.alloc_raw(partition, Large([0; 1024])) } {
+        Ok(_) => println!("allocated"),
+        Err((GcError::PartitionFull, _)) => println!("partition is full"),
+        Err((GcError::AllocationFailed, _)) => println!("allocation failed"),
+        Err((GcError::PartitionNotFound, _)) => println!("partition not found"),
+        Err((GcError::InvalidReference, _)) => println!("invalid reference"),
+    }
+
+    Ok(())
+}
 ```
 
 ## Running Examples
 
 ```bash
-# Run basic usage example
 cargo run --example basic_usage
+cargo run --example advanced_features
+cargo run --example error_handling
+cargo run --example performance_benchmark
 
-# Run tests
 cargo test
-```
-
-## Manual Memory Release
-
-```rust
-use gc_lite::{GcHeap, GcResult};
-
-// Safely release an object (checks for references)
-let obj = heap.alloc(partition_id, String::from("test")).map_err(|(err, _)| err)?;
-// ... use obj ...
-let result = heap.free(obj);
-match result {
-    Ok(_) => println!("Object released successfully"),
-    Err(GcError::InvalidReference) => println!("Object is still referenced"),
-    _ => println!("Release failed"),
-}
-```
-
-## Context Detection
-
-```rust
-use gc_lite::GcHeap;
-
-let mut heap1 = GcHeap::new();
-let mut heap2 = GcHeap::new();
-
-let id1 = heap1.create_partition("p1".to_string(), Some(1024));
-let id2 = heap2.create_partition("p2".to_string(), Some(1024));
-
-let obj1 = heap1.alloc(id1, 42).unwrap();
-let obj2 = heap2.alloc(id2, 100).unwrap();
-
-// Check if object belongs to a heap
-assert!(heap1.contains(&obj1));
-assert!(!heap1.contains(&obj2));
-```
-
-## Gc Wrapper
-
-```rust
-use gc_lite::{Gc, GcHeap, GcTrace};
-
-#[derive(Debug)]
-struct Data {
-    value: i32,
-}
-
-  impl GcTrace for Data {
-    fn trace(&self, _ctx: &mut gc_lite::GcTraceCtx) {}
-}
-
-let mut heap = GcHeap::new();
-let id = heap.create_partition("test".to_string(), Some(1024));
-
-let gc = Gc::new_in_partition(&mut heap, id, Data { value: 42 }).unwrap();
-
-// Deref access
-assert_eq!(gc.value, 42);
-
-// Mutable access
-gc.as_mut().value = 100;
-assert_eq!(gc.value, 100);
-
-// Set as root
-gc.set_root(&mut heap, true);
-```
-
-## Error Handling
-
-```rust
-use gc_lite::{GcError, GcHeap};
-
-let mut heap = GcHeap::new();
-let id = heap.create_partition("test".to_string(), Some(64)); // Small limit
-
-// Try to allocate large object
-let result = heap.alloc(id, [0u8; 1024]);
-match result {
-    Ok(_) => println!("Allocated"),
-    Err((GcError::PartitionFull, _)) => println!("Partition is full"),
-    Err((GcError::AllocationFailed, _)) => println!("Memory allocation failed"),
-    Err((GcError::PartitionNotFound, _)) => println!("Partition not found"),
-    Err((GcError::InvalidReference, _)) => println!("Invalid reference"),
-}
 ```
 
 ## Notes
 
-- All objects on the heap must implement the `GcTrace` trait
-- Only root objects or objects referenced by root objects (directly or indirectly) will be retained
-- Weak references don't prevent objects from being garbage collected
-- Circular references can be broken through weak references
-- Setting memory limit to 0 means unlimited
-- If memory limit is set below current usage, it will be adjusted to current usage
-- Manual release (`heap.free()`) checks if object is referenced before releasing
+- Every type stored in the heap must implement the `GcTrace` trait and be registered via `gc_type_register!`
+- Only root or scope-protected nodes, or nodes reachable from them, are retained
+- Weak references do not keep nodes alive
+- Setting the heap memory limit to `0` disables the limit
+- Automatic GC is controlled by a heap-wide GC threshold; `0` disables automatic GC
+- The collector uses a tri-color mark–sweep algorithm internally (white/gray/black)
