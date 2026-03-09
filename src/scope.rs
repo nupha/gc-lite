@@ -216,40 +216,6 @@ impl<'heap> GcScopeState<'heap> {
         }
     }
 
-    /// promote node
-    #[deprecated]
-    pub fn promote(&self, node: NonNull<GcHead>) -> bool {
-        let heap = unsafe { &mut *self.heap.as_ptr() };
-        let self_ptr = self as *const Self as *mut ();
-
-        if heap.scope_stack.len() > 1
-            && let Some((idx, _)) = heap
-                .scope_stack
-                .iter()
-                .enumerate()
-                .rev()
-                .find(|(_, c)| *c as *const Self as *const () == self_ptr)
-            && idx != 0
-        {
-            if let Some(i) = { self.cache.borrow().iter().position(|&h| h == node) } {
-                self.cache.borrow_mut().swap_remove(i);
-
-                #[cfg(debug_assertions)]
-                unsafe {
-                    let mut n = node;
-                    n.as_mut().dbg_scope_depth = idx as _;
-                }
-
-                heap.scope_stack[idx - 1].cache.borrow_mut().push(node);
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    }
-
     pub fn contains(&self, node: NonNull<GcHead>) -> bool {
         self.cache.borrow().contains(&node)
     }
@@ -382,11 +348,6 @@ impl<'heap> GcScope<'heap> {
 
     pub fn flush(&self) {
         self.inner().flush()
-    }
-
-    #[deprecated]
-    pub fn promote(&self, node: NonNull<GcHead>) -> bool {
-        self.inner().promote(node)
     }
 
     pub fn contains(&self, node: NonNull<GcHead>) -> bool {
@@ -848,59 +809,6 @@ mod tests {
     }
 
     #[test]
-    fn test_scope_promote_moves_node_to_parent_scope() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
-
-        heap.push_gc_scope(partition_id);
-        heap.push_gc_scope(partition_id);
-
-        let head;
-
-        {
-            let ctx = heap.scope_stack.last_mut().unwrap();
-            let node: GcRef<Node> = ctx
-                .alloc_local(Node {
-                    next: None,
-                    value: 1,
-                })
-                .unwrap();
-
-            head = node.head_ptr;
-
-            unsafe {
-                assert!(head.as_ref().is_local());
-            }
-
-            let promoted = ctx.promote(head);
-            assert!(promoted);
-
-            unsafe {
-                assert!(heap.scope_stack[0].contains(head));
-                assert!(head.as_ref().is_local());
-            }
-        }
-
-        {
-            let ctx = heap.pop_gc_scope().unwrap();
-            drop(ctx);
-        }
-
-        unsafe {
-            assert!(head.as_ref().is_local());
-        }
-
-        {
-            let ctx = heap.pop_gc_scope().unwrap();
-            drop(ctx);
-        }
-
-        unsafe {
-            assert!(!head.as_ref().is_local());
-        }
-    }
-
-    #[test]
     fn test_set_promote_moves_node_to_parent_scope_and_keeps_protection() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition(4096);
@@ -961,48 +869,6 @@ mod tests {
 
         unsafe {
             assert!(!promoted_head.as_ref().is_local());
-        }
-    }
-
-    #[test]
-    fn test_scope_promote_in_top_level_scope_returns_false() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(4096);
-
-        heap.push_gc_scope(partition_id);
-
-        let head;
-
-        {
-            let ctx = heap.scope_stack.last_mut().unwrap();
-            let node: GcRef<Node> = ctx
-                .alloc_local(Node {
-                    next: None,
-                    value: 1,
-                })
-                .unwrap();
-
-            head = node.head_ptr;
-
-            unsafe {
-                assert!(head.as_ref().is_local());
-            }
-
-            let promoted = ctx.promote(head);
-            assert!(!promoted);
-
-            unsafe {
-                assert!(head.as_ref().is_local());
-            }
-        }
-
-        {
-            let ctx = heap.pop_gc_scope().unwrap();
-            drop(ctx);
-        }
-
-        unsafe {
-            assert!(!head.as_ref().is_local());
         }
     }
 

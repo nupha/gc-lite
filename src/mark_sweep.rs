@@ -75,10 +75,9 @@ impl GcHeap {
                         return false;
                     }
 
-                    // Trace for children.
-                    (self.node_dtypes.type_info_list[node.dtype() as usize].trace_fn)(
-                        node_ptr, &mut gcx,
-                    );
+                    unsafe {
+                        (*heap_ptr).trace_node(node_ptr, &mut gcx);
+                    }
 
                     while let Some(mut ch) = gcx.traced_nodes.pop_front() {
                         let child = unsafe { ch.as_mut() };
@@ -312,18 +311,6 @@ mod sweep_test {
     /// Helper function to count nodes in a partition
     fn count_nodes_in_partition(heap: &GcHeap, partition_id: GcPartitionId) -> usize {
         heap.nodes(partition_id).count()
-    }
-
-    fn count_black_nodes(heap: &GcHeap, partition_id: GcPartitionId) -> usize {
-        let mut count = 0;
-        for node in heap.nodes(partition_id) {
-            unsafe {
-                if node.as_ref().color() == GcTriColor::Black {
-                    count += 1;
-                }
-            }
-        }
-        count
     }
 
     /// Helper function to get all node pointers in a partition

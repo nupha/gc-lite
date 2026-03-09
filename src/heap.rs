@@ -3,9 +3,11 @@
 
 use std::{collections::HashMap, ptr::NonNull};
 
+use smallvec::SmallVec;
+
 use crate::{
     gctype::GcTypeRegistry,
-    node::{GcHead, GcNodeFlag, GcTriColor},
+    node::{GcHead, GcNodeFlag},
     partition::{GcPartition, GcPartitionId},
     scope::GcScopeState,
 };
@@ -16,7 +18,7 @@ pub struct GcHeap {
 
     /// Partition management
     pub(super) partitions: HashMap<GcPartitionId, GcPartition>,
-    pub(crate) scope_stack: Vec<GcScopeState<'static>>,
+    pub(crate) scope_stack: SmallVec<[GcScopeState<'static>; 8]>,
     /// Weak reference list, each slot stores (version, GcHeader)
     pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
 
@@ -64,7 +66,7 @@ impl GcHeap {
             weak_slots: Vec::new(),
             opaque: std::ptr::null_mut(),
             node_dtypes: registry,
-            scope_stack: Vec::new(),
+            scope_stack: SmallVec::new(),
 
             #[cfg(debug_assertions)]
             dbg_dropping_root_partition: None,
@@ -113,35 +115,6 @@ impl GcHeap {
                 threshold
             });
         }
-    }
-
-    pub fn drop_partition(
-        &mut self,
-        partition_id: GcPartitionId,
-        on_dispose: impl Fn(&GcHeap, &GcHead),
-    ) -> usize {
-        if partition_id.is_null() {
-            return 0;
-        }
-
-        #[cfg(debug_assertions)]
-        {
-            self.dbg_dropping_root_partition = Some(partition_id);
-        }
-
-        let mut freed_bytes = 0;
-
-        if let Some(mut par) = self.partitions.remove(&partition_id) {
-            let link = std::mem::take(&mut par.nodes);
-            freed_bytes += self.dispose_all_nodes(link, &on_dispose);
-        }
-
-        #[cfg(debug_assertions)]
-        {
-            self.dbg_dropping_root_partition = None;
-        }
-
-        freed_bytes
     }
 
     /// Attach a node to partition's nodes chain.

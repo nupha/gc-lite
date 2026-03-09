@@ -3,8 +3,6 @@
 
 use std::{cell::Cell, ptr::NonNull};
 
-use smallvec::SmallVec;
-
 use crate::{GcHead, GcHeap, node::GcTriColor, node_link::GcNodeLink};
 
 /// Partition ID
@@ -205,6 +203,15 @@ impl GcHeap {
         partition_id: GcPartitionId,
         on_dispose: impl Fn(&GcHeap, &GcHead),
     ) -> usize {
+        if partition_id.is_null() {
+            return 0;
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            self.dbg_dropping_root_partition = Some(partition_id);
+        }
+
         log::trace!("[close_scope] {partition_id:?}");
 
         let mut freed_bytes = 0;
@@ -215,6 +222,11 @@ impl GcHeap {
         }
 
         log::trace!("[close_scope_done] {partition_id:?}");
+
+        #[cfg(debug_assertions)]
+        {
+            self.dbg_dropping_root_partition = None;
+        }
 
         freed_bytes
     }
