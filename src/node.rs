@@ -198,19 +198,6 @@ impl GcHead {
 
         unsafe { NonNull::from_ref(self).add(1).cast::<u8>() }
     }
-
-    /// Get GcRef<T> from node. if node is not of type T, returns None
-    #[inline(always)]
-    pub fn gc_ref<T: GcNode>(&self) -> Option<GcRef<T>> {
-        if T::GC_TYPE_ID == self.dtype() {
-            Some(GcRef::<T> {
-                head_ptr: NonNull::from_ref(self),
-                _marker: PhantomData,
-            })
-        } else {
-            None
-        }
-    }
 }
 
 pub trait GcNode: GcTrace {
