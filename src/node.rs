@@ -402,6 +402,7 @@ impl<T: GcNode> GcRef<T> {
 impl GcHeap {
     /// bind nodes relationship for directed reference: from `master` to `slave`.
     /// will perform cross scope reference update and tri-color marking.
+    #[deprecated(note = "no use")]
     pub fn bind(&mut self, master: NonNull<GcHead>, mut slave: NonNull<GcHead>) {
         #[cfg(debug_assertions)]
         unsafe {

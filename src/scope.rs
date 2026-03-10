@@ -12,23 +12,23 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub struct GcScopeState<'heap> {
+pub struct GcScopeState<'s> {
     heap: NonNull<GcHeap>,
     partition_id: GcPartitionId,
     depth: NonZeroU8,
     cache: RefCell<SmallVec<[NonNull<GcHead>; 8]>>,
     promote: RefCell<Option<(NonNull<GcHead>, bool)>>,
-    _marker: PhantomData<&'heap mut GcHeap>,
+    _marker: PhantomData<&'s mut GcHeap>,
 }
 
-impl<'heap> Drop for GcScopeState<'heap> {
+impl<'s> Drop for GcScopeState<'s> {
     fn drop(&mut self) {
         self.flush();
     }
 }
 
-impl<'heap> GcScopeState<'heap> {
-    pub fn new(heap: &'heap mut GcHeap, partition_id: GcPartitionId) -> Self {
+impl<'s> GcScopeState<'s> {
+    pub fn new(heap: &'s mut GcHeap, partition_id: GcPartitionId) -> Self {
         debug_assert!(!partition_id.is_null());
         let depth = heap.scope_stack.len() + 1;
 
@@ -83,6 +83,7 @@ impl<'heap> GcScopeState<'heap> {
         }
     }
 
+    #[inline(always)]
     pub fn alloc_root<T: GcNode>(&self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
         unsafe { (*self.heap.as_ptr()).alloc_root_raw(self.partition_id, payload) }
     }
@@ -132,11 +133,20 @@ impl<'heap> GcScopeState<'heap> {
     ///
     /// Promote means when the scope is dropped, the node will be added to upper scope.
     pub fn set_promote(&self, node: Option<NonNull<GcHead>>) {
-        debug_assert_eq!(
-            self.depth(),
-            self.heap().scope_max_depth(),
-            "only inner-most scope can set_promote"
-        );
+        #[cfg(debug_assertions)]
+        {
+            debug_assert_eq!(
+                self.depth(),
+                self.heap().scope_max_depth(),
+                "only inner-most scope can set_promote"
+            );
+
+            if let Some(n) = node {
+                unsafe {
+                    n.as_ref().debug_assert_node_valid(self.heap());
+                }
+            }
+        }
 
         // Note: scope depth==1 indicates the top scope, which don't promote any node
         if self.depth() == 1 {
@@ -187,8 +197,7 @@ impl<'heap> GcScopeState<'heap> {
         }
     }
 
-    /// clear and unprotect cached nodes.
-    /// this behaves like to drop current scope, and start a new scope.
+    /// clear and unprotect locals nodes in this scope; promote the result node to upper scope.
     pub fn flush(&self) {
         let promote: Option<NonNull<GcHead>> = self.promote.borrow_mut().take().map(|(p, _)| p);
 
@@ -237,56 +246,54 @@ impl<'heap> GcScopeState<'heap> {
     }
 }
 
-pub struct GcScope<'heap> {
+pub struct GcScope<'s> {
     heap: NonNull<GcHeap>,
     index: u8,
-    _marker: PhantomData<&'heap mut GcHeap>,
+    _marker: PhantomData<&'s mut GcHeap>,
 }
 
-impl<'heap> GcScope<'heap> {
-    fn heap_raw(&self) -> &GcHeap {
-        unsafe { self.heap.as_ref() }
-    }
-
-    fn heap_raw_mut(&mut self) -> &mut GcHeap {
-        unsafe { self.heap.as_mut() }
-    }
-
-    fn inner_static(&self) -> &GcScopeState<'static> {
-        let heap = self.heap_raw();
-        &heap.scope_stack[self.index as usize]
-    }
-
-    fn inner_static_mut(&mut self) -> &mut GcScopeState<'static> {
-        let index = self.index as usize;
-        let heap = self.heap_raw_mut();
-        &mut heap.scope_stack[index]
-    }
-
-    fn inner(&self) -> &GcScopeState<'heap> {
+impl<'s> GcScope<'s> {
+    #[inline(always)]
+    fn state(&self) -> &GcScopeState<'s> {
         unsafe {
-            std::mem::transmute::<&GcScopeState<'static>, &GcScopeState<'heap>>(self.inner_static())
-        }
-    }
+            debug_assert!((self.index as usize) < self.heap.as_ref().scope_stack.len());
 
-    fn inner_mut(&mut self) -> &mut GcScopeState<'heap> {
-        unsafe {
-            std::mem::transmute::<&mut GcScopeState<'static>, &mut GcScopeState<'heap>>(
-                self.inner_static_mut(),
+            std::mem::transmute::<&GcScopeState<'_>, &GcScopeState<'s>>(
+                self.heap
+                    .as_ref()
+                    .scope_stack
+                    .get(self.index as usize)
+                    .unwrap_unchecked(),
             )
         }
     }
 
-    pub fn new(heap: &'heap mut GcHeap, partition_id: GcPartitionId) -> Self {
+    #[inline(always)]
+    fn state_mut(&mut self) -> &mut GcScopeState<'s> {
+        unsafe {
+            debug_assert!((self.index as usize) < self.heap.as_ref().scope_stack.len());
+
+            std::mem::transmute::<&mut GcScopeState<'_>, &mut GcScopeState<'s>>(
+                self.heap
+                    .as_mut()
+                    .scope_stack
+                    .get_mut(self.index as usize)
+                    .unwrap_unchecked(),
+            )
+        }
+    }
+
+    #[inline(always)]
+    pub fn new(heap: &'s mut GcHeap, partition_id: GcPartitionId) -> Self {
         heap.new_scope(partition_id)
     }
 
     pub fn new_scope<'child>(&'child mut self) -> GcScope<'child>
     where
-        'heap: 'child,
+        's: 'child,
     {
         let partition_id = self.partition_id();
-        self.heap_raw_mut().new_scope(partition_id)
+        unsafe { self.heap.as_mut().new_scope(partition_id) }
     }
 
     pub fn with_new_scope<R>(&self, f: impl FnOnce(GcScope<'_>) -> R) -> R {
@@ -300,83 +307,30 @@ impl<'heap> GcScope<'heap> {
             Err(e) => std::panic::resume_unwind(e),
         }
     }
-
-    #[inline(always)]
-    pub fn partition_id(&self) -> GcPartitionId {
-        self.inner().partition_id()
-    }
-
-    #[inline(always)]
-    pub fn heap(&self) -> &GcHeap {
-        self.inner().heap()
-    }
-
-    #[inline(always)]
-    pub fn heap_mut(&mut self) -> &mut GcHeap {
-        self.inner_mut().heap_mut()
-    }
-
-    #[inline(always)]
-    pub fn depth(&self) -> u8 {
-        self.inner().depth()
-    }
-
-    #[inline(always)]
-    pub fn count(&self) -> usize {
-        self.inner().count()
-    }
-
-    pub fn alloc_root<T: GcNode>(&self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
-        self.inner().alloc_root(payload)
-    }
-
-    pub fn alloc_local<T: GcNode>(&self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
-        self.inner().alloc_local(payload)
-    }
-
-    pub fn add_non_local(&self, node: NonNull<GcHead>) -> bool {
-        self.inner().add_non_local(node)
-    }
-
-    pub fn get_promote(&self) -> Option<NonNull<GcHead>> {
-        self.inner().get_promote()
-    }
-
-    pub fn set_promote(&self, node: Option<NonNull<GcHead>>) {
-        self.inner().set_promote(node)
-    }
-
-    pub fn flush(&self) {
-        self.inner().flush()
-    }
-
-    pub fn contains(&self, node: NonNull<GcHead>) -> bool {
-        self.inner().contains(node)
-    }
 }
 
-impl<'heap> std::ops::Deref for GcScope<'heap> {
-    type Target = GcScopeState<'heap>;
+impl<'s> std::ops::Deref for GcScope<'s> {
+    type Target = GcScopeState<'s>;
 
+    #[inline(always)]
     fn deref(&self) -> &Self::Target {
-        self.inner()
+        self.state()
     }
 }
 
-impl<'heap> std::ops::DerefMut for GcScope<'heap> {
+impl<'s> std::ops::DerefMut for GcScope<'s> {
+    #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.inner_mut()
+        self.state_mut()
     }
 }
 
-impl<'heap> Drop for GcScope<'heap> {
+impl<'s> Drop for GcScope<'s> {
     fn drop(&mut self) {
         unsafe {
             let heap = self.heap.as_mut();
             debug_assert_eq!(heap.scope_stack.len() as u8 - 1, self.index);
-            if let Some(ctx) = heap.pop_gc_scope() {
-                drop(ctx);
-            }
+            heap.pop_gc_scope();
         }
     }
 }

@@ -62,7 +62,7 @@ impl GcHeap {
         if let Some(par) = self.partitions.get_mut(&partition_id)
             && !par.gray_list.is_empty()
         {
-            let mut gcx = unsafe { (*heap_ptr).create_trace_ctx() };
+            let mut gcx = unsafe { (*heap_ptr).create_trace_ctx(64) };
             let mut cnt = 0;
 
             while let Some(mut node_ptr) = par.gray_list.pop() {

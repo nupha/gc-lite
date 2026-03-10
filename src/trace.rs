@@ -11,7 +11,7 @@ pub trait GcTrace: 'static {
 
     /// Get direct referencing children nodes
     fn gc_children(&self, heap: &GcHeap) -> Vec<NonNull<GcHead>> {
-        let mut gcx = heap.create_trace_ctx();
+        let mut gcx = heap.create_trace_ctx(64);
         self.trace(&mut gcx);
         gcx.traced_nodes
     }
@@ -56,9 +56,9 @@ impl<'a> GcTraceCtx<'a> {
 }
 
 impl GcHeap {
-    pub fn create_trace_ctx(&self) -> GcTraceCtx<'_> {
+    pub fn create_trace_ctx(&self, cap: usize) -> GcTraceCtx<'_> {
         GcTraceCtx {
-            traced_nodes: Vec::with_capacity(32),
+            traced_nodes: Vec::with_capacity(cap),
             opaque: self.opaque(),
             _mark: PhantomData,
         }
@@ -95,7 +95,7 @@ impl GcHeap {
         let mut stack: VecDeque<(NonNull<GcHead>, Option<NonNull<GcHead>>)> =
             vec![(node, None)].into();
 
-        let mut gcx = self.create_trace_ctx();
+        let mut gcx = self.create_trace_ctx(64);
 
         while let Some((mut current, parent)) = stack.pop_front() {
             unsafe {
