@@ -10,7 +10,7 @@ repository = "https://github.com/nupha/gc-lite"
 keywords = ["gc", "memory"]
 
 [dependencies]
+gc-lite-macros = { version = "0.1.0", path = "gc-lite-macros" }
 bitflags = "2.0"
 smallvec = "1.15"
-log = "*"
-gc-lite-macros = { version = "0.1.0", path = "gc-lite-macros" }
+log = "0.4"
