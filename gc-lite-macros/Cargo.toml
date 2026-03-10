@@ -2,6 +2,11 @@
 name = "gc-lite-macros"
 version = "0.1.0"
 edition = "2024"
+authors = ["John Ray <996351336@qq.com>"]
+description = "Procedural macros for the gc-lite garbage collector"
+license = "Apache-2.0"
+repository = "https://github.com/nupha/gc-lite"
+keywords = ["gc", "memory"]
 
 [lib]
 proc-macro = true

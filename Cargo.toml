@@ -6,10 +6,11 @@ authors = ["John Ray <996351336@qq.com>"]
 description = "A simple partitioned garbage collector"
 license = "Apache-2.0"
 readme = "README.md"
+repository = "https://github.com/nupha/gc-lite"
 keywords = ["gc", "memory"]
 
 [dependencies]
 bitflags = "2.0"
 smallvec = "1.15"
 log = "*"
-gc-lite-macros = { version = "0.1", path = "gc-lite-macros" }
+gc-lite-macros = { version = "0.1.0", path = "gc-lite-macros" }
