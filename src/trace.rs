@@ -9,16 +9,16 @@ pub trait GcTrace: 'static {
     /// Collect directly referenced children gc nodes
     fn trace(&self, gcx: &mut GcTraceCtx);
 
-    /// Get direct referencing children nodes, regardless their color state.
+    /// Get direct referencing children nodes
     fn gc_children(&self, heap: &GcHeap) -> Vec<NonNull<GcHead>> {
         let mut gcx = heap.create_trace_ctx();
         self.trace(&mut gcx);
-        gcx.traced_nodes.into()
+        gcx.traced_nodes
     }
 }
 
 pub struct GcTraceCtx<'a> {
-    pub(crate) traced_nodes: VecDeque<NonNull<GcHead>>,
+    pub(crate) traced_nodes: Vec<NonNull<GcHead>>,
     opaque: *mut u8,
     _mark: PhantomData<&'a ()>,
 }
@@ -36,9 +36,11 @@ impl<'a> GcTraceCtx<'a> {
             node.as_ref().debug_assert_node_valid_simple();
         }
 
-        if !self.traced_nodes.contains(&node) {
-            self.traced_nodes.push_back(node);
-        }
+        // if !self.traced_nodes.contains(&node) {
+        //     self.traced_nodes.push_back(node);
+        // }
+
+        self.traced_nodes.push(node);
     }
 
     /// Submit a GcRef to collected list
@@ -49,14 +51,14 @@ impl<'a> GcTraceCtx<'a> {
 
     #[inline(always)]
     pub fn take_nodes(&mut self) -> Vec<NonNull<GcHead>> {
-        std::mem::take(&mut self.traced_nodes).into()
+        std::mem::take(&mut self.traced_nodes)
     }
 }
 
 impl GcHeap {
     pub fn create_trace_ctx(&self) -> GcTraceCtx<'_> {
         GcTraceCtx {
-            traced_nodes: VecDeque::new(),
+            traced_nodes: Vec::with_capacity(32),
             opaque: self.opaque(),
             _mark: PhantomData,
         }
@@ -112,7 +114,7 @@ impl GcHeap {
 
                 self.trace_node(current, &mut gcx);
 
-                while let Some(child) = gcx.traced_nodes.pop_front() {
+                while let Some(child) = gcx.traced_nodes.pop() {
                     if !child.as_ref().traverse_visited() {
                         stack.push_back((child, Some(current)));
                     }

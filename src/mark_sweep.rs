@@ -79,7 +79,7 @@ impl GcHeap {
                         (*heap_ptr).trace_node(node_ptr, &mut gcx);
                     }
 
-                    while let Some(mut ch) = gcx.traced_nodes.pop_front() {
+                    while let Some(mut ch) = gcx.traced_nodes.pop() {
                         let child = unsafe { ch.as_mut() };
 
                         #[cfg(debug_assertions)]
