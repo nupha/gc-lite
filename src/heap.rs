@@ -3,8 +3,6 @@
 
 use std::{collections::HashMap, ptr::NonNull};
 
-use smallvec::SmallVec;
-
 use crate::{
     gctype::GcTypeRegistry,
     node::{GcHead, GcNodeFlag},
@@ -24,7 +22,7 @@ pub struct GcHeap {
     pub(super) gc_threshold: usize,
     /// Total memory used across all partitions
     pub(super) total_memory_used: usize,
-    pub(crate) scope_stack: SmallVec<[GcScopeState<'static>; 8]>,
+    pub(crate) scope_stack: Vec<GcScopeState<'static>>, // DON'T use SmallVec here
     /// Weak reference list, each slot stores (version, GcHeader)
     pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
 
@@ -75,7 +73,7 @@ impl GcHeap {
             weak_slots: Vec::new(),
             opaque: std::ptr::null_mut(),
             node_dtypes: registry,
-            scope_stack: SmallVec::new(),
+            scope_stack: Vec::with_capacity(16),
 
             #[cfg(debug_assertions)]
             dbg_dropping_root_partition: None,

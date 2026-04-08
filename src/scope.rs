@@ -246,6 +246,7 @@ impl<'s> GcScopeState<'s> {
     }
 }
 
+#[derive(Debug)]
 pub struct GcScope<'s> {
     heap: NonNull<GcHeap>,
     index: u8,
