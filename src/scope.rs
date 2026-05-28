@@ -7,7 +7,7 @@ use smallvec::SmallVec;
 use crate::{
     heap::GcHeap,
     helpers::GcError,
-    node::{GcHead, GcNode, GcRef},
+    node::{GcHead, GcNode, GcNodeFlag, GcRef},
     partition::GcPartitionId,
 };
 
@@ -103,7 +103,7 @@ impl<'s> GcScopeState<'s> {
         }
 
         unsafe {
-            node.as_mut().insert_flag(crate::node::GcNodeFlag::LOCAL);
+            node.as_mut().insert_flag(GcNodeFlag::LOCAL);
 
             if let Some(par) = (*self.heap.as_ptr()).partition_mut(self.partition_id)
                 && par.is_marking()
@@ -122,6 +122,40 @@ impl<'s> GcScopeState<'s> {
         } else {
             self.add_node(node);
             true
+        }
+    }
+
+    /// Remove a LOCAL node from this scope's cache and clear its LOCAL flag.
+    ///
+    /// This is the inverse of `add_node`: it undoes the LOCAL protection
+    /// that was granted when the node was allocated in this scope.
+    /// After this call, the node is no longer protected by this scope
+    /// and will be traced by GC solely through other GC references.
+    ///
+    /// Returns `true` if the node was found and removed from this scope's cache.
+    /// Returns `false` if the node was not in this scope's cache (e.g., it was
+    /// already promoted, or belongs to a different scope).
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the node is still alive and valid.
+    /// This method does NOT check whether the node is the current promote node;
+    /// the caller (e.g., `ScopedContext::throw`) is responsible for ensuring
+    /// the node is not the promote target.
+    pub fn remove_node(&self, mut node: NonNull<GcHead>) -> bool {
+        let mut cache = self.cache.borrow_mut();
+        if let Some(pos) = cache.iter().position(|&n| n == node) {
+            cache.swap_remove(pos);
+            unsafe {
+                node.as_mut().remove_flag(GcNodeFlag::LOCAL);
+                #[cfg(debug_assertions)]
+                {
+                    node.as_mut().dbg_scope_depth = 0;
+                }
+            }
+            true
+        } else {
+            false
         }
     }
 
