@@ -287,6 +287,32 @@ pub struct GcScope<'s> {
     _marker: PhantomData<&'s mut GcHeap>,
 }
 
+impl<'s> Drop for GcScope<'s> {
+    fn drop(&mut self) {
+        unsafe {
+            let heap = self.heap.as_mut();
+            debug_assert_eq!(heap.scope_stack.len() as u8 - 1, self.index);
+            heap.pop_gc_scope();
+        }
+    }
+}
+
+impl<'s> std::ops::Deref for GcScope<'s> {
+    type Target = GcScopeState<'s>;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        self.state()
+    }
+}
+
+impl<'s> std::ops::DerefMut for GcScope<'s> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.state_mut()
+    }
+}
+
 impl<'s> GcScope<'s> {
     #[inline(always)]
     fn state(&self) -> &GcScopeState<'s> {
@@ -340,32 +366,6 @@ impl<'s> GcScope<'s> {
         match result {
             Ok(r) => r,
             Err(e) => std::panic::resume_unwind(e),
-        }
-    }
-}
-
-impl<'s> std::ops::Deref for GcScope<'s> {
-    type Target = GcScopeState<'s>;
-
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        self.state()
-    }
-}
-
-impl<'s> std::ops::DerefMut for GcScope<'s> {
-    #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.state_mut()
-    }
-}
-
-impl<'s> Drop for GcScope<'s> {
-    fn drop(&mut self) {
-        unsafe {
-            let heap = self.heap.as_mut();
-            debug_assert_eq!(heap.scope_stack.len() as u8 - 1, self.index);
-            heap.pop_gc_scope();
         }
     }
 }
