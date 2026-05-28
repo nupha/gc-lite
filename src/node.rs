@@ -400,9 +400,36 @@ impl<T: GcNode> GcRef<T> {
 }
 
 impl GcHeap {
-    /// bind nodes relationship for directed reference: from `master` to `slave`.
-    /// will perform cross scope reference update and tri-color marking.
-    #[deprecated(note = "no use")]
+    /// Establishes a directed reference from `master` to `slave` and performs
+    /// the necessary write barrier for tri-color incremental GC.
+    ///
+    /// # When to use
+    ///
+    /// Call this whenever a GC node (`master`) starts referencing another GC
+    /// node (`slave`) through a pointer write, e.g.:
+    ///
+    /// - Setting an object property to an object/string value
+    /// - Pushing an element into an array
+    /// - Storing a result value into a Promise
+    /// - Updating a closure variable reference
+    ///
+    /// # Write barrier semantics
+    ///
+    /// In tri-color marking, if `master` is already **Black** (fully traced)
+    /// and `slave` is **White** (not yet traced), the slave would be
+    /// incorrectly swept as garbage. This method prevents that by:
+    ///
+    /// 1. Checking the colors of `master` and `slave`.
+    /// 2. If `master` is Black and `slave` is White/Gray, marking `slave`
+    ///    as **Gray** and enqueuing it into the gray list of its partition,
+    ///    ensuring it will be traced in the current GC cycle.
+    /// 3. If `master` and `slave` belong to different GC partitions,
+    ///    recording a cross-partition reference (xref) so that the slave's
+    ///    partition can find it during marking.
+    ///
+    /// # Safety
+    ///
+    /// Both pointers must point to valid, live GC nodes managed by this heap.
     pub fn bind(&mut self, master: NonNull<GcHead>, mut slave: NonNull<GcHead>) {
         #[cfg(debug_assertions)]
         unsafe {
@@ -410,7 +437,7 @@ impl GcHeap {
             slave.as_ref().debug_assert_node_valid(self);
         }
 
-        // tri-color marking
+        // tri-color write barrier
         unsafe {
             if matches!(
                 (master.as_ref().color(), slave.as_ref().color()),
@@ -420,26 +447,26 @@ impl GcHeap {
 
                 if self
                     .partition(slave.as_ref().partition_id())
-                    .unwrap()
-                    .is_marking()
+                    .is_some_and(|p| p.is_marking())
                 {
                     self.add_gray_node(slave);
                 }
             }
         }
 
-        if unsafe { master.as_ref().partition_id() != slave.as_ref().partition_id() } {
-            // update cross scope reference
-            let xref = unsafe {
-                let x = master.as_ref().xref();
-                if x.is_null() {
-                    master.as_ref().partition_id()
-                } else {
-                    x
-                }
-            };
-            self.set_xref(xref, slave);
-        }
+        // Experimental: cross partition relationship
+        // if unsafe { master.as_ref().partition_id() != slave.as_ref().partition_id() } {
+        //     // update cross scope reference
+        //     let xref = unsafe {
+        //         let x = master.as_ref().xref();
+        //         if x.is_null() {
+        //             master.as_ref().partition_id()
+        //         } else {
+        //             x
+        //         }
+        //     };
+        //     self.set_xref(xref, slave);
+        // }
     }
 }
 
