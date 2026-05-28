@@ -98,8 +98,6 @@ impl GcHeap {
                         next: None,
 
                         #[cfg(debug_assertions)]
-                        dbg_scope_depth: self.scope_max_depth(),
-                        #[cfg(debug_assertions)]
                         dbg_string: std::any::type_name::<T>().into(),
                     };
 

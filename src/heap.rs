@@ -10,6 +10,20 @@ use crate::{
     scope::GcScopeState,
 };
 
+pub(crate) struct ScopeStack {
+    pub(crate) scopes: Vec<GcScopeState<'static>>,
+    pub(crate) free: bool,
+}
+
+impl ScopeStack {
+    fn new(free: bool) -> Self {
+        Self {
+            scopes: Vec::with_capacity(16),
+            free,
+        }
+    }
+}
+
 pub struct GcHeap {
     /// Registered GC data type info
     pub(super) node_dtypes: &'static GcTypeRegistry,
@@ -22,7 +36,7 @@ pub struct GcHeap {
     pub(super) gc_threshold: usize,
     /// Total memory used across all partitions
     pub(super) total_memory_used: usize,
-    pub(crate) scope_stack: Vec<GcScopeState<'static>>, // DON'T use SmallVec here
+    pub(crate) scope_stacks: Vec<ScopeStack>, // DON'T use SmallVec here
     /// Weak reference list, each slot stores (version, GcHeader)
     pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
 
@@ -40,9 +54,11 @@ impl Drop for GcHeap {
         // heap world is gone, dealloc all nodes live in it, regardless their status.
         log::trace!("[heap::drop]");
 
-        for s in self.scope_stack.drain(..) {
-            unsafe {
-                s.abort();
+        for stack in &mut self.scope_stacks {
+            for s in stack.scopes.drain(..) {
+                unsafe {
+                    s.abort();
+                }
             }
         }
 
@@ -73,7 +89,7 @@ impl GcHeap {
             weak_slots: Vec::new(),
             opaque: std::ptr::null_mut(),
             node_dtypes: registry,
-            scope_stack: Vec::with_capacity(16),
+            scope_stacks: vec![ScopeStack::new(false)],
 
             #[cfg(debug_assertions)]
             dbg_dropping_root_partition: None,
@@ -176,8 +192,9 @@ impl GcHeap {
     /// 1. if node is local or root, it's protected, returns true
     /// 1. otherwise if has current scope, add node to current scope and returns true
     /// 1. can't protect, returns false
-    pub fn protect_node(&mut self, node: NonNull<GcHead>) -> bool {
-        self.current_scope().is_some_and(|s| s.add_non_local(node))
+    pub fn protect_node(&mut self, scope_stack_id: u16, node: NonNull<GcHead>) -> bool {
+        self.current_scope(scope_stack_id)
+            .is_some_and(|s| s.add_non_local(node))
     }
 
     /// Protect nodes from being gc collected, for each node do following steps:
@@ -185,8 +202,12 @@ impl GcHeap {
     /// 1. if node is local or root, do nothing
     /// 1. if has current scope, add node to current scope
     /// 1. can't protect, returns false
-    pub fn protect_nodes_iter(&mut self, nodes: impl Iterator<Item = NonNull<GcHead>>) {
-        if let Some(s) = self.current_scope() {
+    pub fn protect_nodes_iter(
+        &mut self,
+        scope_stack_id: u16,
+        nodes: impl Iterator<Item = NonNull<GcHead>>,
+    ) {
+        if let Some(s) = self.current_scope(scope_stack_id) {
             for n in nodes {
                 s.add_non_local(n);
             }
@@ -198,8 +219,8 @@ impl GcHeap {
     /// 1. if node is local or root, do nothing
     /// 1. if has current scope, add node to current scope
     /// 1. can't protect, returns false
-    pub fn protect_nodes(&mut self, nodes: &[NonNull<GcHead>]) {
-        self.protect_nodes_iter(nodes.iter().copied());
+    pub fn protect_nodes(&mut self, scope_stack_id: u16, nodes: &[NonNull<GcHead>]) {
+        self.protect_nodes_iter(scope_stack_id, nodes.iter().copied());
     }
 
     /// Update memory usage with rollup to parent partitions
@@ -261,7 +282,7 @@ mod heap_tests {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
 
-        let head = heap.with_new_scope(partition_id, |ctx| {
+        let head = heap.with_new_scope(0, partition_id, |ctx| {
             let node: GcRef<Node> = ctx
                 .alloc_local(Node {
                     next: None,

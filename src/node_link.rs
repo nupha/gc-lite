@@ -201,8 +201,6 @@ mod tests {
             weak_id: crate::weak::GcWeakRawId::NULL,
             next: None,
             #[cfg(debug_assertions)]
-            dbg_scope_depth: 0,
-            #[cfg(debug_assertions)]
             dbg_string: "".into(),
         };
         let node_ptr = NonNull::from(&mut node);
@@ -220,8 +218,6 @@ mod tests {
             weak_id: crate::weak::GcWeakRawId::NULL,
             next: None,
             #[cfg(debug_assertions)]
-            dbg_scope_depth: 0,
-            #[cfg(debug_assertions)]
             dbg_string: "node3".into(),
         };
         let node3_ptr = NonNull::from(&mut node3);
@@ -232,8 +228,6 @@ mod tests {
             weak_id: crate::weak::GcWeakRawId::NULL,
             next: Some(node3_ptr),
             #[cfg(debug_assertions)]
-            dbg_scope_depth: 0,
-            #[cfg(debug_assertions)]
             dbg_string: "node2".into(),
         };
         let node2_ptr = NonNull::from(&mut node2);
@@ -243,8 +237,6 @@ mod tests {
             partition: 0,
             weak_id: crate::weak::GcWeakRawId::NULL,
             next: Some(node2_ptr),
-            #[cfg(debug_assertions)]
-            dbg_scope_depth: 0,
             #[cfg(debug_assertions)]
             dbg_string: "node1".into(),
         };
@@ -266,8 +258,6 @@ mod tests {
                 partition: 0,
                 weak_id: crate::weak::GcWeakRawId::NULL,
                 next: None,
-                #[cfg(debug_assertions)]
-                dbg_scope_depth: 0,
                 #[cfg(debug_assertions)]
                 dbg_string: format!("node{}", i).into(),
             })

@@ -73,8 +73,6 @@ pub struct GcHead {
     pub(super) next: Option<NonNull<GcHead>>,
 
     #[cfg(debug_assertions)]
-    pub(crate) dbg_scope_depth: u8,
-    #[cfg(debug_assertions)]
     pub(crate) dbg_string: std::borrow::Cow<'static, str>,
 }
 
@@ -96,8 +94,7 @@ impl std::fmt::Debug for GcHead {
 
         #[cfg(debug_assertions)]
         {
-            s.field("scope", &self.dbg_scope_depth)
-                .field("dbg_string", &self.dbg_string);
+            s.field("dbg_string", &self.dbg_string);
         }
 
         s.finish()

@@ -31,7 +31,7 @@ fn alloc_static(
     scope: GcPartitionId,
     value: i32,
 ) -> GcResult<GcRef<StaticNode>> {
-    let ctx = GcScope::new(heap, scope);
+    let ctx = GcScope::new(heap, 0, scope);
     let r = ctx
         .alloc_local(StaticNode { _value: value })
         .map_err(|(err, _)| err)?;
@@ -40,7 +40,7 @@ fn alloc_static(
 }
 
 fn alloc_other(heap: &mut GcHeap, scope: GcPartitionId, value: i32) -> GcResult<GcRef<OtherNode>> {
-    let ctx = GcScope::new(heap, scope);
+    let ctx = GcScope::new(heap, 0, scope);
     let r = ctx
         .alloc_local(OtherNode { _value: value })
         .map_err(|(err, _)| err)?;
