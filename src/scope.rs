@@ -292,7 +292,7 @@ impl<'s> Drop for GcScope<'s> {
             let heap = self.heap.as_mut();
             let stack = &heap.scope_stacks[self.stack_id as usize];
             debug_assert_eq!(stack.scopes.len() as u8 - 1, self.index);
-            heap.pop_gc_scope(self.stack_id);
+            heap.pop_scope(self.stack_id);
         }
     }
 }
@@ -342,23 +342,6 @@ impl<'s> GcScope<'s> {
             )
         }
     }
-
-    #[inline(always)]
-    pub fn new(heap: &'s mut GcHeap, stack_id: u16, partition_id: GcPartitionId) -> Self {
-        heap.new_scope(stack_id, partition_id)
-    }
-
-    pub fn with_new_scope<R>(&self, f: impl FnOnce(GcScope<'_>) -> R) -> R {
-        let partition_id = self.partition_id();
-        let heap = unsafe { &mut *self.heap.as_ptr() };
-        let scope = heap.new_scope(self.stack_id, partition_id);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(scope)));
-
-        match result {
-            Ok(r) => r,
-            Err(e) => std::panic::resume_unwind(e),
-        }
-    }
 }
 
 impl GcHeap {
@@ -406,7 +389,7 @@ impl GcHeap {
         }
     }
 
-    pub(crate) fn push_gc_scope(
+    pub(crate) fn push_scope(
         &mut self,
         stack_id: u16,
         partition_id: GcPartitionId,
@@ -421,6 +404,7 @@ impl GcHeap {
             promote: RefCell::new(None),
             _marker: PhantomData,
         };
+
         // SAFETY: It is safe because the GcHeap owns the GcScope, and we ensure that
         // the GcScope does not outlive the GcHeap.
         let static_ctx =
@@ -434,7 +418,7 @@ impl GcHeap {
 
     #[inline(always)]
     #[allow(dead_code)]
-    pub(crate) fn pop_gc_scope(&mut self, stack_id: u16) -> Option<GcScopeState<'_>> {
+    pub(crate) fn pop_scope(&mut self, stack_id: u16) -> Option<GcScopeState<'_>> {
         self.scope_stacks[stack_id as usize].scopes.pop()
     }
 
@@ -460,9 +444,8 @@ impl GcHeap {
             .map(f)
     }
 
-    #[inline]
     pub fn new_scope<'s>(&'s mut self, stack_id: u16, partition_id: GcPartitionId) -> GcScope<'s> {
-        self.push_gc_scope(stack_id, partition_id);
+        self.push_scope(stack_id, partition_id);
         let index = self.scope_stacks[stack_id as usize].scopes.len() as u8 - 1;
         GcScope {
             heap: NonNull::from(self),
@@ -521,7 +504,7 @@ mod tests {
         let head;
 
         {
-            let ctx = GcScope::new(&mut heap, 0, partition_id);
+            let ctx = heap.new_scope(0, partition_id);
             let node: GcRef<Node> = ctx
                 .alloc_local(Node {
                     next: None,
@@ -554,7 +537,7 @@ mod tests {
 
         let head;
         {
-            let mut ctx = GcScope::new(&mut heap, 0, partition_id);
+            let mut ctx = heap.new_scope(0, partition_id);
             let node: GcRef<Node> = ctx
                 .alloc_local(Node {
                     next: None,
@@ -608,7 +591,7 @@ mod tests {
         }
 
         {
-            let ctx = GcScope::new(&mut heap, 0, partition_id);
+            let ctx = heap.new_scope(0, partition_id);
             let added = ctx.add_non_local(head);
             assert!(added);
 
@@ -637,7 +620,7 @@ mod tests {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
 
-        let ctx = GcScope::new(&mut heap, 0, partition_id);
+        let ctx = heap.new_scope(0, partition_id);
         let node: GcRef<Node> = ctx
             .alloc_local(Node {
                 next: None,
@@ -672,7 +655,7 @@ mod tests {
         let head;
 
         {
-            let ctx = GcScope::new(&mut heap, 0, partition_id);
+            let ctx = heap.new_scope(0, partition_id);
             let node: GcRef<Node> = ctx
                 .alloc_root(Node {
                     next: None,
@@ -703,7 +686,7 @@ mod tests {
         let head2;
 
         {
-            let mut ctx = GcScope::new(&mut heap, 0, partition_id);
+            let mut ctx = heap.new_scope(0, partition_id);
             let n1: GcRef<Node> = ctx
                 .alloc_local(Node {
                     next: None,
@@ -751,7 +734,7 @@ mod tests {
         let head;
 
         {
-            let mut ctx = GcScope::new(&mut heap, 0, partition_id);
+            let mut ctx = heap.new_scope(0, partition_id);
             let node: GcRef<Node> = ctx
                 .alloc_local(Node {
                     next: None,
@@ -786,9 +769,9 @@ mod tests {
 
         assert_eq!(heap.scope_max_depth(0), 0);
 
-        heap.push_gc_scope(0, partition_id);
-        heap.push_gc_scope(0, partition_id);
-        heap.push_gc_scope(0, partition_id);
+        heap.push_scope(0, partition_id);
+        heap.push_scope(0, partition_id);
+        heap.push_scope(0, partition_id);
 
         assert_eq!(heap.scope_max_depth(0), 3);
 
@@ -797,14 +780,14 @@ mod tests {
             assert_eq!(ctx.depth(), level);
         }
 
-        heap.pop_gc_scope(0);
+        heap.pop_scope(0);
         assert_eq!(heap.scope_max_depth(0), 2);
         for level in 1..=2 {
             let ctx = heap.scope(0, level).unwrap();
             assert_eq!(ctx.depth(), level);
         }
 
-        heap.pop_gc_scope(0);
+        heap.pop_scope(0);
         assert_eq!(heap.scope_max_depth(0), 1);
         let ctx = heap.scope(0, 1).unwrap();
         assert_eq!(ctx.depth(), 1);
@@ -815,9 +798,9 @@ mod tests {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
 
-        heap.push_gc_scope(0, partition_id);
-        heap.push_gc_scope(0, partition_id);
-        heap.push_gc_scope(0, partition_id);
+        heap.push_scope(0, partition_id);
+        heap.push_scope(0, partition_id);
+        heap.push_scope(0, partition_id);
 
         heap.with_current_scope(0, |ctx| {
             assert_eq!(ctx.depth(), 3);
@@ -826,7 +809,7 @@ mod tests {
             assert_eq!(parent.depth(), 2);
         });
 
-        heap.pop_gc_scope(0);
+        heap.pop_scope(0);
 
         heap.with_current_scope(0, |ctx| {
             assert_eq!(ctx.depth(), 2);
@@ -835,7 +818,7 @@ mod tests {
             assert_eq!(parent.depth(), 1);
         });
 
-        heap.pop_gc_scope(0);
+        heap.pop_scope(0);
 
         heap.with_current_scope(0, |ctx| {
             assert_eq!(ctx.depth(), 1);
@@ -848,8 +831,8 @@ mod tests {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
 
-        heap.push_gc_scope(0, partition_id);
-        heap.push_gc_scope(0, partition_id);
+        heap.push_scope(0, partition_id);
+        heap.push_scope(0, partition_id);
 
         let promoted_head;
         let other_head;
@@ -912,7 +895,7 @@ mod tests {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
 
-        heap.push_gc_scope(0, partition_id);
+        heap.push_scope(0, partition_id);
 
         let head;
 
@@ -962,8 +945,8 @@ mod tests {
             assert!(!head.as_ref().is_local());
         }
 
-        heap.push_gc_scope(0, partition_id);
-        heap.push_gc_scope(0, partition_id);
+        heap.push_scope(0, partition_id);
+        heap.push_scope(0, partition_id);
 
         {
             let ctx = heap.scope_stacks[0].scopes.last_mut().unwrap();
@@ -998,9 +981,9 @@ mod tests {
         assert_eq!(heap.scope_max_depth(stack1), 0);
         assert_eq!(heap.scope_max_depth(stack2), 0);
 
-        heap.push_gc_scope(stack1, partition_id);
-        heap.push_gc_scope(stack2, partition_id);
-        heap.push_gc_scope(stack1, partition_id);
+        heap.push_scope(stack1, partition_id);
+        heap.push_scope(stack2, partition_id);
+        heap.push_scope(stack1, partition_id);
 
         assert_eq!(heap.scope_max_depth(stack1), 2);
         assert_eq!(heap.scope_max_depth(stack2), 1);
@@ -1014,9 +997,9 @@ mod tests {
             assert_eq!(parent.stack_id(), stack1);
         });
 
-        heap.pop_gc_scope(stack1);
-        heap.pop_gc_scope(stack2);
-        heap.pop_gc_scope(stack1);
+        heap.pop_scope(stack1);
+        heap.pop_scope(stack2);
+        heap.pop_scope(stack1);
 
         heap.release_scope_stack(stack1);
         heap.release_scope_stack(stack2);

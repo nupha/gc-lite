@@ -36,9 +36,10 @@ pub struct GcHeap {
     pub(super) gc_threshold: usize,
     /// Total memory used across all partitions
     pub(super) total_memory_used: usize,
-    pub(crate) scope_stacks: Vec<ScopeStack>, // DON'T use SmallVec here
     /// Weak reference list, each slot stores (version, GcHeader)
     pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
+    /// gc scope stack list
+    pub(crate) scope_stacks: Vec<ScopeStack>, // DON'T use SmallVec here
 
     /// User provided opaque raw pointer
     opaque: *mut u8,
