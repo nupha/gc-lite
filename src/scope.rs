@@ -11,11 +11,32 @@ use crate::{
     partition::GcPartitionId,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct GcScopeStackId(u16);
+
+pub(crate) struct ScopeStack {
+    /// sequence of scopes
+    pub(crate) list: Vec<GcScopeState<'static>>,
+    /// which partition this stack is associated with, None means the stack is not used
+    pub(crate) partition: Option<GcPartitionId>,
+}
+
+impl ScopeStack {
+    pub(super) fn new(partition: Option<GcPartitionId>) -> Self {
+        Self {
+            list: Vec::with_capacity(16),
+            partition,
+        }
+    }
+}
+
+/// The GC scope state
 #[derive(Debug)]
 pub struct GcScopeState<'s> {
     heap: NonNull<GcHeap>,
     partition_id: GcPartitionId,
-    stack_id: u16,
+    stack_id: GcScopeStackId,
     depth: NonZeroU8,
     cache: RefCell<SmallVec<[NonNull<GcHead>; 8]>>,
     promote: RefCell<Option<(NonNull<GcHead>, bool)>>,
@@ -29,9 +50,13 @@ impl<'s> Drop for GcScopeState<'s> {
 }
 
 impl<'s> GcScopeState<'s> {
-    pub fn new(heap: &'s mut GcHeap, stack_id: u16, partition_id: GcPartitionId) -> Self {
+    pub fn new(
+        heap: &'s mut GcHeap,
+        stack_id: GcScopeStackId,
+        partition_id: GcPartitionId,
+    ) -> Self {
         debug_assert!(!partition_id.is_null());
-        debug_assert!((stack_id as usize) < heap.scope_stacks.len());
+        debug_assert!((stack_id.0 as usize) < heap.scope_stacks.len());
 
         let depth = heap.scope_max_depth(stack_id) + 1;
         Self {
@@ -51,7 +76,7 @@ impl<'s> GcScopeState<'s> {
     }
 
     #[inline(always)]
-    pub fn stack_id(&self) -> u16 {
+    pub fn stack_id(&self) -> GcScopeStackId {
         self.stack_id
     }
 
@@ -79,9 +104,8 @@ impl<'s> GcScopeState<'s> {
         let d = self.depth();
         if d > 1 {
             let parent_index = d - 2;
-
-            self.heap().scope_stacks[self.stack_id as usize]
-                .scopes
+            self.heap().scope_stacks[self.stack_id.0 as usize]
+                .list
                 .get(parent_index as usize)
                 .map(|s| {
                     (
@@ -97,6 +121,7 @@ impl<'s> GcScopeState<'s> {
     }
 
     #[inline(always)]
+    #[deprecated(note = "use RuntimeImpl::alloc_root_in()")]
     pub fn alloc_root<T: GcNode>(&self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
         unsafe { (*self.heap.as_ptr()).alloc_root_raw(self.partition_id, payload) }
     }
@@ -109,12 +134,10 @@ impl<'s> GcScopeState<'s> {
     }
 
     fn add_node(&self, mut node: NonNull<GcHead>) {
-        #[cfg(debug_assertions)]
         unsafe {
+            #[cfg(debug_assertions)]
             debug_assert!(!node.as_ref().is_root_or_local());
-        }
 
-        unsafe {
             node.as_mut().insert_flag(GcNodeFlag::LOCAL);
 
             if let Some(par) = (*self.heap.as_ptr()).partition_mut(self.partition_id)
@@ -167,6 +190,7 @@ impl<'s> GcScopeState<'s> {
         }
     }
 
+    /// get current promote node
     pub fn get_promote(&self) -> Option<NonNull<GcHead>> {
         self.promote.borrow().map(|(p, _)| p)
     }
@@ -278,20 +302,26 @@ impl<'s> GcScopeState<'s> {
     }
 }
 
+/// Handle to a GC scope, used to:
+///
+/// 1. reference the scope state
+/// 2. manage lifetime of the scope, pop the scope when the handle is dropped
 #[derive(Debug)]
 pub struct GcScope<'s> {
     heap: NonNull<GcHeap>,
-    stack_id: u16,
+    stack_id: GcScopeStackId,
     index: u8,
-    _marker: PhantomData<&'s mut GcHeap>,
+    _marker: PhantomData<&'s ()>,
 }
 
 impl<'s> Drop for GcScope<'s> {
     fn drop(&mut self) {
         unsafe {
             let heap = self.heap.as_mut();
-            let stack = &heap.scope_stacks[self.stack_id as usize];
-            debug_assert_eq!(stack.scopes.len() as u8 - 1, self.index);
+            debug_assert_eq!(
+                heap.scope_stacks[self.stack_id.0 as usize].list.len() as u8 - 1,
+                self.index
+            );
             heap.pop_scope(self.stack_id);
         }
     }
@@ -302,167 +332,147 @@ impl<'s> std::ops::Deref for GcScope<'s> {
 
     #[inline(always)]
     fn deref(&self) -> &Self::Target {
-        self.state()
+        unsafe {
+            let stack = &self.heap.as_ref().scope_stacks[self.stack_id.0 as usize];
+            debug_assert!((self.index as usize) < stack.list.len());
+
+            std::mem::transmute::<&GcScopeState<'_>, &GcScopeState<'s>>(
+                stack.list.get(self.index as usize).unwrap_unchecked(),
+            )
+        }
     }
 }
 
 impl<'s> std::ops::DerefMut for GcScope<'s> {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.state_mut()
-    }
-}
-
-impl<'s> GcScope<'s> {
-    #[inline(always)]
-    pub fn stack_id(&self) -> u16 {
-        self.stack_id
-    }
-
-    #[inline(always)]
-    fn state(&self) -> &GcScopeState<'s> {
         unsafe {
-            let stack = &self.heap.as_ref().scope_stacks[self.stack_id as usize];
-            debug_assert!((self.index as usize) < stack.scopes.len());
-
-            std::mem::transmute::<&GcScopeState<'_>, &GcScopeState<'s>>(
-                stack.scopes.get(self.index as usize).unwrap_unchecked(),
-            )
-        }
-    }
-
-    #[inline(always)]
-    fn state_mut(&mut self) -> &mut GcScopeState<'s> {
-        unsafe {
-            let stack = &mut self.heap.as_mut().scope_stacks[self.stack_id as usize];
-            debug_assert!((self.index as usize) < stack.scopes.len());
+            let stack = &mut self.heap.as_mut().scope_stacks[self.stack_id.0 as usize];
+            debug_assert!((self.index as usize) < stack.list.len());
 
             std::mem::transmute::<&mut GcScopeState<'_>, &mut GcScopeState<'s>>(
-                stack.scopes.get_mut(self.index as usize).unwrap_unchecked(),
+                stack.list.get_mut(self.index as usize).unwrap_unchecked(),
             )
         }
     }
 }
 
 impl GcHeap {
-    pub fn acquire_scope_stack(&mut self) -> u16 {
-        for (id, stack) in self.scope_stacks.iter_mut().enumerate().skip(1) {
-            if stack.free {
-                debug_assert!(stack.scopes.is_empty());
-                stack.free = false;
-                return id as u16;
+    /// find an idle scope stack, or create a new if none available
+    pub fn acquire_scope_stack(&mut self, par: GcPartitionId) -> GcScopeStackId {
+        for (id, stack) in self.scope_stacks.iter_mut().enumerate() {
+            if stack.partition.is_none() {
+                debug_assert!(stack.list.is_empty());
+                stack.partition = Some(par);
+                return GcScopeStackId(id as u16);
             }
         }
 
         let id = u16::try_from(self.scope_stacks.len()).expect("too many scope stacks");
-        self.scope_stacks.push(crate::heap::ScopeStack {
-            scopes: Vec::with_capacity(16),
-            free: false,
-        });
-        id
+        self.scope_stacks.push(ScopeStack::new(Some(par)));
+        GcScopeStackId(id)
     }
 
-    pub fn release_scope_stack(&mut self, stack_id: u16) {
-        if stack_id == 0 {
-            debug_assert!(false, "default scope stack cannot be released");
-            return;
-        }
-
-        let stack = &mut self.scope_stacks[stack_id as usize];
-        debug_assert!(stack.scopes.is_empty());
-        stack.free = true;
+    pub fn release_scope_stack(&mut self, stack_id: GcScopeStackId) {
+        let stack = &mut self.scope_stacks[stack_id.0 as usize];
+        debug_assert!(stack.list.is_empty());
+        stack.partition.take();
     }
 
+    /// get max depth of a scope stack
     #[inline(always)]
-    pub fn scope_max_depth(&self, stack_id: u16) -> u8 {
-        self.scope_stacks[stack_id as usize].scopes.len() as _
+    pub fn scope_max_depth(&self, stack_id: GcScopeStackId) -> u8 {
+        self.scope_stacks[stack_id.0 as usize].list.len() as _
     }
 
-    /// get scope by depth (peek, without modifying stack), `depth` is 1-based, where 1 means index 0
-    pub fn scope(&self, stack_id: u16, depth: u8) -> Option<&GcScopeState<'_>> {
+    /// get scope state specified by (stack_id, depth).
+    /// where `depth` is 1-based (1 means index #0)
+    pub fn scope(&self, stack_id: GcScopeStackId, depth: u8) -> Option<&GcScopeState<'_>> {
         if depth > 0 {
-            self.scope_stacks[stack_id as usize]
-                .scopes
+            self.scope_stacks[stack_id.0 as usize]
+                .list
                 .get(depth as usize - 1)
         } else {
             None
         }
     }
 
-    pub(crate) fn push_scope(
-        &mut self,
-        stack_id: u16,
-        partition_id: GcPartitionId,
-    ) -> &GcScopeState<'_> {
-        let depth = self.scope_max_depth(stack_id) + 1;
-        let ctx = GcScopeState {
-            heap: NonNull::from_ref(self),
+    /// pop the last scope from the stack
+    #[inline(always)]
+    fn pop_scope(&mut self, stack_id: GcScopeStackId) -> Option<GcScopeState<'_>> {
+        self.scope_stacks[stack_id.0 as usize].list.pop()
+    }
+
+    /// push a new scope on the stack, returns new scope's handle.
+    /// the scope will be automatically popped when this handle is dropped.
+    ///
+    /// # Safety:
+    ///
+    /// DO NOT drop an earlier handle when a later handle is still alive
+    pub fn new_scope<'s>(&'s mut self, stack_id: GcScopeStackId) -> GcScope<'s> {
+        let heap = NonNull::from_ref(self);
+        let stack = &mut self.scope_stacks[stack_id.0 as usize];
+        debug_assert!(
+            stack.partition.is_some(),
+            "scope stack {stack_id:?} is not acquired"
+        );
+
+        let depth = stack.list.len() as u8 + 1;
+        let state = GcScopeState {
+            heap,
             stack_id,
-            partition_id,
+            partition_id: stack.partition.unwrap(),
             depth: NonZeroU8::new(depth).unwrap(),
             cache: RefCell::new(SmallVec::new()),
             promote: RefCell::new(None),
             _marker: PhantomData,
         };
 
-        // SAFETY: It is safe because the GcHeap owns the GcScope, and we ensure that
-        // the GcScope does not outlive the GcHeap.
-        let static_ctx =
-            unsafe { std::mem::transmute::<GcScopeState<'_>, GcScopeState<'static>>(ctx) };
-        let stack = &mut self.scope_stacks[stack_id as usize];
-        debug_assert!(!stack.free, "scope stack {stack_id} is not acquired");
-        stack.scopes.push(static_ctx);
+        stack.list.push(unsafe {
+            // SAFETY: It is safe because the GcHeap owns the GcScope, and we ensure that
+            // the GcScope does not outlive the GcHeap.
+            std::mem::transmute::<GcScopeState<'_>, GcScopeState<'static>>(state)
+        });
 
-        stack.scopes.last().unwrap()
+        GcScope {
+            heap,
+            stack_id,
+            index: depth - 1,
+            _marker: PhantomData,
+        }
     }
 
-    #[inline(always)]
-    #[allow(dead_code)]
-    pub(crate) fn pop_scope(&mut self, stack_id: u16) -> Option<GcScopeState<'_>> {
-        self.scope_stacks[stack_id as usize].scopes.pop()
-    }
-
+    /// get last (top-most) scope from the stack
     #[inline]
-    pub fn current_scope(&self, stack_id: u16) -> Option<&GcScopeState<'_>> {
-        let s = self.scope_stacks[stack_id as usize].scopes.last();
-        // SAFETY: It is safe because the GcHeap owns the GcScope, and we ensure that
-        // the GcScope does not outlive the GcHeap.
+    pub fn current_scope(&self, stack_id: GcScopeStackId) -> Option<&GcScopeState<'_>> {
+        let s = self.scope_stacks[stack_id.0 as usize].list.last();
         unsafe {
+            // SAFETY: It is safe because the GcHeap owns the GcScope, and we ensure that
+            // the GcScope does not outlive the GcHeap.
             std::mem::transmute::<Option<&GcScopeState<'static>>, Option<&GcScopeState<'_>>>(s)
         }
     }
 
+    /// run closure with last (top-most) scope from the stack
     #[inline]
     pub fn with_current_scope<R>(
         &mut self,
-        stack_id: u16,
+        stack_id: GcScopeStackId,
         f: impl FnOnce(&mut GcScopeState) -> R,
     ) -> Option<R> {
-        self.scope_stacks[stack_id as usize]
-            .scopes
+        self.scope_stacks[stack_id.0 as usize]
+            .list
             .last_mut()
             .map(f)
-    }
-
-    pub fn new_scope<'s>(&'s mut self, stack_id: u16, partition_id: GcPartitionId) -> GcScope<'s> {
-        self.push_scope(stack_id, partition_id);
-        let index = self.scope_stacks[stack_id as usize].scopes.len() as u8 - 1;
-        GcScope {
-            heap: NonNull::from(self),
-            stack_id,
-            index,
-            _marker: PhantomData,
-        }
     }
 
     #[inline]
     pub fn with_new_scope<R>(
         &mut self,
-        stack_id: u16,
-        partition_id: GcPartitionId,
+        stack_id: GcScopeStackId,
         f: impl FnOnce(GcScope<'_>) -> R,
     ) -> R {
-        let scope = self.new_scope(stack_id, partition_id);
+        let scope = self.new_scope(stack_id);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(scope)));
 
         match result {
@@ -500,11 +510,12 @@ mod tests {
     fn test_gc_context_local_flag_set_and_cleared_on_commit() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
+        let stack_id = heap.acquire_scope_stack(partition_id);
 
         let head;
 
         {
-            let ctx = heap.new_scope(0, partition_id);
+            let ctx = heap.new_scope(stack_id);
             let node: GcRef<Node> = ctx
                 .alloc_local(Node {
                     next: None,
@@ -534,10 +545,11 @@ mod tests {
     fn test_gc_context_alloc_protects_and_unprotects_on_drop() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
+        let stack_id = heap.acquire_scope_stack(partition_id);
 
         let head;
         {
-            let mut ctx = heap.new_scope(0, partition_id);
+            let mut ctx = heap.new_scope(stack_id);
             let node: GcRef<Node> = ctx
                 .alloc_local(Node {
                     next: None,
@@ -572,6 +584,7 @@ mod tests {
     fn test_gc_context_add_sets_local_and_clears_on_commit() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
+        let stack_id = heap.acquire_scope_stack(partition_id);
 
         let node: GcRef<Node> = unsafe {
             heap.alloc_raw(
@@ -591,7 +604,7 @@ mod tests {
         }
 
         {
-            let ctx = heap.new_scope(0, partition_id);
+            let ctx = heap.new_scope(stack_id);
             let added = ctx.add_non_local(head);
             assert!(added);
 
@@ -619,8 +632,9 @@ mod tests {
     fn test_gc_context_add_on_local_node_returns_false() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
+        let stack_id = heap.acquire_scope_stack(partition_id);
 
-        let ctx = heap.new_scope(0, partition_id);
+        let ctx = heap.new_scope(stack_id);
         let node: GcRef<Node> = ctx
             .alloc_local(Node {
                 next: None,
@@ -651,11 +665,12 @@ mod tests {
     fn test_gc_context_alloc_root_creates_root_without_protection() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
+        let stack_id = heap.acquire_scope_stack(partition_id);
 
         let head;
 
         {
-            let ctx = heap.new_scope(0, partition_id);
+            let ctx = heap.new_scope(stack_id);
             let node: GcRef<Node> = ctx
                 .alloc_root(Node {
                     next: None,
@@ -681,12 +696,13 @@ mod tests {
     fn test_gc_context_alloc_multiple_nodes() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
+        let stack_id = heap.acquire_scope_stack(partition_id);
 
         let head1;
         let head2;
 
         {
-            let mut ctx = heap.new_scope(0, partition_id);
+            let mut ctx = heap.new_scope(stack_id);
             let n1: GcRef<Node> = ctx
                 .alloc_local(Node {
                     next: None,
@@ -730,11 +746,12 @@ mod tests {
     fn test_gc_context_reset_unprotects_and_clears_cache() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
+        let stack_id = heap.acquire_scope_stack(partition_id);
 
         let head;
 
         {
-            let mut ctx = heap.new_scope(0, partition_id);
+            let mut ctx = heap.new_scope(stack_id);
             let node: GcRef<Node> = ctx
                 .alloc_local(Node {
                     next: None,
@@ -766,86 +783,81 @@ mod tests {
     fn test_gc_context_level_for_heap_scopes() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
+        let stack_id = heap.acquire_scope_stack(partition_id);
 
-        assert_eq!(heap.scope_max_depth(0), 0);
+        assert_eq!(heap.scope_max_depth(stack_id), 0);
 
-        heap.push_scope(0, partition_id);
-        heap.push_scope(0, partition_id);
-        heap.push_scope(0, partition_id);
+        let heap_ptr = &mut heap as *mut GcHeap;
+        unsafe {
+            let s1 = (&mut *heap_ptr).new_scope(stack_id);
+            let s2 = (&mut *heap_ptr).new_scope(stack_id);
+            let s3 = (&mut *heap_ptr).new_scope(stack_id);
 
-        assert_eq!(heap.scope_max_depth(0), 3);
+            assert_eq!(s3.depth(), 3);
+            assert_eq!(s2.depth(), 2);
+            assert_eq!(s1.depth(), 1);
 
-        for level in 1..=3 {
-            let ctx = heap.scope(0, level).unwrap();
-            assert_eq!(ctx.depth(), level);
+            let ctx3 = (*heap_ptr).scope(stack_id, 3).unwrap();
+            assert_eq!(ctx3.depth(), 3);
+            let ctx2 = (*heap_ptr).scope(stack_id, 2).unwrap();
+            assert_eq!(ctx2.depth(), 2);
+            let ctx1 = (*heap_ptr).scope(stack_id, 1).unwrap();
+            assert_eq!(ctx1.depth(), 1);
         }
-
-        heap.pop_scope(0);
-        assert_eq!(heap.scope_max_depth(0), 2);
-        for level in 1..=2 {
-            let ctx = heap.scope(0, level).unwrap();
-            assert_eq!(ctx.depth(), level);
-        }
-
-        heap.pop_scope(0);
-        assert_eq!(heap.scope_max_depth(0), 1);
-        let ctx = heap.scope(0, 1).unwrap();
-        assert_eq!(ctx.depth(), 1);
     }
 
     #[test]
     fn test_gc_context_parent_mut_returns_parent_and_level() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
+        let stack_id = heap.acquire_scope_stack(partition_id);
 
-        heap.push_scope(0, partition_id);
-        heap.push_scope(0, partition_id);
-        heap.push_scope(0, partition_id);
+        let heap_ptr = &mut heap as *mut GcHeap;
+        unsafe {
+            let scope1 = (&mut *heap_ptr).new_scope(stack_id);
+            let scope2 = (&mut *heap_ptr).new_scope(stack_id);
+            let scope3 = (&mut *heap_ptr).new_scope(stack_id);
 
-        heap.with_current_scope(0, |ctx| {
-            assert_eq!(ctx.depth(), 3);
-            let (parent, parent_level) = ctx.parent().unwrap();
+            assert_eq!(scope3.depth(), 3);
+            let (parent, parent_level) = scope3.parent().unwrap();
             assert_eq!(parent_level, 2);
             assert_eq!(parent.depth(), 2);
-        });
 
-        heap.pop_scope(0);
+            drop(scope3);
 
-        heap.with_current_scope(0, |ctx| {
-            assert_eq!(ctx.depth(), 2);
-            let (parent, parent_level) = ctx.parent().unwrap();
+            assert_eq!(scope2.depth(), 2);
+            let (parent, parent_level) = scope2.parent().unwrap();
             assert_eq!(parent_level, 1);
             assert_eq!(parent.depth(), 1);
-        });
 
-        heap.pop_scope(0);
+            drop(scope2);
 
-        heap.with_current_scope(0, |ctx| {
-            assert_eq!(ctx.depth(), 1);
-            assert!(ctx.parent().is_none());
-        });
+            assert_eq!(scope1.depth(), 1);
+            assert!(scope1.parent().is_none());
+        }
     }
 
     #[test]
     fn test_set_promote_moves_node_to_parent_scope_and_keeps_protection() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
-
-        heap.push_scope(0, partition_id);
-        heap.push_scope(0, partition_id);
+        let stack_id = heap.acquire_scope_stack(partition_id);
 
         let promoted_head;
         let other_head;
 
-        {
-            let ctx = heap.scope_stacks[0].scopes.last_mut().unwrap();
-            let promoted: GcRef<Node> = ctx
+        let heap_ptr = &mut heap as *mut GcHeap;
+        unsafe {
+            let parent_scope = (&mut *heap_ptr).new_scope(stack_id);
+            let child_scope = (&mut *heap_ptr).new_scope(stack_id);
+
+            let promoted: GcRef<Node> = child_scope
                 .alloc_local(Node {
                     next: None,
                     value: 1,
                 })
                 .unwrap();
-            let other: GcRef<Node> = ctx
+            let other: GcRef<Node> = child_scope
                 .alloc_local(Node {
                     next: None,
                     value: 2,
@@ -855,37 +867,21 @@ mod tests {
             promoted_head = promoted.head_ptr;
             other_head = other.head_ptr;
 
-            unsafe {
-                assert!(promoted_head.as_ref().is_local());
-                assert!(other_head.as_ref().is_local());
-            }
+            assert!(promoted_head.as_ref().is_local());
+            assert!(other_head.as_ref().is_local());
 
-            ctx.set_promote(Some(promoted_head));
-        }
+            child_scope.set_promote(Some(promoted_head));
 
-        heap.with_current_scope(0, |ctx| ctx.flush());
+            child_scope.flush();
 
-        unsafe {
             assert!(promoted_head.as_ref().is_local());
             assert!(!other_head.as_ref().is_local());
-        }
 
-        {
-            let parent_ctx = heap.scope_stacks[0].scopes.first().unwrap();
-            assert!(parent_ctx.contains(promoted_head));
-        }
+            assert!(parent_scope.contains(promoted_head));
+            assert!(!child_scope.contains(promoted_head));
 
-        {
-            let child_ctx = heap.scope_stacks[0].scopes.last().unwrap();
-            assert!(!child_ctx.contains(promoted_head));
-        }
+            parent_scope.flush();
 
-        {
-            let parent_ctx = heap.scope_stacks[0].scopes.first_mut().unwrap();
-            parent_ctx.flush();
-        }
-
-        unsafe {
             assert!(!promoted_head.as_ref().is_local());
         }
     }
@@ -894,13 +890,12 @@ mod tests {
     fn test_set_promote_in_top_level_scope_is_noop() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
-
-        heap.push_scope(0, partition_id);
+        let stack_id = heap.acquire_scope_stack(partition_id);
 
         let head;
 
         {
-            let ctx = heap.scope_stacks[0].scopes.last_mut().unwrap();
+            let ctx = heap.new_scope(stack_id);
             let node: GcRef<Node> = ctx
                 .alloc_local(Node {
                     next: None,
@@ -916,10 +911,10 @@ mod tests {
 
             ctx.set_promote(Some(head));
             ctx.flush();
-        }
 
-        unsafe {
-            assert!(!head.as_ref().is_local());
+            unsafe {
+                assert!(!head.as_ref().is_local());
+            }
         }
     }
 
@@ -945,24 +940,21 @@ mod tests {
             assert!(!head.as_ref().is_local());
         }
 
-        heap.push_scope(0, partition_id);
-        heap.push_scope(0, partition_id);
+        let stack_id = heap.acquire_scope_stack(partition_id);
 
-        {
-            let ctx = heap.scope_stacks[0].scopes.last_mut().unwrap();
-            ctx.set_promote(Some(head));
+        let heap_ptr = &mut heap as *mut GcHeap;
+        unsafe {
+            let parent_scope = (&mut *heap_ptr).new_scope(stack_id);
+            let child_scope = (&mut *heap_ptr).new_scope(stack_id);
 
-            unsafe {
-                assert!(head.as_ref().is_local());
-            }
+            child_scope.set_promote(Some(head));
 
-            ctx.set_promote(None);
-            ctx.flush();
-        }
+            assert!(head.as_ref().is_local());
 
-        {
-            let parent_ctx = heap.scope_stacks[0].scopes.first().unwrap();
-            assert!(!parent_ctx.contains(head));
+            child_scope.set_promote(None);
+            child_scope.flush();
+
+            assert!(!parent_scope.contains(head));
         }
 
         unsafe {
@@ -974,37 +966,39 @@ mod tests {
     fn test_multi_scope_stacks_are_independent() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
-        let stack1 = heap.acquire_scope_stack();
-        let stack2 = heap.acquire_scope_stack();
+        let stack1 = heap.acquire_scope_stack(partition_id);
+        let stack2 = heap.acquire_scope_stack(partition_id);
 
         assert_ne!(stack1, stack2);
         assert_eq!(heap.scope_max_depth(stack1), 0);
         assert_eq!(heap.scope_max_depth(stack2), 0);
 
-        heap.push_scope(stack1, partition_id);
-        heap.push_scope(stack2, partition_id);
-        heap.push_scope(stack1, partition_id);
+        let heap_ptr = &mut heap as *mut GcHeap;
+        unsafe {
+            let _s1a = (&mut *heap_ptr).new_scope(stack1);
+            let _s2a = (&mut *heap_ptr).new_scope(stack2);
+            let _s1b = (&mut *heap_ptr).new_scope(stack1);
 
-        assert_eq!(heap.scope_max_depth(stack1), 2);
-        assert_eq!(heap.scope_max_depth(stack2), 1);
-        assert_eq!(heap.current_scope(stack1).unwrap().depth(), 2);
-        assert_eq!(heap.current_scope(stack2).unwrap().depth(), 1);
+            assert_eq!((*heap_ptr).scope_max_depth(stack1), 2);
+            assert_eq!((*heap_ptr).scope_max_depth(stack2), 1);
+            assert_eq!((*heap_ptr).current_scope(stack1).unwrap().depth(), 2);
+            assert_eq!((*heap_ptr).current_scope(stack2).unwrap().depth(), 1);
 
-        heap.with_current_scope(stack1, |ctx| {
-            let (parent, parent_level) = ctx.parent().unwrap();
-            assert_eq!(parent_level, 1);
-            assert_eq!(parent.depth(), 1);
-            assert_eq!(parent.stack_id(), stack1);
-        });
+            (*heap_ptr).with_current_scope(stack1, |ctx| {
+                let (parent, parent_level) = ctx.parent().unwrap();
+                assert_eq!(parent_level, 1);
+                assert_eq!(parent.depth(), 1);
+                assert_eq!(parent.stack_id(), stack1);
+            });
+        }
 
-        heap.pop_scope(stack1);
-        heap.pop_scope(stack2);
-        heap.pop_scope(stack1);
+        assert_eq!(heap.scope_max_depth(stack1), 0);
+        assert_eq!(heap.scope_max_depth(stack2), 0);
 
         heap.release_scope_stack(stack1);
         heap.release_scope_stack(stack2);
 
-        let reused = heap.acquire_scope_stack();
+        let reused = heap.acquire_scope_stack(partition_id);
         assert_eq!(reused, stack1);
     }
 
@@ -1012,13 +1006,13 @@ mod tests {
     fn test_gc_scope_drop_is_lifo_per_stack() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
-        let stack1 = heap.acquire_scope_stack();
-        let stack2 = heap.acquire_scope_stack();
+        let stack1 = heap.acquire_scope_stack(partition_id);
+        let stack2 = heap.acquire_scope_stack(partition_id);
         let heap_ptr = &mut heap as *mut GcHeap;
 
         unsafe {
-            let scope1 = (&mut *heap_ptr).new_scope(stack1, partition_id);
-            let scope2 = (&mut *heap_ptr).new_scope(stack2, partition_id);
+            let scope1 = (&mut *heap_ptr).new_scope(stack1);
+            let scope2 = (&mut *heap_ptr).new_scope(stack2);
 
             drop(scope1);
             drop(scope2);

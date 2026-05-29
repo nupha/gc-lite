@@ -20,7 +20,7 @@ pub use {
     helpers::{GcError, GcResult},
     node::{GcHead, GcNode, GcRef},
     partition::{GcPartition, GcPartitionId},
-    scope::{GcScope, GcScopeState},
+    scope::{GcScope, GcScopeStackId, GcScopeState},
     trace::{GcTrace, GcTraceCtx},
     weak::GcWeak,
 };

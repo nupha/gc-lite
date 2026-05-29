@@ -7,22 +7,8 @@ use crate::{
     gctype::GcTypeRegistry,
     node::{GcHead, GcNodeFlag},
     partition::{GcPartition, GcPartitionId},
-    scope::GcScopeState,
+    scope::{GcScopeStackId, ScopeStack},
 };
-
-pub(crate) struct ScopeStack {
-    pub(crate) scopes: Vec<GcScopeState<'static>>,
-    pub(crate) free: bool,
-}
-
-impl ScopeStack {
-    fn new(free: bool) -> Self {
-        Self {
-            scopes: Vec::with_capacity(16),
-            free,
-        }
-    }
-}
 
 pub struct GcHeap {
     /// Registered GC data type info
@@ -56,7 +42,7 @@ impl Drop for GcHeap {
         log::trace!("[heap::drop]");
 
         for stack in &mut self.scope_stacks {
-            for s in stack.scopes.drain(..) {
+            for s in stack.list.drain(..) {
                 unsafe {
                     s.abort();
                 }
@@ -90,7 +76,7 @@ impl GcHeap {
             weak_slots: Vec::new(),
             opaque: std::ptr::null_mut(),
             node_dtypes: registry,
-            scope_stacks: vec![ScopeStack::new(false)],
+            scope_stacks: vec![ScopeStack::new(None)],
 
             #[cfg(debug_assertions)]
             dbg_dropping_root_partition: None,
@@ -193,7 +179,7 @@ impl GcHeap {
     /// 1. if node is local or root, it's protected, returns true
     /// 1. otherwise if has current scope, add node to current scope and returns true
     /// 1. can't protect, returns false
-    pub fn protect_node(&mut self, scope_stack_id: u16, node: NonNull<GcHead>) -> bool {
+    pub fn protect_node(&mut self, scope_stack_id: GcScopeStackId, node: NonNull<GcHead>) -> bool {
         self.current_scope(scope_stack_id)
             .is_some_and(|s| s.add_non_local(node))
     }
@@ -205,7 +191,7 @@ impl GcHeap {
     /// 1. can't protect, returns false
     pub fn protect_nodes_iter(
         &mut self,
-        scope_stack_id: u16,
+        scope_stack_id: GcScopeStackId,
         nodes: impl Iterator<Item = NonNull<GcHead>>,
     ) {
         if let Some(s) = self.current_scope(scope_stack_id) {
@@ -220,7 +206,7 @@ impl GcHeap {
     /// 1. if node is local or root, do nothing
     /// 1. if has current scope, add node to current scope
     /// 1. can't protect, returns false
-    pub fn protect_nodes(&mut self, scope_stack_id: u16, nodes: &[NonNull<GcHead>]) {
+    pub fn protect_nodes(&mut self, scope_stack_id: GcScopeStackId, nodes: &[NonNull<GcHead>]) {
         self.protect_nodes_iter(scope_stack_id, nodes.iter().copied());
     }
 
@@ -282,8 +268,9 @@ mod heap_tests {
     fn test_heap_with_context_alloc_and_cleanup() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
+        let stack_id = heap.acquire_scope_stack(partition_id);
 
-        let head = heap.with_new_scope(0, partition_id, |ctx| {
+        let head = heap.with_new_scope(stack_id, |ctx| {
             let node: GcRef<Node> = ctx
                 .alloc_local(Node {
                     next: None,

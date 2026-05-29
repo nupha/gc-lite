@@ -1,6 +1,5 @@
 use gc_lite::{
-    GcError, GcHeap, GcNode, GcPartitionId, GcRef, GcResult, GcScope, GcTrace, GcTraceCtx,
-    gc_type_register,
+    GcHeap, GcPartitionId, GcRef, GcResult, GcScopeStackId, GcTrace, GcTraceCtx, gc_type_register,
 };
 
 #[derive(Debug)]
@@ -28,35 +27,44 @@ gc_type_register! {
 
 fn alloc_static(
     heap: &mut GcHeap,
-    scope: GcPartitionId,
+    stack_id: GcScopeStackId,
     value: i32,
 ) -> GcResult<GcRef<StaticNode>> {
-    let ctx = GcScope::new(heap, 0, scope);
-    let r = ctx
-        .alloc_local(StaticNode { _value: value })
-        .map_err(|(err, _)| err)?;
-    ctx.flush();
-    Ok(r)
+    heap.with_new_scope(stack_id, |ctx| {
+        let r = ctx
+            .alloc_local(StaticNode { _value: value })
+            .map_err(|(err, _)| err);
+        ctx.flush();
+        r
+    })
 }
 
-fn alloc_other(heap: &mut GcHeap, scope: GcPartitionId, value: i32) -> GcResult<GcRef<OtherNode>> {
-    let ctx = GcScope::new(heap, 0, scope);
-    let r = ctx
-        .alloc_local(OtherNode { _value: value })
-        .map_err(|(err, _)| err)?;
-    ctx.flush();
-    Ok(r)
+fn alloc_other(
+    heap: &mut GcHeap,
+    stack_id: GcScopeStackId,
+    value: i32,
+) -> GcResult<GcRef<OtherNode>> {
+    heap.with_new_scope(stack_id, |ctx| {
+        let r = ctx
+            .alloc_local(OtherNode { _value: value })
+            .map_err(|(err, _)| err);
+        ctx.flush();
+        r
+    })
 }
 
 fn main() -> GcResult<()> {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let scope = heap.create_partition();
+    let partition = heap.create_partition();
+    let stack_id = heap.acquire_scope_stack(partition);
 
-    let static_ref = alloc_static(&mut heap, scope, 10)?;
-    let other_ref = alloc_other(&mut heap, scope, 20)?;
+    let static_ref = alloc_static(&mut heap, stack_id, 10)?;
+    let other_ref = alloc_other(&mut heap, stack_id, 20)?;
 
     println!("Static node value: {}", static_ref._value);
     println!("Other node value: {}", other_ref._value);
+
+    heap.release_scope_stack(stack_id);
 
     println!("gc_node_usage example verified");
 
