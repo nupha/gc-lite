@@ -13,7 +13,13 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct GcScopeStackId(u16);
+pub struct GcScopeStackId(pub u16);
+
+impl std::fmt::Display for GcScopeStackId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 pub(crate) struct ScopeStack {
     /// sequence of scopes
@@ -39,13 +45,12 @@ pub struct GcScopeState<'s> {
     stack_id: GcScopeStackId,
     depth: NonZeroU8,
     cache: RefCell<SmallVec<[NonNull<GcHead>; 8]>>,
-    promote: RefCell<Option<(NonNull<GcHead>, bool)>>,
     _marker: PhantomData<&'s mut GcHeap>,
 }
 
 impl<'s> Drop for GcScopeState<'s> {
     fn drop(&mut self) {
-        self.flush();
+        self.clear();
     }
 }
 
@@ -65,7 +70,6 @@ impl<'s> GcScopeState<'s> {
             partition_id,
             depth: NonZeroU8::new(depth).unwrap(),
             cache: RefCell::new(SmallVec::new()),
-            promote: RefCell::new(None),
             _marker: PhantomData,
         }
     }
@@ -190,111 +194,49 @@ impl<'s> GcScopeState<'s> {
         }
     }
 
-    /// get current promote node
-    pub fn get_promote(&self) -> Option<NonNull<GcHead>> {
-        self.promote.borrow().map(|(p, _)| p)
-    }
-
-    /// Set a node to be promoted.
-    ///
-    /// Promote means when the scope is dropped, the node will be added to upper scope.
-    pub fn set_promote(&self, node: Option<NonNull<GcHead>>) {
-        #[cfg(debug_assertions)]
-        {
-            debug_assert_eq!(
-                self.depth(),
-                self.heap().scope_max_depth(self.stack_id),
-                "only inner-most scope can set_promote"
-            );
-
-            if let Some(n) = node {
-                unsafe {
-                    n.as_ref().debug_assert_node_valid(self.heap());
-                }
-            }
-        }
-
-        // Note: scope depth==1 indicates the top scope, which don't promote any node
-        if self.depth() == 1 {
-            debug_assert!(
-                self.promote.borrow().is_none(),
-                "top scope don't promote node"
-            );
-            return;
-        }
-
-        // check current promote node
-        if let Some((mut p, was_non_local)) = self.promote.borrow_mut().take()
-            && was_non_local
-        {
-            unsafe {
-                p.as_mut().remove_flag(crate::node::GcNodeFlag::LOCAL);
-
-                let mut lst = self.cache.borrow_mut();
-                if let Some(i) = lst.iter().position(|&n| n == p) {
-                    lst.swap_remove(i);
-                }
-            }
-        }
-
-        if let Some(n) = node {
-            let h = unsafe { n.as_ref() };
-            if h.is_root() {
-                return; // root node don't need to be promoted
-            }
-
-            let is_non_local = if h.is_local() {
-                if !self
-                    .cache
-                    .borrow()
-                    .iter()
-                    .any(|p| std::ptr::eq(n.as_ptr(), p.as_ptr()))
-                {
-                    // node is already in some other scope, can't promote by this
-                    return;
-                }
-                false
-            } else {
-                self.add_node(n);
-                true
-            };
-
-            *self.promote.borrow_mut() = Some((n, is_non_local));
-        }
-    }
-
-    /// clear and unprotect locals nodes in this scope; promote the result node to upper scope.
-    pub fn flush(&self) {
-        let promote: Option<NonNull<GcHead>> = self.promote.borrow_mut().take().map(|(p, _)| p);
-
-        if let Some(p) = promote {
-            let (up, _) = self.parent().unwrap();
-            // put to upper scope cache
-            up.cache.borrow_mut().push(p);
-        }
-
-        let lst = std::mem::take(self.cache.borrow_mut().deref_mut());
-        for mut n in lst.into_iter().filter(|&p| promote.is_none_or(|x| x != p)) {
-            unsafe {
-                n.as_mut().remove_flag(crate::node::GcNodeFlag::LOCAL);
-            }
-        }
-    }
-
     pub fn contains(&self, node: NonNull<GcHead>) -> bool {
         self.cache.borrow().contains(&node)
     }
 
-    /// # Safety
+    /// Move a node from this scope's cache to the target scope's cache.
     ///
-    /// 仅供 `GcHeap::drop` 在销毁事务栈时调用，用于跳过对
-    /// `nodes` 中节点的保护计数更新与根集合维护逻辑。
-    /// 调用方必须保证这些节点即将被整体释放，不再通过 GC 访问。
-    pub(super) unsafe fn abort(&self) {
-        self.promote.borrow_mut().take();
+    /// The node retains its LOCAL flag — it is simply transferred from one
+    /// scope's protection to another's. This is used when a return value
+    /// needs to be moved from a child scope to its parent scope before
+    /// the child scope is destroyed.
+    ///
+    /// Returns `true` if the node was found in this scope and moved.
+    /// Returns `false` if the node was not in this scope's cache (e.g., it
+    /// is a root node, or already belongs to another scope).
+    pub fn promote_node_to(&self, node: NonNull<GcHead>, target: &GcScopeState<'_>) -> bool {
+        let mut cache = self.cache.borrow_mut();
 
-        let nodes = std::mem::take(self.cache.borrow_mut().deref_mut());
-        for mut n in nodes {
+        if let Some(pos) = cache.iter().position(|&n| n == node) {
+            debug_assert!(unsafe { node.as_ref().is_local() });
+            cache.swap_remove(pos);
+            drop(cache);
+            target.cache.borrow_mut().push(node);
+            true
+        } else {
+            // Node not found in this scope's cache. This is safe — the node
+            // must be reachable through some other GC root or LOCAL node,
+            // otherwise it would have been collected. Common scenarios:
+            //
+            //   - ROOT node: never in any scope cache, no protection needed.
+            //   - LOCAL in an ancestor scope: already protected by that scope.
+            //   - flags=0 (was LOCAL, scope was cleared): the node is still
+            //     alive because it is referenced by another GC root/LOCAL
+            //     (e.g., a Bytecode constant pool, an object property, an
+            //     array element, a closure variable). It does not need scope
+            //     protection — it is kept alive by its referrer.
+            false
+        }
+    }
+
+    // clear and unprotect locals nodes in this scope, remote LOCAL flag of each
+    pub fn clear(&self) {
+        let lst = std::mem::take(self.cache.borrow_mut().deref_mut());
+        for mut n in lst {
             unsafe {
                 n.as_mut().remove_flag(crate::node::GcNodeFlag::LOCAL);
             }
@@ -424,7 +366,6 @@ impl GcHeap {
             partition_id: stack.partition.unwrap(),
             depth: NonZeroU8::new(depth).unwrap(),
             cache: RefCell::new(SmallVec::new()),
-            promote: RefCell::new(None),
             _marker: PhantomData,
         };
 
@@ -529,7 +470,7 @@ mod tests {
                 assert!(head.as_ref().is_local());
             }
 
-            ctx.flush();
+            ctx.clear();
 
             unsafe {
                 assert!(!head.as_ref().is_local());
@@ -568,7 +509,7 @@ mod tests {
                 .heap_mut()
                 .sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
             assert_eq!(removed, 0);
-            ctx.flush();
+            ctx.clear();
         }
 
         unsafe {
@@ -612,7 +553,7 @@ mod tests {
                 assert!(head.as_ref().is_local());
             }
 
-            ctx.flush();
+            ctx.clear();
 
             unsafe {
                 assert!(!head.as_ref().is_local());
@@ -654,7 +595,7 @@ mod tests {
             assert!(head.as_ref().is_local());
         }
 
-        ctx.flush();
+        ctx.clear();
 
         unsafe {
             assert!(!head.as_ref().is_local());
@@ -729,7 +670,7 @@ mod tests {
                 .heap_mut()
                 .sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
             assert_eq!(removed, 0);
-            ctx.flush();
+            ctx.clear();
         }
 
         unsafe {
@@ -765,7 +706,7 @@ mod tests {
                 assert!(head.as_ref().is_local());
             }
 
-            ctx.flush();
+            ctx.clear();
 
             unsafe {
                 assert!(!head.as_ref().is_local());
@@ -834,131 +775,6 @@ mod tests {
 
             assert_eq!(scope1.depth(), 1);
             assert!(scope1.parent().is_none());
-        }
-    }
-
-    #[test]
-    fn test_set_promote_moves_node_to_parent_scope_and_keeps_protection() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
-        let stack_id = heap.acquire_scope_stack(partition_id);
-
-        let promoted_head;
-        let other_head;
-
-        let heap_ptr = &mut heap as *mut GcHeap;
-        unsafe {
-            let parent_scope = (&mut *heap_ptr).new_scope(stack_id);
-            let child_scope = (&mut *heap_ptr).new_scope(stack_id);
-
-            let promoted: GcRef<Node> = child_scope
-                .alloc_local(Node {
-                    next: None,
-                    value: 1,
-                })
-                .unwrap();
-            let other: GcRef<Node> = child_scope
-                .alloc_local(Node {
-                    next: None,
-                    value: 2,
-                })
-                .unwrap();
-
-            promoted_head = promoted.head_ptr;
-            other_head = other.head_ptr;
-
-            assert!(promoted_head.as_ref().is_local());
-            assert!(other_head.as_ref().is_local());
-
-            child_scope.set_promote(Some(promoted_head));
-
-            child_scope.flush();
-
-            assert!(promoted_head.as_ref().is_local());
-            assert!(!other_head.as_ref().is_local());
-
-            assert!(parent_scope.contains(promoted_head));
-            assert!(!child_scope.contains(promoted_head));
-
-            parent_scope.flush();
-
-            assert!(!promoted_head.as_ref().is_local());
-        }
-    }
-
-    #[test]
-    fn test_set_promote_in_top_level_scope_is_noop() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
-        let stack_id = heap.acquire_scope_stack(partition_id);
-
-        let head;
-
-        {
-            let ctx = heap.new_scope(stack_id);
-            let node: GcRef<Node> = ctx
-                .alloc_local(Node {
-                    next: None,
-                    value: 1,
-                })
-                .unwrap();
-
-            head = node.head_ptr;
-
-            unsafe {
-                assert!(head.as_ref().is_local());
-            }
-
-            ctx.set_promote(Some(head));
-            ctx.flush();
-
-            unsafe {
-                assert!(!head.as_ref().is_local());
-            }
-        }
-    }
-
-    #[test]
-    fn test_set_promote_reset_on_non_local_restores_state() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
-
-        let node: GcRef<Node> = unsafe {
-            heap.alloc_raw(
-                partition_id,
-                Node {
-                    next: None,
-                    value: 1,
-                },
-            )
-        }
-        .unwrap();
-
-        let head = node.head_ptr;
-
-        unsafe {
-            assert!(!head.as_ref().is_local());
-        }
-
-        let stack_id = heap.acquire_scope_stack(partition_id);
-
-        let heap_ptr = &mut heap as *mut GcHeap;
-        unsafe {
-            let parent_scope = (&mut *heap_ptr).new_scope(stack_id);
-            let child_scope = (&mut *heap_ptr).new_scope(stack_id);
-
-            child_scope.set_promote(Some(head));
-
-            assert!(head.as_ref().is_local());
-
-            child_scope.set_promote(None);
-            child_scope.flush();
-
-            assert!(!parent_scope.contains(head));
-        }
-
-        unsafe {
-            assert!(!head.as_ref().is_local());
         }
     }
 

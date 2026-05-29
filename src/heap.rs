@@ -43,9 +43,7 @@ impl Drop for GcHeap {
 
         for stack in &mut self.scope_stacks {
             for s in stack.list.drain(..) {
-                unsafe {
-                    s.abort();
-                }
+                s.clear();
             }
         }
 
@@ -277,7 +275,7 @@ mod heap_tests {
                     value: 1,
                 })
                 .unwrap();
-            ctx.flush();
+            ctx.clear();
             node.head_ptr
         });
 
