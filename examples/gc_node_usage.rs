@@ -34,7 +34,7 @@ fn alloc_static(
         let r = ctx
             .alloc_local(StaticNode { _value: value })
             .map_err(|(err, _)| err);
-        ctx.flush();
+        ctx.clear();
         r
     })
 }
@@ -48,7 +48,7 @@ fn alloc_other(
         let r = ctx
             .alloc_local(OtherNode { _value: value })
             .map_err(|(err, _)| err);
-        ctx.flush();
+        ctx.clear();
         r
     })
 }
