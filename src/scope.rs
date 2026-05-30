@@ -13,7 +13,7 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
-pub struct GcScopeStackId(pub u16);
+pub struct GcScopeStackId(u16);
 
 impl std::fmt::Display for GcScopeStackId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -31,7 +31,7 @@ pub(crate) struct ScopeStack {
 impl ScopeStack {
     pub(super) fn new(partition: Option<GcPartitionId>) -> Self {
         Self {
-            list: Vec::with_capacity(16),
+            list: Vec::with_capacity(8),
             partition,
         }
     }
@@ -45,7 +45,7 @@ pub struct GcScopeState<'s> {
     stack_id: GcScopeStackId,
     depth: NonZeroU8,
     cache: RefCell<SmallVec<[NonNull<GcHead>; 8]>>,
-    _marker: PhantomData<&'s mut GcHeap>,
+    _marker: PhantomData<&'s ()>,
 }
 
 impl<'s> Drop for GcScopeState<'s> {
