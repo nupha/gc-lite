@@ -8,6 +8,7 @@ use crate::{
     node::{GcHead, GcTriColor},
     node_link::{GcNodeLink, NodeLinkIter},
     partition::GcPartitionId,
+    trace::GcTraceCtx,
 };
 
 impl GcHeap {
@@ -33,25 +34,41 @@ impl GcHeap {
     ///
     /// If the partition is already marking, this is a no-op.
     /// Otherwise, resets all nodes to White and marks root/LOCAL nodes as Gray.
+    /// Any nodes already in the gray list (e.g., pushed from cross-partition
+    /// references during another partition's mark cycle) are preserved.
     pub fn mark_prepare(&mut self, partition_id: GcPartitionId) {
         if let Some(par) = self.partitions.get_mut(&partition_id)
             && !par.is_marking()
         {
-            debug_assert!(
-                par.gray_list.is_empty(),
-                "mark_prepare called on partition {} with non-empty gray list",
-                partition_id.0,
-            );
-
             par.set_marking(true);
+
+            // Preserve any cross-partition gray nodes that were pushed into
+            // this partition's gray list before it started marking.
+            let has_cross_grays = !par.gray_list.is_empty();
 
             for mut n in par.nodes.iter() {
                 let node = unsafe { n.as_mut() };
                 if node.is_root_or_local() {
                     node.set_color(GcTriColor::Gray);
-                    par.gray_list.push(n);
-                } else {
+                    if !has_cross_grays {
+                        par.gray_list.push(n);
+                    }
+                } else if !has_cross_grays {
                     node.set_color(GcTriColor::White);
+                }
+            }
+
+            if has_cross_grays {
+                // Cross-partition gray nodes already exist; only add root/LOCAL
+                // nodes that are not already in the gray list.
+                for mut n in par.nodes.iter() {
+                    let node = unsafe { n.as_mut() };
+                    if node.is_root_or_local() {
+                        node.set_color(GcTriColor::Gray);
+                        if !par.gray_list.contains(&n) {
+                            par.gray_list.push(n);
+                        }
+                    }
                 }
             }
         }
@@ -62,13 +79,22 @@ impl GcHeap {
             return false;
         }
 
-        let heap_ptr = self as *mut Self;
+        // Pre-acquire the opaque pointer and type registry so we don't need &self
+        // while holding a mutable borrow on a partition.
+        let opaque = self.opaque();
+        let node_dtypes: *const crate::gctype::GcTypeRegistry = self.node_dtypes;
 
         if let Some(par) = self.partitions.get_mut(&partition_id)
             && !par.gray_list.is_empty()
         {
-            let mut gcx = unsafe { (*heap_ptr).create_trace_ctx(64) };
+            let mut gcx = GcTraceCtx {
+                traced_nodes: Vec::with_capacity(64),
+                opaque,
+                _mark: std::marker::PhantomData,
+            };
             let mut cnt = 0;
+            // Buffer for cross-partition gray nodes: (node_ptr, target_partition_id)
+            let mut cross_nodes: Vec<(NonNull<GcHead>, GcPartitionId)> = Vec::new();
 
             while let Some(mut node_ptr) = par.gray_list.pop() {
                 let node = unsafe { node_ptr.as_mut() };
@@ -86,8 +112,12 @@ impl GcHeap {
                         return false;
                     }
 
+                    // SAFETY: node_dtypes is &'static, and we hold &mut self so the
+                    // registry is guaranteed to be alive.
                     unsafe {
-                        (*heap_ptr).trace_node(node_ptr, &mut gcx);
+                        let dtype = node_ptr.as_ref().dtype() as usize;
+                        let info = &(*node_dtypes).type_info_list[dtype];
+                        (info.trace_fn)(node_ptr, &mut gcx);
                     }
 
                     while let Some(mut ch) = gcx.traced_nodes.pop() {
@@ -103,19 +133,11 @@ impl GcHeap {
                                 par.gray_list.push(ch);
                             }
                         } else {
-                            // Cross-partition reference: unconditionally mark the child
-                            // as Gray and add it to the target partition's gray list.
-                            // If the target partition is not currently marking, the gray
-                            // entry will be processed during its next mark cycle (gray
-                            // lists are cleared by mark_prepare).
-                            unsafe {
-                                if matches!(child.color(), GcTriColor::White | GcTriColor::Gray) {
-                                    child.set_color(GcTriColor::Gray);
-                                    let p2 = (*heap_ptr).partition_mut(pid).unwrap();
-                                    if !p2.gray_list.contains(&ch) {
-                                        p2.gray_list.push(ch);
-                                    }
-                                }
+                            // Cross-partition reference: buffer the child for later processing
+                            // to avoid aliased mutable access to self.partitions.
+                            if matches!(child.color(), GcTriColor::White | GcTriColor::Gray) {
+                                child.set_color(GcTriColor::Gray);
+                                cross_nodes.push((ch, pid));
                             }
                         }
                     }
@@ -124,6 +146,16 @@ impl GcHeap {
                     node.set_color(GcTriColor::Black);
 
                     cnt += 1;
+                }
+            }
+
+            // Flush cross-partition gray nodes into their target partitions.
+            // This is done after releasing the mutable borrow on `par`.
+            for (node, pid) in cross_nodes {
+                if let Some(p2) = self.partition_mut(pid)
+                    && !p2.gray_list.contains(&node)
+                {
+                    p2.gray_list.push(node);
                 }
             }
         }

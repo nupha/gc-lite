@@ -451,28 +451,34 @@ impl GcHeap {
             ) {
                 slave.as_mut().set_color(GcTriColor::Gray);
 
-                if self
-                    .partition(slave.as_ref().partition_id())
-                    .is_some_and(|p| p.is_marking())
-                {
+                let slave_pid = slave.as_ref().partition_id();
+                if self.partition(slave_pid).is_some_and(|p| p.is_marking()) {
                     self.add_gray_node(slave);
                 }
             }
         }
 
-        // Experimental: cross partition relationship
-        // if unsafe { master.as_ref().partition_id() != slave.as_ref().partition_id() } {
-        //     // update cross scope reference
-        //     let xref = unsafe {
-        //         let x = master.as_ref().xref();
-        //         if x.is_null() {
-        //             master.as_ref().partition_id()
-        //         } else {
-        //             x
-        //         }
-        //     };
-        //     self.set_xref(xref, slave);
-        // }
+        // Cross-partition reference tracking.
+        // If master and slave belong to different partitions, ensure the slave
+        // is reachable from the master's partition during marking.
+        unsafe {
+            let master_pid = master.as_ref().partition_id();
+            let slave_pid = slave.as_ref().partition_id();
+
+            if master_pid != slave_pid && !slave_pid.is_null() && !master_pid.is_null() {
+                let slave_color = slave.as_ref().color();
+
+                if matches!(slave_color, GcTriColor::White | GcTriColor::Gray)
+                    && let Some(slave_par) = self.partition_mut(slave_pid)
+                    && slave_par.is_marking()
+                {
+                    slave.as_mut().set_color(GcTriColor::Gray);
+                    if !slave_par.gray_list.contains(&slave) {
+                        slave_par.gray_list.push(slave);
+                    }
+                }
+            }
+        }
     }
 }
 

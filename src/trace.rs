@@ -19,8 +19,8 @@ pub trait GcTrace: 'static {
 
 pub struct GcTraceCtx<'a> {
     pub(crate) traced_nodes: Vec<NonNull<GcHead>>,
-    opaque: *mut u8,
-    _mark: PhantomData<&'a ()>,
+    pub(crate) opaque: *mut u8,
+    pub(crate) _mark: PhantomData<&'a ()>,
 }
 
 impl<'a> GcTraceCtx<'a> {
@@ -66,13 +66,25 @@ impl GcHeap {
 
     /// Trace direct children of a node into the given trace context
     pub fn trace_node(&self, node: NonNull<GcHead>, gcx: &mut GcTraceCtx) {
-        unsafe {
-            (self
-                .node_dtypes
-                .type_info_list
-                .get_unchecked(node.as_ref().dtype() as usize)
-                .trace_fn)(node, gcx);
-        }
+        let dtype = unsafe { node.as_ref().dtype() } as usize;
+
+        #[cfg(debug_assertions)]
+        let info = self
+            .node_dtypes
+            .type_info_list
+            .get(dtype)
+            .unwrap_or_else(|| {
+                panic!(
+                    "trace_node: invalid dtype {} (max {})",
+                    dtype,
+                    self.node_dtypes.type_info_list.len().saturating_sub(1),
+                )
+            });
+
+        #[cfg(not(debug_assertions))]
+        let info = unsafe { self.node_dtypes.type_info_list.get_unchecked(dtype) };
+
+        (info.trace_fn)(node, gcx);
     }
 
     pub fn traverse_start(&mut self, partition_id: GcPartitionId) {
