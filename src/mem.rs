@@ -3,7 +3,7 @@
 
 use std::{alloc::Layout, marker::PhantomData, ptr::NonNull};
 
-use crate::gctype::{layout_align_of, layout_from_type_info, layout_size_of, payload_offset_of};
+use crate::gctype::{layout_align_of, layout_size_of, payload_offset_of};
 use crate::{GcError, GcHead, GcHeap, GcNode, GcPartitionId, GcRef, unlikely, weak::GcWeakRawId};
 
 impl GcHeap {
@@ -184,7 +184,7 @@ impl GcHeap {
 
         let dtype = hd.dtype() as usize;
         let info = &self.node_dtypes.type_info_list[dtype];
-        let layout = layout_from_type_info(info);
+        let layout = info.layout();
         let gross_size = layout.size();
 
         #[cfg(debug_assertions)]

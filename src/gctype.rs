@@ -17,8 +17,28 @@ pub struct GcTypeInfo {
     pub drop_pass: u8,
 }
 
+impl GcTypeInfo {
+    #[inline(always)]
+    pub fn layout(&self) -> Layout {
+        #[cfg(debug_assertions)]
+        {
+            Layout::from_size_align(self.layout_size, self.layout_align).unwrap()
+        }
+
+        #[cfg(not(debug_assertions))]
+        unsafe {
+            Layout::from_size_align_unchecked(self.layout_size, self.layout_align)
+        }
+    }
+
+    #[inline(always)]
+    pub fn payload_ptr(&self, node: NonNull<GcHead>) -> NonNull<u8> {
+        unsafe { node.cast::<u8>().add(self.payload_offset) }
+    }
+}
+
 #[inline(always)]
-pub const fn align_up(value: usize, align: usize) -> usize {
+const fn align_up(value: usize, align: usize) -> usize {
     let mask = align - 1;
     (value + mask) & !mask
 }
@@ -45,24 +65,6 @@ pub const fn layout_size_of<T>() -> usize {
         payload_offset_of::<T>() + std::mem::size_of::<T>(),
         layout_align_of::<T>(),
     )
-}
-
-#[inline(always)]
-pub fn layout_from_type_info(info: &GcTypeInfo) -> Layout {
-    #[cfg(debug_assertions)]
-    return Layout::from_size_align(info.layout_size, info.layout_align).unwrap();
-
-    #[cfg(not(debug_assertions))]
-    unsafe {
-        Layout::from_size_align_unchecked(info.layout_size, info.layout_align)
-    }
-}
-
-impl GcTypeInfo {
-    #[inline(always)]
-    pub fn payload_ptr(&self, node: NonNull<GcHead>) -> NonNull<u8> {
-        unsafe { node.cast::<u8>().add(self.payload_offset) }
-    }
 }
 
 pub fn trace_fn<T: GcTrace>(node: NonNull<GcHead>, gcx: &mut GcTraceCtx) {
