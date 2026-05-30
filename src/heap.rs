@@ -10,6 +10,19 @@ use crate::{
     scope::{GcScopeStackId, ScopeStack},
 };
 
+/// Minimum GC threshold: at least one GcHead plus the smallest possible
+/// aligned payload (1 byte, aligned to GcHead's alignment).
+const MIN_GC_THRESHOLD: usize = {
+    const fn align_up(value: usize, align: usize) -> usize {
+        let mask = align - 1;
+        (value + mask) & !mask
+    }
+    let head_size = std::mem::size_of::<GcHead>();
+    let min_payload = 1;
+    let payload_align = std::mem::align_of::<GcHead>();
+    head_size + align_up(min_payload, payload_align)
+};
+
 pub struct GcHeap {
     /// Registered GC data type info
     pub(super) node_dtypes: &'static GcTypeRegistry,
@@ -105,7 +118,7 @@ impl GcHeap {
             self.memory_limit = applied;
 
             if self.gc_threshold > 0 && self.gc_threshold >= applied {
-                let adjusted = applied - (applied >> 2);
+                let adjusted = std::cmp::max(applied - (applied >> 2), MIN_GC_THRESHOLD);
                 self.gc_threshold = adjusted;
             }
         }

@@ -172,7 +172,8 @@ impl GcHeap {
         }
     }
 
-    /// dispose white nodes in the partition
+    /// dispose white nodes in the partition.
+    /// `on_dispose` is called BEFORE a node will be disposed.
     pub fn sweep(
         &mut self,
         partition_id: GcPartitionId,

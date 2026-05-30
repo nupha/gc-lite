@@ -278,6 +278,11 @@ impl<'s> Drop for GcScope<'s> {
         unsafe {
             let heap = self.heap.as_mut();
             let stack = &heap.scope_stacks[self.stack_id.0 as usize];
+            debug_assert!(
+                !stack.list.is_empty(),
+                "GcScope dropped but scope stack {} is empty",
+                self.stack_id.0,
+            );
             debug_assert_eq!(
                 stack.list.len() as u8 - 1,
                 self.index,

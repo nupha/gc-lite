@@ -36,11 +36,9 @@ impl<'a> GcTraceCtx<'a> {
             node.as_ref().debug_assert_node_valid_simple();
         }
 
-        // if !self.traced_nodes.contains(&node) {
-        //     self.traced_nodes.push_back(node);
-        // }
-
-        self.traced_nodes.push(node);
+        if !self.traced_nodes.contains(&node) {
+            self.traced_nodes.push(node);
+        }
     }
 
     /// Submit a GcRef to collected list
