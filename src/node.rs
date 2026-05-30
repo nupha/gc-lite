@@ -445,9 +445,6 @@ impl GcHeap {
     /// 2. If `master` is Black and `slave` is White/Gray, marking `slave`
     ///    as **Gray** and enqueuing it into the gray list of its partition,
     ///    ensuring it will be traced in the current GC cycle.
-    /// 3. If `master` and `slave` belong to different GC partitions,
-    ///    recording a cross-partition reference (xref) so that the slave's
-    ///    partition can find it during marking.
     ///
     /// # Safety
     ///

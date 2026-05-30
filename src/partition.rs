@@ -120,7 +120,6 @@ impl GcHeap {
     }
 
     /// Remove a partition, and dispose unused nodes.
-    /// For non-root partition, migrate xref nodes is optionally performed.
     pub fn remove_partition(
         &mut self,
         partition_id: GcPartitionId,

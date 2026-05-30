@@ -4,7 +4,7 @@
 use std::ptr::NonNull;
 
 use crate::{
-    GcHeap, GcNode,
+    GcHeap,
     node::{GcHead, GcTriColor},
     node_link::{GcNodeLink, NodeLinkIter},
     partition::GcPartitionId,
@@ -92,10 +92,18 @@ impl GcHeap {
                                 par.gray_list.push(ch);
                             }
                         } else {
-                            let p2 = unsafe { (*heap_ptr).partition(pid).unwrap() };
-                            if p2.is_marking() {
-                                unsafe {
-                                    (*heap_ptr).add_gray_node(ch);
+                            // Cross-partition reference: unconditionally mark the child
+                            // as Gray and add it to the target partition's gray list.
+                            // If the target partition is not currently marking, the gray
+                            // entry will be processed during its next mark cycle (gray
+                            // lists are cleared by mark_prepare).
+                            unsafe {
+                                if matches!(child.color(), GcTriColor::White | GcTriColor::Gray) {
+                                    child.set_color(GcTriColor::Gray);
+                                    let p2 = (*heap_ptr).partition_mut(pid).unwrap();
+                                    if !p2.gray_list.contains(&ch) {
+                                        p2.gray_list.push(ch);
+                                    }
                                 }
                             }
                         }
@@ -293,7 +301,7 @@ impl GcHeap {
 #[cfg(test)]
 mod sweep_test {
     use super::*;
-    use crate::GcRef;
+    use crate::{GcNode, GcRef};
 
     use crate::trace::{GcTrace, GcTraceCtx};
 
