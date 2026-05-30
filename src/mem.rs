@@ -192,15 +192,20 @@ impl GcHeap {
         let layout = info.layout();
         let gross_size = layout.size();
 
-        #[cfg(debug_assertions)]
-        unsafe {
-            std::ptr::drop_in_place(node.cast::<GcHead>().as_ptr());
-        }
-
         if let Some(f) = info.drop_fn {
             unsafe {
                 f(info.payload_ptr(node).as_ptr());
             }
+        }
+
+        #[cfg(debug_assertions)]
+        unsafe {
+            // Poison only the fields checked by debug_assert_node_valid_simple():
+            // clear attrs (removing the 0xFF sentinel) and null out next.
+            // This must happen AFTER drop_fn so that the payload's Drop impl
+            // can still access the GcHead (e.g. via gc_ref() in finalize).
+            (*node.as_ptr()).attrs = 0;
+            (*node.as_ptr()).next = None;
         }
 
         self.mem_dealloc(node.cast::<u8>(), layout);
