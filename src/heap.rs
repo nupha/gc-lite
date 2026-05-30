@@ -54,6 +54,11 @@ impl Drop for GcHeap {
         // heap world is gone, dealloc all nodes live in it, regardless their status.
         log::trace!("[heap::drop]");
 
+        // Clear all scope caches first to remove LOCAL flags from nodes.
+        // This must happen BEFORE disposing partitions so that nodes are not
+        // protected by scope and can be reclaimed. GcScopeState::clear() only
+        // touches node flags and does not access any GcHeap fields, so it is
+        // safe to call during GcHeap::drop.
         for stack in &mut self.scope_stacks {
             for s in stack.list.drain(..) {
                 s.clear();

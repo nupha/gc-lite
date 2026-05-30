@@ -119,14 +119,7 @@ impl<'s> GcScopeState<'s> {
             self.heap().scope_stacks[self.stack_id.0 as usize]
                 .list
                 .get(parent_index as usize)
-                .map(|s| {
-                    (
-                        unsafe {
-                            std::mem::transmute::<&GcScopeState<'static>, &GcScopeState<'_>>(s)
-                        },
-                        d - 1,
-                    )
-                })
+                .map(|s| (s, d - 1))
         } else {
             None
         }
