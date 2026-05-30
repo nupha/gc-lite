@@ -34,32 +34,34 @@ impl GcHeap {
     ///
     /// If the partition is already marking, this is a no-op.
     /// Otherwise, resets all nodes to White and marks root/LOCAL nodes as Gray.
-    /// Any nodes already in the gray list (e.g., pushed from cross-partition
-    /// references during another partition's mark cycle) are preserved.
+    /// Any nodes already in the gray list (e.g., from with_write_barrier or
+    /// cross-partition references) are preserved rather than cleared.
     pub fn mark_prepare(&mut self, partition_id: GcPartitionId) {
         if let Some(par) = self.partitions.get_mut(&partition_id)
             && !par.is_marking()
         {
             par.set_marking(true);
 
-            // Preserve any cross-partition gray nodes that were pushed into
-            // this partition's gray list before it started marking.
-            let has_cross_grays = !par.gray_list.is_empty();
+            // If the gray list is non-empty (e.g., nodes were added by
+            // with_write_barrier before this partition started marking, or
+            // pushed from cross-partition references), preserve them and
+            // only add root/LOCAL nodes that are not already present.
+            let has_pending_grays = !par.gray_list.is_empty();
 
             for mut n in par.nodes.iter() {
                 let node = unsafe { n.as_mut() };
                 if node.is_root_or_local() {
                     node.set_color(GcTriColor::Gray);
-                    if !has_cross_grays {
+                    if !has_pending_grays {
                         par.gray_list.push(n);
                     }
-                } else if !has_cross_grays {
+                } else if !has_pending_grays {
                     node.set_color(GcTriColor::White);
                 }
             }
 
-            if has_cross_grays {
-                // Cross-partition gray nodes already exist; only add root/LOCAL
+            if has_pending_grays {
+                // Pending gray nodes already exist; only add root/LOCAL
                 // nodes that are not already in the gray list.
                 for mut n in par.nodes.iter() {
                     let node = unsafe { n.as_mut() };
@@ -119,7 +121,7 @@ impl GcHeap {
                         "trace context should be empty before tracing a new node"
                     );
                     gcx.traced_nodes.clear();
-                    
+
                     unsafe {
                         let dtype = node_ptr.as_ref().dtype() as usize;
                         let info = &(*node_dtypes).type_info_list[dtype];

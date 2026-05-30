@@ -393,31 +393,31 @@ mod tests {
         {
             let mut nodes = nodes.clone();
             let n = nodes[1];
-            nodes[0].with_mut(&mut heap, |node| node.add_child(n));
+            nodes[0].with_write_barrier(&mut heap, |node| node.add_child(n));
 
             let n = nodes[2];
-            nodes[0].with_mut(&mut heap, |node| node.add_child(n));
+            nodes[0].with_write_barrier(&mut heap, |node| node.add_child(n));
 
             let n = nodes[3];
-            nodes[1].with_mut(&mut heap, |node| node.add_child(n));
+            nodes[1].with_write_barrier(&mut heap, |node| node.add_child(n));
 
             let n = nodes[4];
-            nodes[1].with_mut(&mut heap, |node| node.add_child(n));
+            nodes[1].with_write_barrier(&mut heap, |node| node.add_child(n));
 
             let n = nodes[5];
-            nodes[2].with_mut(&mut heap, |node| node.add_child(n));
+            nodes[2].with_write_barrier(&mut heap, |node| node.add_child(n));
 
             let n = nodes[6];
-            nodes[2].with_mut(&mut heap, |node| node.add_child(n));
+            nodes[2].with_write_barrier(&mut heap, |node| node.add_child(n));
 
             let n = nodes[7];
-            nodes[3].with_mut(&mut heap, |node| node.add_child(n));
+            nodes[3].with_write_barrier(&mut heap, |node| node.add_child(n));
 
             let n = nodes[8];
-            nodes[3].with_mut(&mut heap, |node| node.add_child(n));
+            nodes[3].with_write_barrier(&mut heap, |node| node.add_child(n));
 
             let n = nodes[9];
-            nodes[4].with_mut(&mut heap, |node| node.add_child(n));
+            nodes[4].with_write_barrier(&mut heap, |node| node.add_child(n));
         }
 
         let mut root = TestNode::new(100);
@@ -446,8 +446,8 @@ mod tests {
         let mut node2 = unsafe { heap.alloc_raw(partition_id, TestNode::new(2)) }.unwrap();
 
         {
-            node1.with_mut(&mut heap, |n| n.add_child(node2));
-            node2.with_mut(&mut heap, |n| n.add_child(node1));
+            node1.with_write_barrier(&mut heap, |n| n.add_child(node2));
+            node2.with_write_barrier(&mut heap, |n| n.add_child(node1));
         }
 
         // Mark reachable nodes - should handle circular reference without infinite loop
@@ -491,7 +491,7 @@ mod tests {
 
         // Now add the white child to the black root via with_mut().
         // The write barrier should re-gray the root and enqueue it.
-        root.with_mut(&mut heap, |node| node.add_child(child));
+        root.with_write_barrier(&mut heap, |node| node.add_child(child));
 
         // Continue marking. The root should be traced again, discovering the child.
         while !heap.mark(partition_id, 1) {}
@@ -523,13 +523,13 @@ mod tests {
         // Create a chain: root -> a -> b -> c
         let c = unsafe { heap.alloc_raw(partition_id, TestNode::new(3)) }.unwrap();
         let mut b = unsafe { heap.alloc_raw(partition_id, TestNode::new(2)) }.unwrap();
-        b.with_mut(&mut heap, |node| node.add_child(c));
+        b.with_write_barrier(&mut heap, |node| node.add_child(c));
 
         let mut a = unsafe { heap.alloc_raw(partition_id, TestNode::new(1)) }.unwrap();
-        a.with_mut(&mut heap, |node| node.add_child(b));
+        a.with_write_barrier(&mut heap, |node| node.add_child(b));
 
         let mut root = unsafe { heap.alloc_root_raw(partition_id, TestNode::new(0)) }.unwrap();
-        root.with_mut(&mut heap, |node| node.add_child(a));
+        root.with_write_barrier(&mut heap, |node| node.add_child(a));
 
         // Mark partially: only 1 node per step, so root becomes black,
         // a becomes gray, b and c stay white.
@@ -538,7 +538,7 @@ mod tests {
         // At this point root is black, a is black, b is gray/black, c is white.
         // Now add a NEW white child to the black root.
         let new_child = unsafe { heap.alloc_raw(partition_id, TestNode::new(10)) }.unwrap();
-        root.with_mut(&mut heap, |node| node.add_child(new_child));
+        root.with_write_barrier(&mut heap, |node| node.add_child(new_child));
 
         // Continue marking to completion.
         while !heap.mark(partition_id, 1) {}

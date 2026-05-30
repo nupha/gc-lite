@@ -624,15 +624,15 @@ fn test_circular_reference_handling() {
     // Allocate nodes and create a circular reference
     let mut node1 = unsafe { heap.alloc_raw(id, TestNode::new(1)) }.unwrap();
     let mut node2 = unsafe { heap.alloc_raw(id, TestNode::new(2)) }.unwrap();
-    node1.with_mut(&mut heap, |n| n.add_child(node2));
-    node2.with_mut(&mut heap, |n| n.add_child(node1));
+    node1.with_write_barrier(&mut heap, |n| n.add_child(node2));
+    node2.with_write_barrier(&mut heap, |n| n.add_child(node1));
 
     // To test collection, we need a root that references the cycle
     let mut root = unsafe { heap.alloc_root_raw(id, TestNode::new(0)) }.unwrap();
-    root.with_mut(&mut heap, |n| n.add_child(node1));
+    root.with_write_barrier(&mut heap, |n| n.add_child(node1));
 
     // Now, break the link from the root to the cycle
-    root.with_mut(&mut heap, |n| n.children.clear());
+    root.with_write_barrier(&mut heap, |n| n.children.clear());
 
     // GC should now collect the cycle
     let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);

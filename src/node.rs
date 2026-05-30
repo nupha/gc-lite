@@ -365,17 +365,18 @@ impl<T: GcNode> GcRef<T> {
         }
     }
 
-    pub fn with_mut<F, R>(&mut self, heap: &mut GcHeap, mutator: F) -> R
+    pub fn with_write_barrier<F, R>(&mut self, heap: &mut GcHeap, mutator: F) -> R
     where
         F: FnOnce(&mut T) -> R,
     {
-        let head = unsafe { self.head_ptr.as_mut() };
-        if head.color() == GcTriColor::Black {
-            head.set_color(GcTriColor::Gray);
+        let node = unsafe { self.head_ptr.as_mut() };
+
+        if node.color() == GcTriColor::Black {
+            node.set_color(GcTriColor::Gray);
             heap.add_gray_node(self.head_ptr);
         }
 
-        let value = unsafe { head.payload_for::<T>().cast::<T>().as_mut() };
+        let value = unsafe { node.payload_for::<T>().cast::<T>().as_mut() };
         mutator(value)
     }
 

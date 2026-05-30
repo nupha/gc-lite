@@ -129,8 +129,8 @@ fn demonstrate_cyclic_references(
 
     // Establish circular references
     {
-        node1.with_mut(heap, |n| n.set_partner(node2));
-        node2.with_mut(heap, |n| n.set_partner(node1));
+        node1.with_write_barrier(heap, |n| n.set_partner(node2));
+        node2.with_write_barrier(heap, |n| n.set_partner(node1));
     }
 
     println!("  Created node1: {}", node1.deref());
@@ -176,9 +176,9 @@ fn demonstrate_complex_structures(
 
     // Build tree structure
     {
-        root_node.with_mut(heap, |n| n.add_child(child1));
-        root_node.with_mut(heap, |n| n.add_child(child2));
-        child1.with_mut(heap, |n| n.add_child(grandchild));
+        root_node.with_write_barrier(heap, |n| n.add_child(child1));
+        root_node.with_write_barrier(heap, |n| n.add_child(child2));
+        child1.with_write_barrier(heap, |n| n.add_child(grandchild));
     }
 
     // Create data container
