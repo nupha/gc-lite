@@ -41,38 +41,6 @@ impl GcNodeLink {
         self.iter().count()
     }
 
-    #[inline(always)]
-    pub fn is_empty(&self) -> bool {
-        self.link_head.is_some()
-    }
-
-    /// Remove the given node from the link chain.
-    ///
-    /// Returns `true` if the node was found and removed, `false` otherwise.
-    pub fn remove(&mut self, target: NonNull<GcHead>) -> bool {
-        let mut current = self.link_head;
-        let mut prev: Option<NonNull<GcHead>> = None;
-
-        while let Some(node) = current {
-            unsafe {
-                if node == target {
-                    let next = node.as_ref().next;
-                    if let Some(mut prev_node) = prev {
-                        prev_node.as_mut().next = next;
-                    } else {
-                        self.link_head = next;
-                    }
-                    return true;
-                } else {
-                    prev = Some(node);
-                    current = node.as_ref().next;
-                }
-            }
-        }
-
-        false
-    }
-
     pub fn filter_remove_with(
         &mut self,
         mut predicate: impl FnMut(&GcHead) -> bool,
