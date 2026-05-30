@@ -138,11 +138,13 @@ impl GcHeap {
 
     /// Attach a node to partition's nodes chain.
     ///
-    /// # Note
-    ///
-    /// This method **DO NOT** increase partitions' mem_use.
+    /// This method does NOT update memory accounting — the caller is responsible
+    /// for calling `update_mem_use` separately (typically done in `alloc_node_mem`).
     pub(crate) fn attach_node(&mut self, partition_id: GcPartitionId, mut node: NonNull<GcHead>) {
-        debug_assert!(!partition_id.is_null());
+        debug_assert!(
+            !partition_id.is_null(),
+            "attach_node: partition_id must not be null"
+        );
 
         let n = unsafe { node.as_mut() };
         debug_assert!(n.partition_id().is_null());
@@ -150,7 +152,12 @@ impl GcHeap {
         n.set_partition_id(partition_id);
 
         let par = self.partitions.get_mut(&partition_id).unwrap();
+        let mem_before = par.memory_used;
         par.nodes.prepend(node);
+        debug_assert_eq!(
+            par.memory_used, mem_before,
+            "attach_node must not change memory accounting"
+        );
     }
 
     pub fn set_root_node(&mut self, mut node: NonNull<GcHead>) {
@@ -221,8 +228,19 @@ impl GcHeap {
                 self.total_memory_used += d;
             } else {
                 let d = (-delta) as usize;
-                debug_assert!(par.memory_used >= d);
-                debug_assert!(self.total_memory_used >= d);
+                debug_assert!(
+                    par.memory_used >= d,
+                    "update_mem_use: partition {} memory underflow ({} < {})",
+                    id.0,
+                    par.memory_used,
+                    d,
+                );
+                debug_assert!(
+                    self.total_memory_used >= d,
+                    "update_mem_use: global memory underflow ({} < {})",
+                    self.total_memory_used,
+                    d,
+                );
                 par.memory_used -= d;
                 self.total_memory_used -= d;
             }

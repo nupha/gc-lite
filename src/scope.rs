@@ -60,8 +60,16 @@ impl<'s> GcScopeState<'s> {
         stack_id: GcScopeStackId,
         partition_id: GcPartitionId,
     ) -> Self {
-        debug_assert!(!partition_id.is_null());
-        debug_assert!((stack_id.0 as usize) < heap.scope_stacks.len());
+        debug_assert!(
+            !partition_id.is_null(),
+            "GcScopeState partition_id must not be null"
+        );
+        debug_assert!(
+            (stack_id.0 as usize) < heap.scope_stacks.len(),
+            "GcScopeState stack_id {} out of bounds (max {})",
+            stack_id.0,
+            heap.scope_stacks.len(),
+        );
 
         let depth = heap.scope_max_depth(stack_id) + 1;
         Self {
@@ -139,8 +147,10 @@ impl<'s> GcScopeState<'s> {
 
     fn add_node(&self, mut node: NonNull<GcHead>) {
         unsafe {
-            #[cfg(debug_assertions)]
-            debug_assert!(!node.as_ref().is_root_or_local());
+            debug_assert!(
+                !node.as_ref().is_root_or_local(),
+                "add_node: node is already root or local",
+            );
 
             node.as_mut().insert_flag(GcNodeFlag::LOCAL);
 
@@ -182,6 +192,10 @@ impl<'s> GcScopeState<'s> {
     /// the caller (e.g., `ScopedContext::throw`) is responsible for ensuring
     /// the node is not the promote target.
     pub fn remove_node(&self, mut node: NonNull<GcHead>) -> bool {
+        #[cfg(debug_assertions)]
+        unsafe {
+            node.as_ref().debug_assert_node_valid_simple();
+        }
         let mut cache = self.cache.borrow_mut();
         if let Some(pos) = cache.iter().position(|&n| n == node) {
             cache.swap_remove(pos);
@@ -212,7 +226,10 @@ impl<'s> GcScopeState<'s> {
         let mut cache = self.cache.borrow_mut();
 
         if let Some(pos) = cache.iter().position(|&n| n == node) {
-            debug_assert!(unsafe { node.as_ref().is_local() });
+            debug_assert!(
+                unsafe { node.as_ref().is_local() },
+                "promote_node_to: node is not LOCAL",
+            );
             cache.swap_remove(pos);
             drop(cache);
             target.cache.borrow_mut().push(node);
@@ -260,9 +277,14 @@ impl<'s> Drop for GcScope<'s> {
     fn drop(&mut self) {
         unsafe {
             let heap = self.heap.as_mut();
+            let stack = &heap.scope_stacks[self.stack_id.0 as usize];
             debug_assert_eq!(
-                heap.scope_stacks[self.stack_id.0 as usize].list.len() as u8 - 1,
-                self.index
+                stack.list.len() as u8 - 1,
+                self.index,
+                "GcScope dropped out of LIFO order: scope stack {} has {} entries, expected top index {}",
+                self.stack_id.0,
+                stack.list.len(),
+                self.index,
             );
             heap.pop_scope(self.stack_id);
         }
@@ -276,7 +298,13 @@ impl<'s> std::ops::Deref for GcScope<'s> {
     fn deref(&self) -> &Self::Target {
         unsafe {
             let stack = &self.heap.as_ref().scope_stacks[self.stack_id.0 as usize];
-            debug_assert!((self.index as usize) < stack.list.len());
+            debug_assert!(
+                (self.index as usize) < stack.list.len(),
+                "GcScope index {} out of bounds for stack {} (len {})",
+                self.index,
+                self.stack_id.0,
+                stack.list.len(),
+            );
 
             std::mem::transmute::<&GcScopeState<'_>, &GcScopeState<'s>>(
                 stack.list.get(self.index as usize).unwrap_unchecked(),
@@ -290,7 +318,13 @@ impl<'s> std::ops::DerefMut for GcScope<'s> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
             let stack = &mut self.heap.as_mut().scope_stacks[self.stack_id.0 as usize];
-            debug_assert!((self.index as usize) < stack.list.len());
+            debug_assert!(
+                (self.index as usize) < stack.list.len(),
+                "GcScope index {} out of bounds for stack {} (len {})",
+                self.index,
+                self.stack_id.0,
+                stack.list.len(),
+            );
 
             std::mem::transmute::<&mut GcScopeState<'_>, &mut GcScopeState<'s>>(
                 stack.list.get_mut(self.index as usize).unwrap_unchecked(),
@@ -304,7 +338,11 @@ impl GcHeap {
     pub fn acquire_scope_stack(&mut self, par: GcPartitionId) -> GcScopeStackId {
         for (id, stack) in self.scope_stacks.iter_mut().enumerate() {
             if stack.partition.is_none() {
-                debug_assert!(stack.list.is_empty());
+                debug_assert!(
+                    stack.list.is_empty(),
+                    "acquire_scope_stack: idle stack {} has non-empty scope list",
+                    id,
+                );
                 stack.partition = Some(par);
                 return GcScopeStackId(id as u16);
             }
@@ -317,7 +355,12 @@ impl GcHeap {
 
     pub fn release_scope_stack(&mut self, stack_id: GcScopeStackId) {
         let stack = &mut self.scope_stacks[stack_id.0 as usize];
-        debug_assert!(stack.list.is_empty());
+        debug_assert!(
+            stack.list.is_empty(),
+            "release_scope_stack: stack {} has {} scopes still active",
+            stack_id.0,
+            stack.list.len(),
+        );
         stack.partition.take();
     }
 
@@ -348,9 +391,10 @@ impl GcHeap {
     /// push a new scope on the stack, returns new scope's handle.
     /// the scope will be automatically popped when this handle is dropped.
     ///
-    /// # Safety:
+    /// # Panics
     ///
-    /// DO NOT drop an earlier handle when a later handle is still alive
+    /// Panics if an earlier handle is dropped while a later handle is still alive
+    /// (LIFO order violation is enforced at runtime).
     pub fn new_scope<'s>(&'s mut self, stack_id: GcScopeStackId) -> GcScope<'s> {
         let heap = NonNull::from_ref(self);
         let stack = &mut self.scope_stacks[stack_id.0 as usize];

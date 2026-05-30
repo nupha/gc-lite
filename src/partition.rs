@@ -63,7 +63,10 @@ impl GcPartition {
     }
 
     pub(crate) fn add_gray_node(&mut self, mut node: NonNull<GcHead>) {
-        debug_assert!(self.is_marking());
+        debug_assert!(
+            self.is_marking(),
+            "add_gray_node called when partition is not marking"
+        );
 
         match unsafe { node.as_ref().color() } {
             GcTriColor::White => unsafe {
@@ -146,7 +149,12 @@ impl GcHeap {
             freed_bytes += self.dispose_all_nodes(link, &on_dispose);
 
             // Reclaim partition-level memory from the global counter.
-            debug_assert!(self.total_memory_used >= partition_mem);
+            debug_assert!(
+                self.total_memory_used >= partition_mem,
+                "remove_partition: global memory underflow ({} < {})",
+                self.total_memory_used,
+                partition_mem,
+            );
             self.total_memory_used -= partition_mem;
         }
 

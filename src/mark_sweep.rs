@@ -29,14 +29,19 @@ impl GcHeap {
         }
     }
 
-    /// ensure marking is in progress,
-    /// if marking is in progress, exit do nothing;
-    /// if marking cycle is not started, start new cycle.
+    /// Prepare a partition for a new mark cycle.
+    ///
+    /// If the partition is already marking, this is a no-op.
+    /// Otherwise, resets all nodes to White and marks root/LOCAL nodes as Gray.
     pub fn mark_prepare(&mut self, partition_id: GcPartitionId) {
         if let Some(par) = self.partitions.get_mut(&partition_id)
             && !par.is_marking()
         {
-            debug_assert!(par.gray_list.is_empty());
+            debug_assert!(
+                par.gray_list.is_empty(),
+                "mark_prepare called on partition {} with non-empty gray list",
+                partition_id.0,
+            );
 
             par.set_marking(true);
 
@@ -67,7 +72,13 @@ impl GcHeap {
 
             while let Some(mut node_ptr) = par.gray_list.pop() {
                 let node = unsafe { node_ptr.as_mut() };
-                debug_assert_eq!(node.partition_id(), partition_id);
+                debug_assert_eq!(
+                    node.partition_id(),
+                    partition_id,
+                    "mark_grays: node partition {} does not match expected partition {}",
+                    node.partition_id().0,
+                    partition_id.0,
+                );
 
                 if node.color() == GcTriColor::Gray {
                     if cnt >= max_steps {
@@ -291,7 +302,10 @@ impl GcHeap {
             }
         }
 
-        debug_assert!(link.head().is_none());
+        debug_assert!(
+            link.head().is_none(),
+            "dispose_all_nodes: link still has nodes after disposal",
+        );
         log::trace!("[dipose_all] done, freed {} bytes", freed_bytes);
 
         freed_bytes

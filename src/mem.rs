@@ -8,7 +8,7 @@ use crate::{GcError, GcHead, GcHeap, GcNode, GcPartitionId, GcRef, unlikely, wea
 
 impl GcHeap {
     fn mem_alloc(&mut self, layout: Layout) -> Option<NonNull<u8>> {
-        debug_assert_ne!(layout.size(), 0);
+        debug_assert_ne!(layout.size(), 0, "mem_alloc: zero-sized layout");
         unsafe {
             let ptr = std::alloc::alloc(layout);
 
@@ -31,7 +31,7 @@ impl GcHeap {
     }
 
     fn mem_dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
-        debug_assert_ne!(layout.size(), 0);
+        debug_assert_ne!(layout.size(), 0, "mem_dealloc: zero-sized layout");
 
         #[cfg(debug_assertions)]
         debug_assert!(
@@ -176,7 +176,12 @@ impl GcHeap {
         if !hd.weak_id.is_null() {
             // clear weak slot
             let widx = hd.weak_id.index();
-            debug_assert!((widx as usize) < self.weak_slots.len());
+            debug_assert!(
+                (widx as usize) < self.weak_slots.len(),
+                "dispose: weak slot index {} out of bounds (len {})",
+                widx,
+                self.weak_slots.len(),
+            );
             unsafe {
                 self.weak_slots.get_unchecked_mut(widx as usize).1.take();
             }

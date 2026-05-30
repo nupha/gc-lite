@@ -63,7 +63,7 @@ impl<T: GcNode> std::fmt::Debug for GcWeak<T> {
 
 impl<T: GcNode> GcWeak<T> {
     pub(crate) fn new(index: u16, version: u16) -> Self {
-        debug_assert!(version > 0);
+        debug_assert!(version > 0, "GcWeak version must be non-zero");
         Self {
             weak_id: GcWeakRawId(((index as u32) << 16) | (version as u32)),
             _marker: PhantomData,

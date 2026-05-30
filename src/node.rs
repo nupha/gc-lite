@@ -180,7 +180,12 @@ impl GcHead {
 
     #[inline(always)]
     pub(crate) fn set_partition_id(&mut self, id: GcPartitionId) {
-        debug_assert!(self.partition_id().is_null() || self.partition_id() == id);
+        debug_assert!(
+            self.partition_id().is_null() || self.partition_id() == id,
+            "set_partition_id: node already belongs to partition {}, cannot reassign to {}",
+            self.partition_id().0,
+            id.0,
+        );
         self.partition = (self.partition & 0xFFFF_0000) | id.0 as u32;
     }
 
