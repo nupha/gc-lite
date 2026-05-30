@@ -115,7 +115,10 @@ pub fn gc_type_table_internal(input: TokenStream) -> TokenStream {
             type_info_list: &[
                 #(
                     #crate_path::GcTypeInfo {
-                        size: ::core::mem::size_of::<#tys>() as u32,
+                        size: ::core::mem::size_of::<#tys>(),
+                        payload_offset: #crate_path::gctype::payload_offset_of::<#tys>(),
+                        layout_size: #crate_path::gctype::layout_size_of::<#tys>(),
+                        layout_align: #crate_path::gctype::layout_align_of::<#tys>(),
                         trace_fn: #crate_path::gctype_trace::<#tys>,
                         drop_fn: {
                             if ::core::mem::needs_drop::<#tys>() {

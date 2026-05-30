@@ -4,7 +4,7 @@
 use std::ptr::NonNull;
 
 use crate::{
-    GcHeap,
+    GcHeap, GcNode,
     node::{GcHead, GcTriColor},
     node_link::{GcNodeLink, NodeLinkIter},
     partition::GcPartitionId,
@@ -355,10 +355,11 @@ mod sweep_test {
         );
 
         let remaining_nodes = get_all_nodes_in_partition(&heap, partition_id);
+        let info = &GC_TYPE_REGISTRY.type_info_list[MyI32::GC_TYPE_ID as usize];
         for node in remaining_nodes {
             unsafe {
-                let payload_ptr = (node.as_ptr() as *mut u8).add(std::mem::size_of::<GcHead>());
-                let value = *(payload_ptr as *const i32);
+                let payload_ptr = info.payload_ptr(node);
+                let value = *(payload_ptr.as_ptr() as *const i32);
                 assert_eq!(value % 2, 1, "Remaining nodes should have odd values");
             }
         }
@@ -394,9 +395,9 @@ mod sweep_test {
         assert!(head.is_some(), "Chain head should exist");
 
         unsafe {
-            let payload_ptr =
-                (head.unwrap().as_ptr() as *mut u8).add(std::mem::size_of::<GcHead>());
-            let value = (*(payload_ptr as *const MyI32)).0;
+            let info = &GC_TYPE_REGISTRY.type_info_list[MyI32::GC_TYPE_ID as usize];
+            let payload_ptr = info.payload_ptr(head.unwrap());
+            let value = (*(payload_ptr.as_ptr() as *const MyI32)).0;
             assert_eq!(
                 value, 4,
                 "Chain head should be value 4 (last allocated, first in chain)"
@@ -408,11 +409,12 @@ mod sweep_test {
         assert_eq!(nodes.len(), 2);
 
         unsafe {
-            let payload_ptr1 = nodes[0].as_ref().payload().cast::<MyI32>();
+            let info = &GC_TYPE_REGISTRY.type_info_list[MyI32::GC_TYPE_ID as usize];
+            let payload_ptr1 = info.payload_ptr(nodes[0]).cast::<MyI32>();
             let value1 = (*payload_ptr1.as_ptr()).0;
             assert_eq!(value1, 4);
 
-            let payload_ptr2 = nodes[1].as_ref().payload().cast::<MyI32>();
+            let payload_ptr2 = info.payload_ptr(nodes[1]).cast::<MyI32>();
             let value2 = (*payload_ptr2.as_ptr()).0;
             assert_eq!(value2, 3);
         }
@@ -480,10 +482,11 @@ mod sweep_test {
         assert_eq!(nodes.len(), 4);
 
         let expected_values = [4, 3, 1, 0];
+        let info = &GC_TYPE_REGISTRY.type_info_list[MyI32::GC_TYPE_ID as usize];
         for (i, node) in nodes.iter().enumerate() {
             unsafe {
-                let payload_ptr = (node.as_ptr() as *mut u8).add(std::mem::size_of::<GcHead>());
-                let value = (*(payload_ptr as *const MyI32)).0;
+                let payload_ptr = info.payload_ptr(*node);
+                let value = (*(payload_ptr.as_ptr() as *const MyI32)).0;
                 assert_eq!(
                     value, expected_values[i],
                     "Node at position {} should have value {}",

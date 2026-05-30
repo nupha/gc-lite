@@ -7,6 +7,7 @@ use std::{
     ptr::NonNull,
 };
 
+use crate::gctype::{GcTypeRegistry, payload_offset_of};
 use crate::{GcHeap, GcPartitionId, GcTrace, GcWeak, weak::GcWeakRawId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,13 +188,22 @@ impl GcHead {
         self.partition = (self.partition & 0xFFFF_0000) | id.0 as u32;
     }
 
-    /// get raw pointer to payload data
+    /// Get raw pointer to payload data using the heap's type registry.
     #[inline(always)]
-    pub fn payload(&self) -> NonNull<u8> {
+    pub fn payload(&self, registry: &GcTypeRegistry) -> NonNull<u8> {
         #[cfg(debug_assertions)]
         self.debug_assert_node_valid_simple();
 
-        unsafe { NonNull::from_ref(self).add(1).cast::<u8>() }
+        let info = &registry.type_info_list[self.dtype() as usize];
+        info.payload_ptr(NonNull::from_ref(self))
+    }
+
+    #[inline(always)]
+    pub(crate) fn payload_for<T>(&self) -> NonNull<u8> {
+        #[cfg(debug_assertions)]
+        self.debug_assert_node_valid_simple();
+
+        unsafe { NonNull::from_ref(self).cast::<u8>().add(payload_offset_of::<T>()) }
     }
 }
 
@@ -246,7 +256,7 @@ impl<T: GcNode> Deref for GcRef<T> {
 
     #[inline(always)]
     fn deref(&self) -> &Self::Target {
-        unsafe { self.head_ptr.as_ref().payload().cast::<T>().as_ref() }
+        unsafe { self.head_ptr.as_ref().payload_for::<T>().cast::<T>().as_ref() }
     }
 }
 
@@ -254,7 +264,7 @@ impl<T: GcNode> DerefMut for GcRef<T> {
     /// FIXME: DerefMut breaks gc node write barrier. This should be disabled.
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { self.head_ptr.as_mut().payload().cast::<T>().as_mut() }
+        unsafe { self.head_ptr.as_mut().payload_for::<T>().cast::<T>().as_mut() }
     }
 }
 
@@ -314,7 +324,7 @@ impl<T: GcNode> GcRef<T> {
         let node = unsafe {
             NonNull::from_ref(data_ref)
                 .cast::<u8>()
-                .sub(std::mem::size_of::<GcHead>())
+                .sub(payload_offset_of::<T>())
                 .cast::<GcHead>()
         };
 
@@ -340,7 +350,12 @@ impl<T: GcNode> GcRef<T> {
     /// Caller must ensure &T comes from GcRef<T>, otherwise consequences are unpredictable.
     #[inline]
     pub unsafe fn from_ref_unchecked(data_ref: &T) -> Self {
-        let node = unsafe { NonNull::from_ref(data_ref).cast::<GcHead>().sub(1) };
+        let node = unsafe {
+            NonNull::from_ref(data_ref)
+                .cast::<u8>()
+                .sub(payload_offset_of::<T>())
+                .cast::<GcHead>()
+        };
 
         #[cfg(debug_assertions)]
         unsafe {
@@ -363,13 +378,13 @@ impl<T: GcNode> GcRef<T> {
             heap.add_gray_node(self.head_ptr);
         }
 
-        let value = unsafe { head.payload().cast::<T>().as_mut() };
+        let value = unsafe { head.payload_for::<T>().cast::<T>().as_mut() };
         mutator(value)
     }
 
     #[inline]
     pub fn as_ptr(&self) -> NonNull<T> {
-        unsafe { self.head_ptr.as_ref().payload().cast::<T>() }
+        unsafe { self.head_ptr.as_ref().payload_for::<T>().cast::<T>() }
     }
 
     #[inline(always)]

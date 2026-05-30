@@ -1,22 +1,77 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::ptr::NonNull;
+use std::{alloc::Layout, ptr::NonNull};
 
 use crate::{GcHead, GcNode, GcTrace, trace::GcTraceCtx};
 
 #[derive(Debug, Copy, Clone)]
 #[allow(dead_code)]
 pub struct GcTypeInfo {
-    pub size: u32,
+    pub size: usize,
+    pub payload_offset: usize,
+    pub layout_size: usize,
+    pub layout_align: usize,
     pub trace_fn: fn(NonNull<GcHead>, &mut GcTraceCtx),
     pub drop_fn: Option<unsafe fn(*mut u8)>,
     pub drop_pass: u8,
 }
 
+#[inline(always)]
+pub const fn align_up(value: usize, align: usize) -> usize {
+    let mask = align - 1;
+    (value + mask) & !mask
+}
+
+#[inline(always)]
+pub const fn payload_offset_of<T>() -> usize {
+    align_up(std::mem::size_of::<GcHead>(), std::mem::align_of::<T>())
+}
+
+#[inline(always)]
+pub const fn layout_align_of<T>() -> usize {
+    let head_align = std::mem::align_of::<GcHead>();
+    let payload_align = std::mem::align_of::<T>();
+    if head_align > payload_align {
+        head_align
+    } else {
+        payload_align
+    }
+}
+
+#[inline(always)]
+pub const fn layout_size_of<T>() -> usize {
+    align_up(
+        payload_offset_of::<T>() + std::mem::size_of::<T>(),
+        layout_align_of::<T>(),
+    )
+}
+
+#[inline(always)]
+pub fn layout_from_type_info(info: &GcTypeInfo) -> Layout {
+    #[cfg(debug_assertions)]
+    return Layout::from_size_align(info.layout_size, info.layout_align).unwrap();
+
+    #[cfg(not(debug_assertions))]
+    unsafe {
+        Layout::from_size_align_unchecked(info.layout_size, info.layout_align)
+    }
+}
+
+impl GcTypeInfo {
+    #[inline(always)]
+    pub fn payload_ptr(&self, node: NonNull<GcHead>) -> NonNull<u8> {
+        unsafe { node.cast::<u8>().add(self.payload_offset) }
+    }
+}
+
 pub fn trace_fn<T: GcTrace>(node: NonNull<GcHead>, gcx: &mut GcTraceCtx) {
     unsafe {
-        node.as_ref().payload().cast::<T>().as_ref().trace(gcx);
+        node.cast::<u8>()
+            .add(payload_offset_of::<T>())
+            .cast::<T>()
+            .as_ref()
+            .trace(gcx);
     }
 }
 

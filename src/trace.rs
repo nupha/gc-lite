@@ -217,6 +217,7 @@ mod tests {
 
     crate::gc_type_register! {
         TestNode, drop_pass = 0;
+        Align32Node, drop_pass = 0;
     }
 
     /// Helper function to count marked nodes in a partition
@@ -235,13 +236,11 @@ mod tests {
     /// Helper function to get all node IDs in a partition
     fn get_all_node_ids(heap: &GcHeap, partition_id: GcPartitionId) -> Vec<u32> {
         let mut ids = Vec::new();
+        let info = &GC_TYPE_REGISTRY.type_info_list[TestNode::GC_TYPE_ID as usize];
         for node in heap.nodes(partition_id) {
             unsafe {
-                // Calculate pointer to TestNode payload
-                let payload_ptr = node.as_ref().payload();
-                // ID field is at offset 24 bytes within TestNode (due to field reordering)
-                let id_addr = payload_ptr.add(24);
-                let id = *(id_addr.as_ptr() as *const u32);
+                let payload_ptr = info.payload_ptr(node);
+                let id = payload_ptr.cast::<TestNode>().as_ref().id;
                 ids.push(id);
             }
         }
@@ -457,5 +456,103 @@ mod tests {
         heap.mark_reset(partition_id);
         while !heap.mark(partition_id, 1) {}
         assert_eq!(count_non_white_nodes(&heap, partition_id), 3);
+    }
+
+    // ============ High-alignment payload tests ============
+
+    #[repr(align(32))]
+    #[derive(Debug)]
+    struct Align32Node {
+        id: u64,
+        data: [u8; 64],
+    }
+
+    impl GcTrace for Align32Node {
+        fn trace(&self, _: &mut GcTraceCtx) {}
+    }
+
+    #[test]
+    fn test_high_alignment_payload_alloc_and_access() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition();
+
+        let node: GcRef<Align32Node> = unsafe {
+            heap.alloc_root_raw(
+                partition_id,
+                Align32Node {
+                    id: 42,
+                    data: [0xAB; 64],
+                },
+            )
+        }
+        .unwrap();
+
+        // Verify payload is accessible and values are correct
+        assert_eq!(node.id, 42);
+        assert_eq!(node.data[0], 0xAB);
+        assert_eq!(node.data[63], 0xAB);
+
+        // Verify alignment via pointer arithmetic
+        let payload_ptr = node.as_ptr().as_ptr() as usize;
+        assert_eq!(
+            payload_ptr % 32,
+            0,
+            "Align32Node payload must be 32-byte aligned, got offset {}",
+            payload_ptr % 32
+        );
+
+        // GC should not collect root nodes
+        while !heap.mark(partition_id, 64) {}
+        let freed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert_eq!(freed, 0);
+
+        // Values still accessible after GC
+        assert_eq!(node.id, 42);
+    }
+
+    #[test]
+    fn test_high_alignment_payload_multiple_nodes() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition();
+
+        let nodes: Vec<GcRef<Align32Node>> = (0..10)
+            .map(|i| {
+                unsafe {
+                    heap.alloc_root_raw(
+                        partition_id,
+                        Align32Node {
+                            id: i as u64,
+                            data: [i as u8; 64],
+                        },
+                    )
+                }
+                .unwrap()
+            })
+            .collect();
+
+        // Verify all nodes are accessible and correctly aligned
+        for (i, node) in nodes.iter().enumerate() {
+            assert_eq!(node.id, i as u64);
+            assert_eq!(node.data[0], i as u8);
+            assert_eq!(node.data[63], i as u8);
+
+            let payload_ptr = node.as_ptr().as_ptr() as usize;
+            assert_eq!(
+                payload_ptr % 32,
+                0,
+                "node[{}] payload must be 32-byte aligned",
+                i
+            );
+        }
+
+        // GC should not collect root nodes
+        while !heap.mark(partition_id, 64) {}
+        let freed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert_eq!(freed, 0);
+
+        // All nodes still accessible after GC
+        for (i, node) in nodes.iter().enumerate() {
+            assert_eq!(node.id, i as u64);
+        }
     }
 }
