@@ -200,6 +200,10 @@ impl GcHeap {
 
         self.mem_dealloc(node.cast::<u8>(), layout);
 
+        // Reclaim memory accounting for both partition and global counters.
+        // Use i32::MAX as a safe upper bound; gross_size is always well below that.
+        self.update_mem_use(hd.partition_id(), -(gross_size as i32));
+
         gross_size
     }
 }

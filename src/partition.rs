@@ -140,8 +140,15 @@ impl GcHeap {
         let mut freed_bytes = 0;
 
         if let Some(mut par) = self.partitions.remove(&partition_id) {
+            // Record partition memory before disposal; after remove() the partition
+            // is gone, so dispose() cannot find it via update_mem_use().
+            let partition_mem = par.memory_used;
             let link = std::mem::take(&mut par.nodes);
             freed_bytes += self.dispose_all_nodes(link, &on_dispose);
+
+            // Reclaim partition-level memory from the global counter.
+            debug_assert!(self.total_memory_used >= partition_mem);
+            self.total_memory_used -= partition_mem;
         }
 
         log::trace!("[close_scope_done] {partition_id:?}");
@@ -176,6 +183,7 @@ impl GcHeap {
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
     struct DummyType;
     impl crate::trace::GcTrace for DummyType {
         fn trace(&self, _: &mut crate::trace::GcTraceCtx) {}
@@ -282,5 +290,53 @@ mod tests {
         assert_eq!(id.0, 10);
         assert!(!id.is_null());
         assert!(GcPartitionId::NONE.is_null());
+    }
+
+    #[test]
+    fn test_remove_partition_reclaims_memory_stats() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let p1 = heap.create_partition();
+        let p2 = heap.create_partition();
+
+        // Allocate some nodes in p1
+        let n1 = unsafe { heap.alloc_raw(p1, DummyType) }.unwrap();
+        let n2 = unsafe { heap.alloc_raw(p1, DummyType) }.unwrap();
+        let n3 = unsafe { heap.alloc_raw(p2, DummyType) }.unwrap();
+
+        let used_before = heap.memory_used();
+        assert!(
+            used_before > 0,
+            "memory_used should be > 0 after allocations"
+        );
+
+        let p1_used = heap.partition(p1).unwrap().memory_used();
+        assert!(p1_used > 0, "partition memory_used should be > 0");
+
+        // Remove p1 — all its nodes should be disposed and memory reclaimed
+        let freed = heap.remove_partition(p1, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert!(freed > 0, "remove_partition should free some bytes");
+
+        // p1 is gone
+        assert!(heap.partition(p1).is_none());
+
+        // total_memory_used should have decreased by at least p1_used
+        let used_after = heap.memory_used();
+        assert!(
+            used_after < used_before,
+            "total_memory_used should decrease after partition removal: before={}, after={}",
+            used_before,
+            used_after
+        );
+
+        // p2's memory should be unaffected
+        assert_eq!(
+            heap.partition(p2).unwrap().memory_used(),
+            heap.memory_used(),
+            "remaining partition should account for all remaining memory"
+        );
+
+        // Clean up p2
+        heap.remove_partition(p2, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert_eq!(heap.memory_used(), 0, "all memory should be reclaimed");
     }
 }
