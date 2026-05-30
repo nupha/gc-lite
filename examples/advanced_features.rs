@@ -242,7 +242,7 @@ fn demonstrate_reference_recovery(
 
     // Recover GcRef from reference
     println!("\n2. Recover GcRef from reference...");
-    let recovered_ref = GcRef::try_from_ref(heap, data_ref);
+    let recovered_ref = unsafe { GcRef::try_from_ref(heap, data_ref) };
 
     match recovered_ref {
         Some(recovered) => {
@@ -261,7 +261,7 @@ fn demonstrate_reference_recovery(
         value: 100,
         name: "local".to_string(),
     };
-    let invalid_result = GcRef::try_from_ref(heap, &local_data);
+    let invalid_result = unsafe { GcRef::try_from_ref(heap, &local_data) };
     println!(
         "  Invalid reference recovery result: {:?} (should be None)",
         invalid_result

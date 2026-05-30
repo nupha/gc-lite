@@ -203,7 +203,11 @@ impl GcHead {
         #[cfg(debug_assertions)]
         self.debug_assert_node_valid_simple();
 
-        unsafe { NonNull::from_ref(self).cast::<u8>().add(payload_offset_of::<T>()) }
+        unsafe {
+            NonNull::from_ref(self)
+                .cast::<u8>()
+                .add(payload_offset_of::<T>())
+        }
     }
 }
 
@@ -256,7 +260,13 @@ impl<T: GcNode> Deref for GcRef<T> {
 
     #[inline(always)]
     fn deref(&self) -> &Self::Target {
-        unsafe { self.head_ptr.as_ref().payload_for::<T>().cast::<T>().as_ref() }
+        unsafe {
+            self.head_ptr
+                .as_ref()
+                .payload_for::<T>()
+                .cast::<T>()
+                .as_ref()
+        }
     }
 }
 
@@ -264,7 +274,13 @@ impl<T: GcNode> DerefMut for GcRef<T> {
     /// FIXME: DerefMut breaks gc node write barrier. This should be disabled.
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { self.head_ptr.as_mut().payload_for::<T>().cast::<T>().as_mut() }
+        unsafe {
+            self.head_ptr
+                .as_mut()
+                .payload_for::<T>()
+                .cast::<T>()
+                .as_mut()
+        }
     }
 }
 
@@ -308,19 +324,13 @@ impl<T: GcNode> std::fmt::Debug for GcRef<T> {
 impl<T: GcNode> GcRef<T> {
     /// Create GcRef<T> from &T reference
     ///
-    /// This method verifies that the passed reference comes from a valid GC object.
-    /// It ensures safety by checking if the corresponding GcHead is in the GC context.
-    ///
-    /// # Parameters
-    /// - `data_ref`: Reference to convert, must come from valid GcRef object
-    ///
-    /// # Return Value
-    /// - `Some(GcRef<T>)`: If reference comes from valid GC object
-    /// - `None`: If reference is not from GC object or object is invalid
-    ///
     /// # Safety
-    /// Caller must ensure the passed reference indeed comes from a valid GcRef object.
-    pub fn try_from_ref(heap: &GcHeap, data_ref: &T) -> Option<Self> {
+    ///
+    /// Caller must ensure the passed reference comes from a valid GC-managed object
+    /// that was allocated via `GcRef<T>`. Passing a reference from any other source
+    /// (stack, heap, etc.) is undefined behavior.
+    #[inline]
+    pub unsafe fn try_from_ref(heap: &GcHeap, data_ref: &T) -> Option<Self> {
         let node = unsafe {
             NonNull::from_ref(data_ref)
                 .cast::<u8>()
