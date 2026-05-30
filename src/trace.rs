@@ -545,9 +545,9 @@ mod tests {
         assert_eq!(freed, 0);
     }
 
-    /// Test that bypassing the write barrier (via DerefMut) causes incorrect
-    /// collection of a white child added to a black node during marking.
-    /// This test documents the known soundness hole when DerefMut is used.
+    /// Test that bypassing the write barrier (via direct payload mutation) causes
+    /// incorrect collection of a white child added to a black node during marking.
+    /// This test documents the known soundness hole when write barrier is bypassed.
     #[test]
     fn test_write_barrier_bypass_leaks_white_child() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
@@ -560,9 +560,17 @@ mod tests {
         while !heap.mark(partition_id, 1) {}
         assert_eq!(count_non_white_nodes(&heap, partition_id), 1);
 
-        // Bypass the write barrier by directly mutating through DerefMut.
-        // This is the unsafe pattern we want to prevent.
-        root.children.push(child);
+        // Bypass the write barrier by directly mutating the payload through
+        // the raw head_ptr. This is the unsafe pattern we want to prevent.
+        unsafe {
+            let payload = root
+                .head_ptr
+                .as_mut()
+                .payload_for::<TestNode>()
+                .cast::<TestNode>()
+                .as_mut();
+            payload.children.push(child);
+        }
 
         // Continue marking. Since the write barrier was bypassed,
         // root stays black and the white child is never discovered.

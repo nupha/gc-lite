@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{
-    marker::PhantomData,
-    ops::{Deref, DerefMut},
-    ptr::NonNull,
-};
+use std::{marker::PhantomData, ops::Deref, ptr::NonNull};
 
 use crate::gctype::{GcTypeRegistry, payload_offset_of};
 use crate::{GcHeap, GcPartitionId, GcTrace, GcWeak, weak::GcWeakRawId};
@@ -266,20 +262,6 @@ impl<T: GcNode> Deref for GcRef<T> {
                 .payload_for::<T>()
                 .cast::<T>()
                 .as_ref()
-        }
-    }
-}
-
-impl<T: GcNode> DerefMut for GcRef<T> {
-    /// FIXME: DerefMut breaks gc node write barrier. This should be disabled.
-    #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe {
-            self.head_ptr
-                .as_mut()
-                .payload_for::<T>()
-                .cast::<T>()
-                .as_mut()
         }
     }
 }
