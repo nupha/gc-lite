@@ -458,6 +458,136 @@ mod tests {
         assert_eq!(count_non_white_nodes(&heap, partition_id), 3);
     }
 
+    // ============ Write barrier tests ============
+
+    /// Test that the write barrier correctly re-grays a black node when a new
+    /// white child is added during marking, preventing the child from being
+    /// incorrectly swept.
+    #[test]
+    fn test_write_barrier_black_node_adds_white_child() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition();
+
+        // Allocate a white child node (not reachable from root yet)
+        let child = unsafe { heap.alloc_raw(partition_id, TestNode::new(1)) }.unwrap();
+
+        // Allocate root with no children initially
+        let mut root = unsafe { heap.alloc_root_raw(partition_id, TestNode::new(0)) }.unwrap();
+
+        // Run mark until root is black but child is still white.
+        // Since child is not reachable from root, only root should be marked.
+        while !heap.mark(partition_id, 1) {}
+        assert_eq!(count_non_white_nodes(&heap, partition_id), 1);
+
+        // Now add the white child to the black root via with_mut().
+        // The write barrier should re-gray the root and enqueue it.
+        root.with_mut(&mut heap, |node| node.add_child(child));
+
+        // Continue marking. The root should be traced again, discovering the child.
+        while !heap.mark(partition_id, 1) {}
+
+        // Both root and child should now be black (marked).
+        assert_eq!(
+            count_non_white_nodes(&heap, partition_id),
+            2,
+            "Write barrier should have re-grayed root and discovered child"
+        );
+
+        // Sweep should not free any nodes since all are marked.
+        let freed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert_eq!(freed, 0, "No nodes should be freed after write barrier");
+
+        // Verify both nodes are still accessible
+        let ids = get_all_node_ids(&heap, partition_id);
+        assert!(ids.contains(&0));
+        assert!(ids.contains(&1));
+    }
+
+    /// Test that the write barrier works correctly with incremental marking:
+    /// multiple black nodes add white children across several mark steps.
+    #[test]
+    fn test_write_barrier_incremental_black_adds_white() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition();
+
+        // Create a chain: root -> a -> b -> c
+        let c = unsafe { heap.alloc_raw(partition_id, TestNode::new(3)) }.unwrap();
+        let mut b = unsafe { heap.alloc_raw(partition_id, TestNode::new(2)) }.unwrap();
+        b.with_mut(&mut heap, |node| node.add_child(c));
+
+        let mut a = unsafe { heap.alloc_raw(partition_id, TestNode::new(1)) }.unwrap();
+        a.with_mut(&mut heap, |node| node.add_child(b));
+
+        let mut root = unsafe { heap.alloc_root_raw(partition_id, TestNode::new(0)) }.unwrap();
+        root.with_mut(&mut heap, |node| node.add_child(a));
+
+        // Mark partially: only 1 node per step, so root becomes black,
+        // a becomes gray, b and c stay white.
+        while !heap.mark(partition_id, 1) {}
+
+        // At this point root is black, a is black, b is gray/black, c is white.
+        // Now add a NEW white child to the black root.
+        let new_child = unsafe { heap.alloc_raw(partition_id, TestNode::new(10)) }.unwrap();
+        root.with_mut(&mut heap, |node| node.add_child(new_child));
+
+        // Continue marking to completion.
+        while !heap.mark(partition_id, 1) {}
+
+        // All 5 nodes should be marked.
+        assert_eq!(
+            count_non_white_nodes(&heap, partition_id),
+            5,
+            "Write barrier should have preserved the new child added during marking"
+        );
+
+        // Sweep should not free anything.
+        let freed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert_eq!(freed, 0);
+    }
+
+    /// Test that bypassing the write barrier (via DerefMut) causes incorrect
+    /// collection of a white child added to a black node during marking.
+    /// This test documents the known soundness hole when DerefMut is used.
+    #[test]
+    fn test_write_barrier_bypass_leaks_white_child() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = heap.create_partition();
+
+        let child = unsafe { heap.alloc_raw(partition_id, TestNode::new(1)) }.unwrap();
+        let mut root = unsafe { heap.alloc_root_raw(partition_id, TestNode::new(0)) }.unwrap();
+
+        // Mark until root is black, child is white.
+        while !heap.mark(partition_id, 1) {}
+        assert_eq!(count_non_white_nodes(&heap, partition_id), 1);
+
+        // Bypass the write barrier by directly mutating through DerefMut.
+        // This is the unsafe pattern we want to prevent.
+        root.children.push(child);
+
+        // Continue marking. Since the write barrier was bypassed,
+        // root stays black and the white child is never discovered.
+        while !heap.mark(partition_id, 1) {}
+
+        // Only root should be marked; child remains white.
+        assert_eq!(
+            count_non_white_nodes(&heap, partition_id),
+            1,
+            "Without write barrier, the white child should remain unmarked"
+        );
+
+        // Sweep will free the white child (freed > 0 indicates at least one node was collected).
+        let freed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert!(
+            freed > 0,
+            "The white child should be swept without write barrier"
+        );
+
+        // Only root should remain.
+        let ids = get_all_node_ids(&heap, partition_id);
+        assert!(ids.contains(&0));
+        assert!(!ids.contains(&1), "Child should have been collected");
+    }
+
     // ============ High-alignment payload tests ============
 
     #[repr(align(32))]
