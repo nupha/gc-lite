@@ -114,6 +114,12 @@ impl GcHeap {
 
                     // SAFETY: node_dtypes is &'static, and we hold &mut self so the
                     // registry is guaranteed to be alive.
+                    debug_assert!(
+                        gcx.traced_nodes.is_empty(),
+                        "trace context should be empty before tracing a new node"
+                    );
+                    gcx.traced_nodes.clear();
+                    
                     unsafe {
                         let dtype = node_ptr.as_ref().dtype() as usize;
                         let info = &(*node_dtypes).type_info_list[dtype];

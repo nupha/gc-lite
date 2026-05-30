@@ -47,6 +47,7 @@ impl<T: GcNode> Clone for GcWeak<T> {
 impl<T: GcNode> Copy for GcWeak<T> {}
 
 impl<T: GcNode> Default for GcWeak<T> {
+    /// Creates a null/empty weak reference. `upgrade()` will always return `None`.
     fn default() -> Self {
         Self {
             weak_id: GcWeakRawId::NULL,
