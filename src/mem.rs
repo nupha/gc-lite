@@ -60,6 +60,10 @@ impl GcHeap {
                         Ok(layout) => layout,
                         Err(_) => return Err((GcError::AllocationFailed, payload)),
                     };
+
+                // gross_size equals `GcTypeInfo::layout_size` for this type,
+                // which is set by the `gc_type_table_internal` macro via the same
+                // `layout_size_of::<T>()` call. This ensures alloc/dealloc symmetry.
                 let gross_size = layout.size();
 
                 if unlikely(
@@ -173,6 +177,8 @@ impl GcHeap {
         #[cfg(debug_assertions)]
         hd.debug_assert_node_valid(self);
 
+        let partition_id = hd.partition_id();
+
         if !hd.weak_id.is_null() {
             // clear weak slot
             let widx = hd.weak_id.index();
@@ -189,6 +195,10 @@ impl GcHeap {
 
         let dtype = hd.dtype() as usize;
         let info = &self.node_dtypes.type_info_list[dtype];
+        // Layout comes from `GcTypeInfo::layout_size` / `layout_align`, which are
+        // set by the `gc_type_table_internal` macro via `layout_size_of::<T>()` /
+        // `layout_align_of::<T>()`. This matches the Layout used at allocation time
+        // in `alloc_node_mem`, ensuring alloc/dealloc symmetry.
         let layout = info.layout();
         let gross_size = layout.size();
 
@@ -212,7 +222,7 @@ impl GcHeap {
 
         // Reclaim memory accounting for both partition and global counters.
         // Use i32::MAX as a safe upper bound; gross_size is always well below that.
-        self.update_mem_use(hd.partition_id(), -(gross_size as i32));
+        self.update_mem_use(partition_id, -(gross_size as i32));
 
         gross_size
     }

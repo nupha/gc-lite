@@ -274,11 +274,9 @@ impl GcHeap {
                 p.nodes = crate::node_link::GcNodeLink::new(link1);
             }
 
-            // Decrease partitions memory usage
-            if freed_bytes != 0 {
-                self.update_mem_use(partition_id, -(freed_bytes as i32));
-            }
-
+            // Memory accounting is already handled by dispose() which calls
+            // update_mem_use() for each individual node. No need to subtract
+            // freed_bytes again here.
             freed_bytes
         } else {
             0

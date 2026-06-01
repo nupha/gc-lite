@@ -319,4 +319,172 @@ mod heap_tests {
         let removed_after = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
         assert!(removed_after > 0);
     }
+
+    #[test]
+    fn test_memory_used_symmetry_alloc_dispose() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let id = heap.create_partition();
+
+        let mem_before = heap.memory_used();
+        let par_mem_before = heap.partition(id).unwrap().memory_used();
+
+        let node = unsafe {
+            heap.alloc_raw(
+                id,
+                Node {
+                    next: None,
+                    value: 42,
+                },
+            )
+        }
+        .unwrap();
+        let gross_size = heap.memory_used() - mem_before;
+
+        assert!(gross_size > 0);
+        assert_eq!(
+            heap.partition(id).unwrap().memory_used() - par_mem_before,
+            gross_size
+        );
+
+        // Use remove_partition to cleanly dispose all nodes and reclaim memory
+        let freed = heap.remove_partition(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert_eq!(freed, gross_size);
+
+        let mem_after = heap.memory_used();
+        assert_eq!(
+            mem_after, mem_before,
+            "global memory should return to original after partition removal"
+        );
+    }
+
+    #[test]
+    fn test_memory_used_symmetry_sweep() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let id = heap.create_partition();
+
+        // Allocate 3 non-root nodes and 1 root node
+        let mem_before = heap.memory_used();
+        let par_mem_before = heap.partition(id).unwrap().memory_used();
+
+        for i in 0..3 {
+            unsafe {
+                heap.alloc_raw(
+                    id,
+                    Node {
+                        next: None,
+                        value: i,
+                    },
+                )
+            }
+            .unwrap();
+        }
+        let root = unsafe {
+            heap.alloc_root_raw(
+                id,
+                Node {
+                    next: None,
+                    value: 99,
+                },
+            )
+        }
+        .unwrap();
+
+        let mem_after_alloc = heap.memory_used();
+        let par_mem_after_alloc = heap.partition(id).unwrap().memory_used();
+        assert!(mem_after_alloc > mem_before);
+        assert!(par_mem_after_alloc > par_mem_before);
+
+        // GC should collect the 3 non-root nodes
+        let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert!(freed > 0);
+
+        let mem_after_gc = heap.memory_used();
+        let par_mem_after_gc = heap.partition(id).unwrap().memory_used();
+
+        // Only the root node should remain
+        let root_size = mem_after_alloc - mem_before - freed;
+        assert_eq!(mem_after_gc, mem_before + root_size);
+        assert_eq!(par_mem_after_gc, par_mem_before + root_size);
+
+        // Remove the partition to clean up remaining root node
+        let freed_rem = heap.remove_partition(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert_eq!(freed_rem, root_size);
+        assert_eq!(heap.memory_used(), mem_before);
+    }
+
+    #[test]
+    fn test_memory_used_multiple_partitions() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let p1 = heap.create_partition();
+        let p2 = heap.create_partition();
+
+        let total_before = heap.memory_used();
+
+        let n1 = unsafe {
+            heap.alloc_raw(
+                p1,
+                Node {
+                    next: None,
+                    value: 1,
+                },
+            )
+        }
+        .unwrap();
+        let n2 = unsafe {
+            heap.alloc_raw(
+                p2,
+                Node {
+                    next: None,
+                    value: 2,
+                },
+            )
+        }
+        .unwrap();
+
+        let total_after = heap.memory_used();
+        let p1_used = heap.partition(p1).unwrap().memory_used();
+        let p2_used = heap.partition(p2).unwrap().memory_used();
+
+        assert_eq!(total_after, total_before + p1_used + p2_used);
+
+        // Remove p1 — p2 should be unaffected
+        let freed1 = heap.remove_partition(p1, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert_eq!(freed1, p1_used);
+        assert_eq!(heap.memory_used(), total_before + p2_used);
+        assert_eq!(heap.partition(p2).unwrap().memory_used(), p2_used);
+
+        // Remove p2
+        let freed2 = heap.remove_partition(p2, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert_eq!(freed2, p2_used);
+        assert_eq!(heap.memory_used(), total_before);
+    }
+
+    #[test]
+    fn test_memory_used_update_mem_use_edge_cases() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let id = heap.create_partition();
+
+        // Null partition id should be no-op
+        assert_eq!(heap.update_mem_use(GcPartitionId::NONE, 100), 0);
+        assert_eq!(heap.memory_used(), 0);
+
+        // Non-existent partition id should be no-op
+        assert_eq!(heap.update_mem_use(GcPartitionId(9999), 100), 0);
+        assert_eq!(heap.memory_used(), 0);
+
+        // Normal add
+        assert_eq!(heap.update_mem_use(id, 50), 50);
+        assert_eq!(heap.partition(id).unwrap().memory_used(), 50);
+        assert_eq!(heap.memory_used(), 50);
+
+        // Normal subtract
+        assert_eq!(heap.update_mem_use(id, -30), 20);
+        assert_eq!(heap.partition(id).unwrap().memory_used(), 20);
+        assert_eq!(heap.memory_used(), 20);
+
+        // Subtract to zero
+        assert_eq!(heap.update_mem_use(id, -20), 0);
+        assert_eq!(heap.partition(id).unwrap().memory_used(), 0);
+        assert_eq!(heap.memory_used(), 0);
+    }
 }

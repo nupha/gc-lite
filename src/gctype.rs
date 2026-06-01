@@ -8,9 +8,19 @@ use crate::{GcHead, GcNode, GcTrace, trace::GcTraceCtx};
 #[derive(Debug, Copy, Clone)]
 #[allow(dead_code)]
 pub struct GcTypeInfo {
+    /// `std::mem::size_of::<T>()` — the Rust size of the payload type T
     pub size: usize,
+    /// Byte offset from GcHead to the payload, equals `payload_offset_of::<T>()`
     pub payload_offset: usize,
+    /// Total allocation size (GcHead + payload, aligned), equals `layout_size_of::<T>()`
+    ///
+    /// This value is compile-time constant, set by the `gc_type_table_internal` macro
+    /// via `layout_size_of::<T>()`. It must match the Layout used in `alloc_node_mem`.
     pub layout_size: usize,
+    /// Allocation alignment, equals `layout_align_of::<T>()`
+    ///
+    /// This value is compile-time constant, set by the `gc_type_table_internal` macro
+    /// via `layout_align_of::<T>()`. It must match the Layout used in `alloc_node_mem`.
     pub layout_align: usize,
     pub trace_fn: fn(NonNull<GcHead>, &mut GcTraceCtx),
     pub drop_fn: Option<unsafe fn(*mut u8)>,
@@ -48,6 +58,24 @@ pub const fn payload_offset_of<T>() -> usize {
     align_up(std::mem::size_of::<GcHead>(), std::mem::align_of::<T>())
 }
 
+/// Total allocation size for a GC node of type T: aligned size of (GcHead + payload).
+///
+/// This is a compile-time constant (`const fn`). The resulting value is stored in
+/// `GcTypeInfo::layout_size` by the `gc_type_table_internal` macro, and must match
+/// the Layout passed to `std::alloc::alloc` / `std::alloc::dealloc`.
+#[inline(always)]
+pub const fn layout_size_of<T>() -> usize {
+    align_up(
+        payload_offset_of::<T>() + std::mem::size_of::<T>(),
+        layout_align_of::<T>(),
+    )
+}
+
+/// Allocation alignment for a GC node of type T: max(GcHead alignment, T alignment).
+///
+/// This is a compile-time constant (`const fn`). The resulting value is stored in
+/// `GcTypeInfo::layout_align` by the `gc_type_table_internal` macro, and must match
+/// the Layout passed to `std::alloc::alloc` / `std::alloc::dealloc`.
 #[inline(always)]
 pub const fn layout_align_of<T>() -> usize {
     let head_align = std::mem::align_of::<GcHead>();
@@ -57,14 +85,6 @@ pub const fn layout_align_of<T>() -> usize {
     } else {
         payload_align
     }
-}
-
-#[inline(always)]
-pub const fn layout_size_of<T>() -> usize {
-    align_up(
-        payload_offset_of::<T>() + std::mem::size_of::<T>(),
-        layout_align_of::<T>(),
-    )
 }
 
 pub fn trace_fn<T: GcTrace>(node: NonNull<GcHead>, gcx: &mut GcTraceCtx) {
