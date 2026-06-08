@@ -51,6 +51,7 @@ bitflags::bitflags! {
 }
 
 /// GC node info
+#[repr(C)]
 pub struct GcHead {
     /// Attributes of node:
     /// * bit 24-31: debug sentinel (debug build)
@@ -369,14 +370,23 @@ impl<T: GcNode> GcRef<T> {
     where
         F: FnOnce(&mut T) -> R,
     {
-        let node = unsafe { self.head_ptr.as_mut() };
-
-        if node.color() == GcTriColor::Black {
-            node.set_color(GcTriColor::Gray);
-            heap.add_gray_node(self.head_ptr);
+        // Only enforce the tri-color invariant when a GC marking cycle
+        // is in progress for this node's partition.
+        if heap.is_node_partition_marking(*self) {
+            let node = unsafe { self.head_ptr.as_mut() };
+            if node.color() == GcTriColor::Black {
+                node.set_color(GcTriColor::Gray);
+                heap.add_gray_node(self.head_ptr);
+            }
         }
 
-        let value = unsafe { node.payload_for::<T>().cast::<T>().as_mut() };
+        let value = unsafe {
+            self.head_ptr
+                .as_mut()
+                .payload_for::<T>()
+                .cast::<T>()
+                .as_mut()
+        };
         mutator(value)
     }
 
