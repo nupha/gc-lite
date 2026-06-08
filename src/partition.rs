@@ -132,6 +132,21 @@ impl GcHeap {
             return 0;
         }
 
+        // Clear scope caches associated with this partition BEFORE disposing nodes.
+        // This prevents use-after-free when GcScopeState::clear() dereferences
+        // GC nodes that may be freed during dispose_all_nodes. The same guard
+        // already exists in GcHeap::drop.
+        //
+        // GcScopeState::clear() only touches node flags and does not access any
+        // GcHeap fields, so it is safe to call during remove_partition.
+        for stack in &mut self.scope_stacks {
+            if stack.partition == Some(partition_id) {
+                for s in &stack.list {
+                    s.clear();
+                }
+            }
+        }
+
         #[cfg(debug_assertions)]
         {
             self.dbg_dropping_root_partition = Some(partition_id);
