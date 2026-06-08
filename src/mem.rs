@@ -3,8 +3,12 @@
 
 use std::{alloc::Layout, marker::PhantomData, ptr::NonNull};
 
-use crate::gctype::{layout_align_of, layout_size_of, payload_offset_of};
-use crate::{GcError, GcHead, GcHeap, GcNode, GcPartitionId, GcRef, unlikely, weak::GcWeakRawId};
+use crate::{
+    GcError, GcHead, GcHeap, GcNode, GcPartitionId, GcRef,
+    gctype::{layout_align_of, layout_size_of, payload_offset_of},
+    unlikely,
+    weak::GcWeakRawId,
+};
 
 impl GcHeap {
     fn mem_alloc(&mut self, layout: Layout) -> Option<NonNull<u8>> {

@@ -7,7 +7,7 @@ use smallvec::SmallVec;
 use crate::{
     heap::GcHeap,
     helpers::GcError,
-    node::{Gc, GcHead, GcNode, GcNodeFlag, GcRef},
+    node::{Gc, GcHead, GcNode, GcNodeFlag},
     partition::GcPartitionId,
 };
 
@@ -123,11 +123,6 @@ impl<'s> GcScopeState<'s> {
         } else {
             None
         }
-    }
-
-    #[inline(always)]
-    pub fn alloc_root<T: GcNode>(&self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
-        unsafe { (*self.heap.as_ptr()).alloc_root_raw(self.partition_id, payload) }
     }
 
     /// alloc a local node in scope.
@@ -274,6 +269,7 @@ impl<'s> Drop for GcScope<'s> {
         unsafe {
             let heap = self.heap.as_mut();
             let stack = &heap.scope_stacks[self.stack_id.0 as usize];
+
             debug_assert!(
                 !stack.list.is_empty(),
                 "GcScope dropped but scope stack {} is empty",
@@ -287,6 +283,7 @@ impl<'s> Drop for GcScope<'s> {
                 stack.list.len(),
                 self.index,
             );
+
             heap.pop_scope(self.stack_id);
         }
     }
@@ -470,7 +467,7 @@ impl GcHeap {
 
 #[cfg(test)]
 mod tests {
-    use crate::{GcTraceCtx, trace::GcTrace};
+    use crate::{GcRef, GcTraceCtx, trace::GcTrace};
 
     use super::*;
 
@@ -648,29 +645,28 @@ mod tests {
     }
 
     #[test]
-    fn test_gc_context_alloc_root_creates_root_without_protection() {
+    fn test_root_node_not_collected_by_sweep() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let partition_id = heap.create_partition();
-        let stack_id = heap.acquire_scope_stack(partition_id);
 
         let head;
 
-        {
-            let ctx = heap.new_scope(stack_id);
-            let node: GcRef<Node> = ctx
-                .alloc_root(Node {
-                    next: None,
-                    value: 1,
-                })
+        unsafe {
+            let node = heap
+                .alloc_root_raw(
+                    partition_id,
+                    Node {
+                        next: None,
+                        value: 1,
+                    },
+                )
                 .unwrap();
 
             head = node.head_ptr;
 
-            unsafe {
-                assert!(node.is_root());
-                assert!(head.as_ref().is_root());
-                assert!(!head.as_ref().is_local());
-            }
+            assert!(node.is_root());
+            assert!(head.as_ref().is_root());
+            assert!(!head.as_ref().is_local());
         }
 
         while !heap.mark(partition_id, 64) {}
