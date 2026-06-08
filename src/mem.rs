@@ -129,18 +129,17 @@ impl GcHeap {
         partition_id: GcPartitionId,
         payload: T,
     ) -> Result<GcRef<T>, (GcError, T)> {
-        match unsafe { self.alloc_node_mem(partition_id, payload) } {
-            Ok((head, _)) => {
-                self.attach_node(partition_id, head);
+        unsafe {
+            self.alloc_node_mem(partition_id, payload)
+                .map(|(head_ptr, _)| {
+                    log::trace!("[alloc] {:?}", head_ptr.as_ref());
 
-                log::trace!("[alloc] {:?}", unsafe { head.as_ref() });
-
-                Ok(GcRef {
-                    head_ptr: head,
-                    _marker: PhantomData,
+                    self.attach_node(partition_id, head_ptr);
+                    GcRef {
+                        head_ptr,
+                        _marker: PhantomData,
+                    }
                 })
-            }
-            Err(e) => Err(e),
         }
     }
 
@@ -154,21 +153,22 @@ impl GcHeap {
         partition_id: GcPartitionId,
         payload: T,
     ) -> Result<GcRef<T>, (GcError, T)> {
-        let (mut node, _) = unsafe { self.alloc_node_mem(partition_id, payload)? };
+        let head_ptr = unsafe {
+            let (mut h, _) = self.alloc_node_mem(partition_id, payload)?;
+            h.as_mut().insert_flag(crate::node::GcNodeFlag::ROOT);
+            log::trace!("[alloc_root] {:?}", h.as_ref());
+            h
+        };
 
-        unsafe { node.as_mut() }.insert_flag(crate::node::GcNodeFlag::ROOT);
-
-        self.attach_node(partition_id, node);
+        self.attach_node(partition_id, head_ptr);
 
         let par = self.partition_mut(partition_id).unwrap();
         if par.is_marking() {
-            par.add_gray_node(node);
+            par.add_gray_node(head_ptr);
         }
 
-        log::trace!("[alloc_root] {:?}", unsafe { node.as_ref() });
-
         Ok(GcRef {
-            head_ptr: node,
+            head_ptr,
             _marker: PhantomData,
         })
     }
