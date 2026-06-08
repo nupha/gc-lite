@@ -49,7 +49,7 @@ impl GcHeap {
 
     /// Check whether the partition that `node` belongs to is currently marking.
     #[inline]
-    pub(crate) fn is_node_partition_marking<T: GcNode>(&self, node: GcRef<T>) -> bool {
+    pub(crate) unsafe fn is_node_partition_marking<T: GcNode>(&self, node: GcRef<T>) -> bool {
         let pid = unsafe { node.node_info().partition_id() };
         self.partition(pid).is_some_and(|p| p.is_marking())
     }

@@ -403,7 +403,7 @@ impl<T: GcNode> GcRef<T> {
     {
         // Only enforce the tri-color invariant when a GC marking cycle
         // is in progress for this node's partition.
-        if heap.is_node_partition_marking(*self) {
+        if unsafe { heap.is_node_partition_marking(*self) } {
             // SAFETY: self is alive (caller guarantees it via the unsafe fn contract).
             let node = unsafe { self.head_ptr.as_mut() };
             if node.color() == GcTriColor::Black {

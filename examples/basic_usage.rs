@@ -10,8 +10,6 @@
 //! - Weak reference usage
 //! - Partition management
 
-use std::ops::Deref;
-
 use gc_lite::{GcHeap, GcRef, GcResult, GcTrace, GcTraceCtx, gc_type_register};
 
 #[derive(Debug)]
@@ -71,9 +69,9 @@ fn main() -> GcResult<()> {
     let obj3 = unsafe { heap.alloc_raw(partition1, MyString(String::from("VectorData"))) }
         .map_err(|(err, _)| err)?;
 
-    println!("  Created string: '{}'", obj1.deref());
-    println!("  Created number: {}", obj2.deref());
-    println!("  Created string: '{}'", obj3.deref());
+    println!("  Created string: '{}'", unsafe { obj1.as_ref() });
+    println!("  Created number: {}", unsafe { obj2.as_ref() });
+    println!("  Created string: '{}'", unsafe { obj3.as_ref() });
 
     // Allocate objects in partition2
     println!("\nAllocate objects in partition2:");
@@ -81,8 +79,8 @@ fn main() -> GcResult<()> {
         .map_err(|(err, _)| err)?;
     let obj5 = unsafe { heap.alloc_raw(partition2, MyI32(99)) }.map_err(|(err, _)| err)?;
 
-    println!("  Created string: '{}'", obj4.deref());
-    println!("  Created number: {}", obj5.deref());
+    println!("  Created string: '{}'", unsafe { obj4.as_ref() });
+    println!("  Created number: {}", unsafe { obj5.as_ref() });
 
     // Display partition status
     println!("\nPartition status:");
@@ -124,8 +122,8 @@ fn main() -> GcResult<()> {
 
     // Verify root objects are still valid
     println!("\nVerify partition1 root objects are still valid:");
-    println!("  Object1: '{}'", obj1.deref());
-    println!("  Object2: {}", obj2.deref());
+    println!("  Object1: '{}'", unsafe { obj1.as_ref() });
+    println!("  Object2: {}", unsafe { obj2.as_ref() });
 
     // Manually trigger garbage collection for partition2
     println!("\nManually trigger garbage collection for partition2...");
@@ -134,7 +132,7 @@ fn main() -> GcResult<()> {
 
     // Verify partition2 root objects are still valid
     println!("\nVerify partition2 root objects are still valid:");
-    println!("  Object4: '{}'", obj4.deref());
+    println!("  Object4: '{}'", unsafe { obj4.as_ref() });
 
     // Trigger garbage collection for partition1 again to collect unreferenced objects
     println!("\nTrigger garbage collection for partition1 again...");
@@ -145,8 +143,8 @@ fn main() -> GcResult<()> {
 
     // Verify remaining root objects are still valid
     println!("\nVerify remaining root objects are still valid:");
-    println!("  Object1: '{}'", obj1.deref());
-    println!("  Object2: {} (still a root)", obj2.deref());
+    println!("  Object1: '{}'", unsafe { obj1.as_ref() });
+    println!("  Object2: {} (still a root)", unsafe { obj2.as_ref() });
 
     // Demonstrate automatic garbage collection
     println!("\nDemonstrate automatic garbage collection...");
@@ -170,10 +168,7 @@ fn main() -> GcResult<()> {
     // Upgrade weak reference
     match weak_ref.upgrade(&heap) {
         Some(strong_ref) => {
-            println!(
-                "  Weak reference upgrade successful: '{}'",
-                strong_ref.deref()
-            );
+            println!("  Weak reference upgrade successful: '{}'", &*strong_ref);
         }
         None => {
             println!("  Weak reference upgrade failed");
@@ -189,12 +184,16 @@ fn main() -> GcResult<()> {
 
     // Establish references between nodes
     {
-        node1.with_write_barrier(&mut heap, |n| n.add_child(node2));
-        node2.with_write_barrier(&mut heap, |n| n.add_child(node1));
+        unsafe {
+            node1.with_write_barrier(&mut heap, |n| n.add_child(node2));
+        }
+        unsafe {
+            node2.with_write_barrier(&mut heap, |n| n.add_child(node1));
+        }
     }
 
-    println!("  Created node1: {}", node1.deref());
-    println!("  Created node2: {}", node2.deref());
+    println!("  Created node1: {}", unsafe { node1.as_ref() });
+    println!("  Created node2: {}", unsafe { node2.as_ref() });
 
     // Trigger garbage collection, verify circular references are handled correctly
     println!("\nGarbage collection for handling circular references...");

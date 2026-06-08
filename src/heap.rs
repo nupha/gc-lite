@@ -106,10 +106,12 @@ impl GcHeap {
         self.opaque
     }
 
+    #[inline(always)]
     pub const fn set_opaque(&mut self, opaque: *mut u8) {
         self.opaque = opaque;
     }
 
+    #[inline(always)]
     pub fn memory_limit(&self) -> usize {
         self.memory_limit
     }
@@ -131,6 +133,7 @@ impl GcHeap {
         self.memory_limit
     }
 
+    #[inline(always)]
     pub fn gc_threshold(&self) -> usize {
         self.gc_threshold
     }

@@ -9,8 +9,6 @@
 //! - Reference recovery and validation
 //! - Cross-context object detection
 
-use std::ops::Deref;
-
 use gc_lite::{GcHeap, GcRef, GcResult, GcTrace, GcTraceCtx, gc_type_register};
 
 #[derive(Debug)]
@@ -93,7 +91,7 @@ fn demonstrate_weak_references(
     println!("\n2. Upgrade weak reference...");
     match weak_ref.upgrade(heap) {
         Some(upgraded) => {
-            let data = upgraded.deref();
+            let data = &*upgraded;
             println!("  Weak reference upgrade successful: '{}'", data);
             assert_eq!(data, "Strong Reference Data");
         }
@@ -129,12 +127,16 @@ fn demonstrate_cyclic_references(
 
     // Establish circular references
     {
-        node1.with_write_barrier(heap, |n| n.set_partner(node2));
-        node2.with_write_barrier(heap, |n| n.set_partner(node1));
+        unsafe {
+            node1.with_write_barrier(heap, |n| n.set_partner(node2));
+        }
+        unsafe {
+            node2.with_write_barrier(heap, |n| n.set_partner(node1));
+        }
     }
 
-    println!("  Created node1: {}", node1.deref());
-    println!("  Created node2: {}", node2.deref());
+    println!("  Created node1: {}", unsafe { node1.as_ref() });
+    println!("  Created node2: {}", unsafe { node2.as_ref() });
 
     // Trigger garbage collection
     println!("\n2. Trigger garbage collection (circular references still exist)...");
@@ -143,8 +145,14 @@ fn demonstrate_cyclic_references(
 
     // Verify circular references still exist
     println!("\n3. Verify circular references...");
-    println!("  Node1's partner: {}", node1.get_partner_name());
-    println!("  Node2's partner: {}", node2.get_partner_name());
+    println!(
+        "  Node1's partner: {}",
+        unsafe { node1.as_ref() }.get_partner_name()
+    );
+    println!(
+        "  Node2's partner: {}",
+        unsafe { node2.as_ref() }.get_partner_name()
+    );
 
     // Clear root object status, let circular references be collected
     println!("\n4. Clear root object status and trigger GC again...");
@@ -176,9 +184,15 @@ fn demonstrate_complex_structures(
 
     // Build tree structure
     {
-        root_node.with_write_barrier(heap, |n| n.add_child(child1));
-        root_node.with_write_barrier(heap, |n| n.add_child(child2));
-        child1.with_write_barrier(heap, |n| n.add_child(grandchild));
+        unsafe {
+            root_node.with_write_barrier(heap, |n| n.add_child(child1));
+        }
+        unsafe {
+            root_node.with_write_barrier(heap, |n| n.add_child(child2));
+        }
+        unsafe {
+            child1.with_write_barrier(heap, |n| n.add_child(grandchild));
+        }
     }
 
     // Create data container
@@ -207,11 +221,15 @@ fn demonstrate_complex_structures(
     // Verify data structure integrity
     println!("\n3. Verify data structure integrity...");
     {
-        println!("  Container root node: {}", container.root.name);
-        println!("  Metadata length: {}", container.metadata.len());
+        let container_ref = unsafe { container.as_ref() };
+        println!(
+            "  Container root node: {}",
+            unsafe { container_ref.root.as_ref() }.name
+        );
+        println!("  Metadata length: {}", container_ref.metadata.len());
         println!(
             "  Optional data exists: {}",
-            container.optional_data.is_some()
+            container_ref.optional_data.is_some()
         );
     }
 
@@ -236,7 +254,7 @@ fn demonstrate_reference_recovery(
     }
     .map_err(|(err, _)| err)?;
 
-    let data_ref = original_ref.deref();
+    let data_ref = unsafe { original_ref.as_ref() };
     println!("  Original reference: {:?}", original_ref);
     println!("  Data: {:?}", data_ref);
 
@@ -247,7 +265,7 @@ fn demonstrate_reference_recovery(
     match recovered_ref {
         Some(recovered) => {
             println!("  Recovery successful: {:?}", recovered);
-            let recovered_data = recovered.deref();
+            let recovered_data = unsafe { recovered.as_ref() };
             println!("  Recovered data: {:?}", recovered_data);
             println!("  Data equal: {}", data_ref == recovered_data);
             println!("  Reference equal: {}", original_ref == recovered);
@@ -345,7 +363,7 @@ impl CyclicNode {
 
     fn get_partner_name(&self) -> String {
         self.partner
-            .map(|p| p.name.clone())
+            .map(|p| unsafe { p.as_ref() }.name.clone())
             .unwrap_or_else(|| "None".to_string())
     }
 }

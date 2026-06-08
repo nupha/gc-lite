@@ -339,8 +339,9 @@ fn test_object_allocation() {
     assert!(after_memory > initial_memory);
 
     // Verify object content
-    assert_eq!(obj.value, 42);
-    assert_eq!(obj.name, "test");
+    let obj_ref = unsafe { obj.as_ref() };
+    assert_eq!(obj_ref.value, 42);
+    assert_eq!(obj_ref.name, "test");
 }
 
 #[test]
@@ -421,8 +422,11 @@ fn test_multiple_object_allocation() {
 
     // Verify all objects
     for (i, obj) in objs.iter().enumerate() {
-        assert_eq!(obj.value, i as i32);
-        assert_eq!(obj.name, format!("obj_{}", i));
+        let obj_ref = unsafe { obj.as_ref() };
+        let val = obj_ref.value;
+        let name = &obj_ref.name;
+        assert_eq!(val, i as i32);
+        assert_eq!(name, &format!("obj_{}", i));
     }
 
     // Verify memory tracking
@@ -504,7 +508,7 @@ fn test_root_object_management() {
     .unwrap();
 
     // Initially not a root
-    assert!(obj.is_root());
+    assert!(unsafe { obj.is_root() });
 }
 
 #[test]
@@ -528,7 +532,7 @@ fn test_root_objects_preserve_during_gc() {
     assert_eq!(freed, 0);
 
     // Object should still be valid
-    assert_eq!(obj.value, 42);
+    assert_eq!(unsafe { obj.as_ref() }.value, 42);
 }
 
 #[test]
@@ -564,7 +568,7 @@ fn test_non_root_objects_collected() {
     assert!(freed > 0);
 
     // Root object should still be valid
-    assert_eq!(root_obj.value, 1);
+    assert_eq!(unsafe { root_obj.as_ref() }.value, 1);
 }
 
 // ============ Garbage Collection Tests ============
@@ -624,15 +628,23 @@ fn test_circular_reference_handling() {
     // Allocate nodes and create a circular reference
     let mut node1 = unsafe { heap.alloc_raw(id, TestNode::new(1)) }.unwrap();
     let mut node2 = unsafe { heap.alloc_raw(id, TestNode::new(2)) }.unwrap();
-    node1.with_write_barrier(&mut heap, |n| n.add_child(node2));
-    node2.with_write_barrier(&mut heap, |n| n.add_child(node1));
+    unsafe {
+        node1.with_write_barrier(&mut heap, |n| n.add_child(node2));
+    }
+    unsafe {
+        node2.with_write_barrier(&mut heap, |n| n.add_child(node1));
+    }
 
     // To test collection, we need a root that references the cycle
     let mut root = unsafe { heap.alloc_root_raw(id, TestNode::new(0)) }.unwrap();
-    root.with_write_barrier(&mut heap, |n| n.add_child(node1));
+    unsafe {
+        root.with_write_barrier(&mut heap, |n| n.add_child(node1));
+    }
 
     // Now, break the link from the root to the cycle
-    root.with_write_barrier(&mut heap, |n| n.children.clear());
+    unsafe {
+        root.with_write_barrier(&mut heap, |n| n.children.clear());
+    }
 
     // GC should now collect the cycle
     let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);

@@ -1,6 +1,4 @@
-use gc_lite::{
-    GcHeap, GcPartitionId, GcRef, GcResult, GcScopeStackId, GcTrace, GcTraceCtx, gc_type_register,
-};
+use gc_lite::{GcHeap, GcRef, GcResult, GcScopeStackId, GcTrace, GcTraceCtx, gc_type_register};
 
 #[derive(Debug)]
 struct StaticNode {
@@ -33,7 +31,8 @@ fn alloc_static(
     heap.with_new_scope(stack_id, |ctx| {
         let r = ctx
             .alloc_local(StaticNode { _value: value })
-            .map_err(|(err, _)| err);
+            .map_err(|(err, _)| err)
+            .map(|gc| gc.into_raw());
         ctx.clear();
         r
     })
@@ -47,7 +46,8 @@ fn alloc_other(
     heap.with_new_scope(stack_id, |ctx| {
         let r = ctx
             .alloc_local(OtherNode { _value: value })
-            .map_err(|(err, _)| err);
+            .map_err(|(err, _)| err)
+            .map(|gc| gc.into_raw());
         ctx.clear();
         r
     })
@@ -61,8 +61,11 @@ fn main() -> GcResult<()> {
     let static_ref = alloc_static(&mut heap, stack_id, 10)?;
     let other_ref = alloc_other(&mut heap, stack_id, 20)?;
 
-    println!("Static node value: {}", static_ref._value);
-    println!("Other node value: {}", other_ref._value);
+    println!(
+        "Static node value: {}",
+        unsafe { static_ref.as_ref() }._value
+    );
+    println!("Other node value: {}", unsafe { other_ref.as_ref() }._value);
 
     heap.release_scope_stack(stack_id);
 
