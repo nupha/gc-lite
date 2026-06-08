@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{marker::PhantomData, ops::Deref, ptr::NonNull};
+use std::{
+    marker::PhantomData,
+    ops::{Deref, DerefMut},
+    ptr::NonNull,
+};
 
 use crate::gctype::{GcTypeRegistry, payload_offset_of};
 use crate::{GcHeap, GcPartitionId, GcTrace, GcWeak, weak::GcWeakRawId};
@@ -257,21 +261,6 @@ pub struct GcRef<T: GcNode> {
     pub(super) _marker: PhantomData<T>,
 }
 
-impl<T: GcNode> Deref for GcRef<T> {
-    type Target = T;
-
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        unsafe {
-            self.head_ptr
-                .as_ref()
-                .payload_for::<T>()
-                .cast::<T>()
-                .as_ref()
-        }
-    }
-}
-
 impl<T: GcNode> Clone for GcRef<T> {
     fn clone(&self) -> Self {
         *self
@@ -305,11 +294,45 @@ impl<T: GcNode> From<&GcRef<T>> for NonNull<GcHead> {
 
 impl<T: GcNode> std::fmt::Debug for GcRef<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        unsafe { write!(f, "GcRef<{:?}>", self.head_ptr.as_ref()) }
+        write!(f, "GcRef<{:p}>", self.head_ptr)
     }
 }
 
 impl<T: GcNode> GcRef<T> {
+    /// Access the underlying GC-managed object as a reference.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the GC object is still alive and has not been
+    /// collected (e.g., it is protected by a root/LOCAL flag, or the GC
+    /// heap is guaranteed not to run a collection cycle).
+    #[inline(always)]
+    pub unsafe fn as_ref(&self) -> &T {
+        unsafe {
+            self.head_ptr
+                .as_ref()
+                .payload_for::<T>()
+                .cast::<T>()
+                .as_ref()
+        }
+    }
+
+    /// Access the underlying GC-managed object as a mutable reference.
+    ///
+    /// # Safety
+    ///
+    /// Same as [`as_ref`](Self::as_ref).
+    #[inline(always)]
+    pub unsafe fn as_mut(&mut self) -> &mut T {
+        unsafe {
+            self.head_ptr
+                .as_mut()
+                .payload_for::<T>()
+                .cast::<T>()
+                .as_mut()
+        }
+    }
+
     /// Create GcRef<T> from &T reference
     ///
     /// # Safety
@@ -366,13 +389,22 @@ impl<T: GcNode> GcRef<T> {
         }
     }
 
-    pub fn with_write_barrier<F, R>(&mut self, heap: &mut GcHeap, mutator: F) -> R
+    /// Apply a mutator function to the GC-managed object, with write barrier.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the GC object is still alive and valid.
+    /// If the `mutator` writes new GC references into the object, the write
+    /// barrier will handle tri-color invariant for incremental GC.
+    #[inline]
+    pub unsafe fn with_write_barrier<F, R>(&mut self, heap: &mut GcHeap, mutator: F) -> R
     where
         F: FnOnce(&mut T) -> R,
     {
         // Only enforce the tri-color invariant when a GC marking cycle
         // is in progress for this node's partition.
         if heap.is_node_partition_marking(*self) {
+            // SAFETY: self is alive (caller guarantees it via the unsafe fn contract).
             let node = unsafe { self.head_ptr.as_mut() };
             if node.color() == GcTriColor::Black {
                 node.set_color(GcTriColor::Gray);
@@ -380,6 +412,7 @@ impl<T: GcNode> GcRef<T> {
             }
         }
 
+        // SAFETY: self is alive (caller guarantees it via the unsafe fn contract).
         let value = unsafe {
             self.head_ptr
                 .as_mut()
@@ -390,32 +423,139 @@ impl<T: GcNode> GcRef<T> {
         mutator(value)
     }
 
+    /// Get a raw pointer to the GC-managed payload.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the GC object is still alive.
     #[inline]
-    pub fn as_ptr(&self) -> NonNull<T> {
+    pub unsafe fn as_ptr(&self) -> NonNull<T> {
         unsafe { self.head_ptr.as_ref().payload_for::<T>().cast::<T>() }
     }
 
+    /// Create a weak reference from this GC reference.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the GC object is still alive.
     #[inline(always)]
-    pub fn downgrade(&self, heap: &mut GcHeap) -> GcWeak<T> {
+    pub unsafe fn downgrade(&self, heap: &mut GcHeap) -> GcWeak<T> {
         heap.downgrade(self)
     }
 
-    /// check if this is root object
+    /// Check if this is a root object.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the GC object is still alive.
     #[inline(always)]
-    pub fn is_root(&self) -> bool {
+    pub unsafe fn is_root(&self) -> bool {
         unsafe { self.head_ptr.as_ref().is_root() }
     }
 
-    /// get node raw pointer
+    /// Get node raw pointer (always safe — just returns the raw pointer value).
     #[inline(always)]
     pub fn node_ptr(&self) -> NonNull<GcHead> {
         self.head_ptr
     }
 
-    /// get node info
+    /// Get node info (GC head metadata).
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the GC object is still alive.
     #[inline(always)]
-    pub fn node_info(&self) -> &GcHead {
+    pub unsafe fn node_info(&self) -> &GcHead {
         unsafe { self.head_ptr.as_ref() }
+    }
+}
+
+/// A safe GC reference with a lifetime guarantee.
+///
+/// `Gc<'a, T>` wraps a [`GcRef<T>`] and provides safe `Deref`/`DerefMut`
+/// implementations, where the lifetime `'a` proves that the GC object is
+/// alive and protected (e.g., by a scope or a heap borrow).
+///
+/// # Safety invariant
+///
+/// The lifetime `'a` must be derived from a source that guarantees the
+/// GC object will not be collected during `'a`. Typical sources:
+/// - A [`GcScope`](crate::GcScope) or [`GcScopeState`](crate::GcScopeState)
+///   for scope-local allocations
+/// - A `&GcHeap` borrow for [`GcWeak::upgrade`](crate::GcWeak::upgrade) results
+#[repr(transparent)]
+pub struct Gc<'a, T: GcNode> {
+    inner: GcRef<T>,
+    _marker: PhantomData<&'a T>,
+}
+
+impl<'a, T: GcNode> Deref for Gc<'a, T> {
+    type Target = T;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: The lifetime 'a guarantees the object is alive.
+        unsafe { self.inner.as_ref() }
+    }
+}
+
+impl<'a, T: GcNode> DerefMut for Gc<'a, T> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: The lifetime 'a guarantees the object is alive.
+        unsafe { self.inner.as_mut() }
+    }
+}
+
+impl<'a, T: GcNode> Clone for Gc<'a, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<'a, T: GcNode> Copy for Gc<'a, T> {}
+
+impl<'a, T: GcNode> PartialEq for Gc<'a, T> {
+    #[inline(always)]
+    fn eq(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+impl<'a, T: GcNode> Eq for Gc<'a, T> {}
+
+impl<'a, T: GcNode> std::fmt::Debug for Gc<'a, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Gc<{:p}>", self.inner.head_ptr)
+    }
+}
+
+impl<'a, T: GcNode> Gc<'a, T> {
+    /// Create a `Gc` from a raw `GcRef` and a lifetime proof.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the object referenced by `inner` stays
+    /// alive for the entire lifetime `'a`. This is typically guaranteed
+    /// by tying `'a` to a scope or a heap borrow.
+    #[inline(always)]
+    pub unsafe fn from_raw(inner: GcRef<T>) -> Self {
+        Self {
+            inner,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Convert back to the raw `GcRef` handle.
+    #[inline(always)]
+    pub fn into_raw(self) -> GcRef<T> {
+        self.inner
+    }
+
+    /// Access the raw `GcRef` without consuming self.
+    #[inline(always)]
+    pub fn as_raw(&self) -> &GcRef<T> {
+        &self.inner
     }
 }
 

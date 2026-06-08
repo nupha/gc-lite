@@ -276,13 +276,14 @@ impl GcHeap {
 
 #[cfg(test)]
 mod heap_tests {
-    use crate::{GcRef, GcTraceCtx, trace::GcTrace};
+    use crate::{GcRef, GcTraceCtx, node::GcNode, trace::GcTrace};
 
     use super::*;
 
     #[derive(Debug)]
     struct Node {
         next: Option<GcRef<Node>>,
+        #[expect(dead_code)]
         value: i32,
     }
 
@@ -304,15 +305,15 @@ mod heap_tests {
         let partition_id = heap.create_partition();
         let stack_id = heap.acquire_scope_stack(partition_id);
 
-        let head = heap.with_new_scope(stack_id, |ctx| {
-            let node: GcRef<Node> = ctx
+        let _head = heap.with_new_scope(stack_id, |ctx| {
+            let node = ctx
                 .alloc_local(Node {
                     next: None,
                     value: 1,
                 })
                 .unwrap();
             ctx.clear();
-            node.head_ptr
+            node.gc_head_ptr()
         });
 
         while !heap.mark(partition_id, 64) {}

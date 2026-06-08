@@ -3,7 +3,7 @@
 
 use std::marker::PhantomData;
 
-use crate::{GcNode, GcRef, heap::GcHeap};
+use crate::{Gc, GcNode, GcRef, heap::GcHeap};
 
 /// bit 16-31: slot index in weak_list
 /// bit 0-15:  version
@@ -91,7 +91,7 @@ impl<T: GcNode> GcWeak<T> {
 
     /// Upgrade weak reference to strong reference
     #[inline(always)]
-    pub fn upgrade(&self, heap: &GcHeap) -> Option<GcRef<T>> {
+    pub fn upgrade<'a>(&self, heap: &'a GcHeap) -> Option<Gc<'a, T>> {
         heap.upgrade(self)
     }
 }
@@ -150,7 +150,7 @@ impl GcHeap {
     }
 
     /// Upgrade weak reference
-    pub fn upgrade<T: GcNode>(&self, weak_ref: &GcWeak<T>) -> Option<GcRef<T>> {
+    pub fn upgrade<'a, T: GcNode>(&'a self, weak_ref: &GcWeak<T>) -> Option<Gc<'a, T>> {
         if !weak_ref.weak_id.is_null() {
             self.weak_slots
                 .get(weak_ref.index() as usize)
@@ -161,9 +161,15 @@ impl GcHeap {
                         None
                     }
                 })
-                .map(|ptr| GcRef {
-                    head_ptr: ptr,
-                    _marker: PhantomData,
+                .map(|ptr| {
+                    // SAFETY: The upgrade result is valid for 'a because
+                    // GC requires &mut GcHeap and we hold &'a GcHeap.
+                    unsafe {
+                        Gc::from_raw(GcRef {
+                            head_ptr: ptr,
+                            _marker: PhantomData,
+                        })
+                    }
                 })
         } else {
             None

@@ -7,7 +7,7 @@ use smallvec::SmallVec;
 use crate::{
     heap::GcHeap,
     helpers::GcError,
-    node::{GcHead, GcNode, GcNodeFlag, GcRef},
+    node::{Gc, GcHead, GcNode, GcNodeFlag, GcRef},
     partition::GcPartitionId,
 };
 
@@ -126,16 +126,19 @@ impl<'s> GcScopeState<'s> {
     }
 
     #[inline(always)]
-    #[deprecated(note = "use RuntimeImpl::alloc_root_in()")]
     pub fn alloc_root<T: GcNode>(&self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
         unsafe { (*self.heap.as_ptr()).alloc_root_raw(self.partition_id, payload) }
     }
 
     /// alloc a local node in scope.
-    pub fn alloc_local<T: GcNode>(&self, payload: T) -> Result<GcRef<T>, (GcError, T)> {
+    pub fn alloc_local<T: GcNode>(&self, payload: T) -> Result<Gc<'s, T>, (GcError, T)> {
         let r = unsafe { (*self.heap.as_ptr()).alloc_raw(self.partition_id, payload)? };
         self.add_node(r.head_ptr);
-        Ok(r)
+        // SAFETY: The node is now protected by this scope's LOCAL flag,
+        // and 's is tied to the GcScopeState's lifetime (which outlives
+        // this call and is typically tied to a &mut GcHeap borrow,
+        // preventing GC collection).
+        Ok(unsafe { Gc::from_raw(r) })
     }
 
     fn add_node(&self, mut node: NonNull<GcHead>) {
@@ -499,14 +502,14 @@ mod tests {
 
         {
             let ctx = heap.new_scope(stack_id);
-            let node: GcRef<Node> = ctx
+            let node = ctx
                 .alloc_local(Node {
                     next: None,
                     value: 1,
                 })
                 .unwrap();
 
-            head = node.head_ptr;
+            head = node.as_raw().node_ptr();
 
             unsafe {
                 assert!(head.as_ref().is_local());
@@ -533,14 +536,14 @@ mod tests {
         let head;
         {
             let mut ctx = heap.new_scope(stack_id);
-            let node: GcRef<Node> = ctx
+            let node = ctx
                 .alloc_local(Node {
                     next: None,
                     value: 1,
                 })
                 .unwrap();
 
-            head = node.head_ptr;
+            head = node.as_raw().node_ptr();
 
             unsafe {
                 assert!(head.as_ref().is_local());
@@ -618,14 +621,14 @@ mod tests {
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         let ctx = heap.new_scope(stack_id);
-        let node: GcRef<Node> = ctx
+        let node = ctx
             .alloc_local(Node {
                 next: None,
                 value: 1,
             })
             .unwrap();
 
-        let head = node.head_ptr;
+        let head = node.as_raw().node_ptr();
 
         unsafe {
             assert!(head.as_ref().is_local());
@@ -686,21 +689,21 @@ mod tests {
 
         {
             let mut ctx = heap.new_scope(stack_id);
-            let n1: GcRef<Node> = ctx
+            let n1 = ctx
                 .alloc_local(Node {
                     next: None,
                     value: 1,
                 })
                 .unwrap();
-            let n2: GcRef<Node> = ctx
+            let n2 = ctx
                 .alloc_local(Node {
                     next: None,
                     value: 2,
                 })
                 .unwrap();
 
-            head1 = n1.head_ptr;
-            head2 = n2.head_ptr;
+            head1 = n1.as_raw().node_ptr();
+            head2 = n2.as_raw().node_ptr();
 
             unsafe {
                 assert!(head1.as_ref().is_local());
@@ -735,14 +738,14 @@ mod tests {
 
         {
             let mut ctx = heap.new_scope(stack_id);
-            let node: GcRef<Node> = ctx
+            let node = ctx
                 .alloc_local(Node {
                     next: None,
                     value: 1,
                 })
                 .unwrap();
 
-            head = node.head_ptr;
+            head = node.as_raw().node_ptr();
 
             unsafe {
                 assert!(head.as_ref().is_local());

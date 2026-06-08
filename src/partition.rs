@@ -195,15 +195,6 @@ impl GcHeap {
         self.partitions.get_mut(&partition_id)
     }
 
-    /// Check whether the partition containing `node` is in a marking cycle.
-    pub fn is_node_partition_marking<T: crate::node::GcNode>(
-        &self,
-        node: crate::node::GcRef<T>,
-    ) -> bool {
-        let pid = unsafe { node.head_ptr.as_ref().partition_id() };
-        self.partition(pid).map_or(false, |p| p.is_marking())
-    }
-
     /// Get all partition IDs
     pub fn partition_ids(&self) -> Vec<GcPartitionId> {
         self.partitions.keys().copied().collect()
@@ -330,9 +321,9 @@ mod tests {
         let p2 = heap.create_partition();
 
         // Allocate some nodes in p1
-        let n1 = unsafe { heap.alloc_raw(p1, DummyType) }.unwrap();
-        let n2 = unsafe { heap.alloc_raw(p1, DummyType) }.unwrap();
-        let n3 = unsafe { heap.alloc_raw(p2, DummyType) }.unwrap();
+        let _n1 = unsafe { heap.alloc_raw(p1, DummyType) }.unwrap();
+        let _n2 = unsafe { heap.alloc_raw(p1, DummyType) }.unwrap();
+        let _n3 = unsafe { heap.alloc_raw(p2, DummyType) }.unwrap();
 
         let used_before = heap.memory_used();
         assert!(

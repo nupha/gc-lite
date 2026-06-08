@@ -390,13 +390,17 @@ mod tests {
         }
 
         // Build tree: 0 -> 1,2; 1 -> 3,4; 2 -> 5,6; 3 -> 7,8; 4 -> 9
-        {
+        unsafe {
             let mut nodes = nodes.clone();
             let n = nodes[1];
-            nodes[0].with_write_barrier(&mut heap, |node| node.add_child(n));
+            unsafe {
+                nodes[0].with_write_barrier(&mut heap, |node| node.add_child(n));
+            }
 
             let n = nodes[2];
-            nodes[0].with_write_barrier(&mut heap, |node| node.add_child(n));
+            unsafe {
+                nodes[0].with_write_barrier(&mut heap, |node| node.add_child(n));
+            }
 
             let n = nodes[3];
             nodes[1].with_write_barrier(&mut heap, |node| node.add_child(n));
@@ -405,7 +409,9 @@ mod tests {
             nodes[1].with_write_barrier(&mut heap, |node| node.add_child(n));
 
             let n = nodes[5];
-            nodes[2].with_write_barrier(&mut heap, |node| node.add_child(n));
+            unsafe {
+                nodes[2].with_write_barrier(&mut heap, |node| node.add_child(n));
+            }
 
             let n = nodes[6];
             nodes[2].with_write_barrier(&mut heap, |node| node.add_child(n));
@@ -446,8 +452,12 @@ mod tests {
         let mut node2 = unsafe { heap.alloc_raw(partition_id, TestNode::new(2)) }.unwrap();
 
         {
-            node1.with_write_barrier(&mut heap, |n| n.add_child(node2));
-            node2.with_write_barrier(&mut heap, |n| n.add_child(node1));
+            unsafe {
+                node1.with_write_barrier(&mut heap, |n| n.add_child(node2));
+            }
+            unsafe {
+                node2.with_write_barrier(&mut heap, |n| n.add_child(node1));
+            }
         }
 
         // Mark reachable nodes - should handle circular reference without infinite loop
@@ -491,7 +501,9 @@ mod tests {
 
         // Now add the white child to the black root via with_mut().
         // The write barrier should re-gray the root and enqueue it.
-        root.with_write_barrier(&mut heap, |node| node.add_child(child));
+        unsafe {
+            root.with_write_barrier(&mut heap, |node| node.add_child(child));
+        }
 
         // Continue marking. The root should be traced again, discovering the child.
         while !heap.mark(partition_id, 1) {}
@@ -523,13 +535,19 @@ mod tests {
         // Create a chain: root -> a -> b -> c
         let c = unsafe { heap.alloc_raw(partition_id, TestNode::new(3)) }.unwrap();
         let mut b = unsafe { heap.alloc_raw(partition_id, TestNode::new(2)) }.unwrap();
-        b.with_write_barrier(&mut heap, |node| node.add_child(c));
+        unsafe {
+            b.with_write_barrier(&mut heap, |node| node.add_child(c));
+        }
 
         let mut a = unsafe { heap.alloc_raw(partition_id, TestNode::new(1)) }.unwrap();
-        a.with_write_barrier(&mut heap, |node| node.add_child(b));
+        unsafe {
+            a.with_write_barrier(&mut heap, |node| node.add_child(b));
+        }
 
         let mut root = unsafe { heap.alloc_root_raw(partition_id, TestNode::new(0)) }.unwrap();
-        root.with_write_barrier(&mut heap, |node| node.add_child(a));
+        unsafe {
+            root.with_write_barrier(&mut heap, |node| node.add_child(a));
+        }
 
         // Mark partially: only 1 node per step, so root becomes black,
         // a becomes gray, b and c stay white.
@@ -538,7 +556,9 @@ mod tests {
         // At this point root is black, a is black, b is gray/black, c is white.
         // Now add a NEW white child to the black root.
         let new_child = unsafe { heap.alloc_raw(partition_id, TestNode::new(10)) }.unwrap();
-        root.with_write_barrier(&mut heap, |node| node.add_child(new_child));
+        unsafe {
+            root.with_write_barrier(&mut heap, |node| node.add_child(new_child));
+        }
 
         // Continue marking to completion.
         while !heap.mark(partition_id, 1) {}
@@ -636,12 +656,13 @@ mod tests {
         .unwrap();
 
         // Verify payload is accessible and values are correct
-        assert_eq!(node.id, 42);
-        assert_eq!(node.data[0], 0xAB);
-        assert_eq!(node.data[63], 0xAB);
+        let n = unsafe { node.as_ref() };
+        assert_eq!(n.id, 42);
+        assert_eq!(n.data[0], 0xAB);
+        assert_eq!(n.data[63], 0xAB);
 
         // Verify alignment via pointer arithmetic
-        let payload_ptr = node.as_ptr().as_ptr() as usize;
+        let payload_ptr = unsafe { node.as_ptr() }.as_ptr() as usize;
         assert_eq!(
             payload_ptr % 32,
             0,
@@ -655,7 +676,7 @@ mod tests {
         assert_eq!(freed, 0);
 
         // Values still accessible after GC
-        assert_eq!(node.id, 42);
+        assert_eq!(unsafe { node.as_ref() }.id, 42);
     }
 
     #[test]
@@ -680,11 +701,12 @@ mod tests {
 
         // Verify all nodes are accessible and correctly aligned
         for (i, node) in nodes.iter().enumerate() {
-            assert_eq!(node.id, i as u64);
-            assert_eq!(node.data[0], i as u8);
-            assert_eq!(node.data[63], i as u8);
+            let n = unsafe { node.as_ref() };
+            assert_eq!(n.id, i as u64);
+            assert_eq!(n.data[0], i as u8);
+            assert_eq!(n.data[63], i as u8);
 
-            let payload_ptr = node.as_ptr().as_ptr() as usize;
+            let payload_ptr = unsafe { node.as_ptr() }.as_ptr() as usize;
             assert_eq!(
                 payload_ptr % 32,
                 0,
@@ -700,7 +722,7 @@ mod tests {
 
         // All nodes still accessible after GC
         for (i, node) in nodes.iter().enumerate() {
-            assert_eq!(node.id, i as u64);
+            assert_eq!(unsafe { node.as_ref() }.id, i as u64);
         }
     }
 }

@@ -5,19 +5,53 @@ use std::ptr::NonNull;
 
 use crate::{
     GcHeap,
-    node::{GcHead, GcTriColor},
+    node::{GcHead, GcNode, GcRef, GcTriColor},
     node_link::{GcNodeLink, NodeLinkIter},
     partition::GcPartitionId,
     trace::GcTraceCtx,
 };
 
 impl GcHeap {
+    fn seed_cross_partition_incoming_refs(&mut self, partition_id: GcPartitionId) {
+        let source_ids = self.partition_ids();
+        let mut gcx = self.create_trace_ctx(64);
+        let mut incoming = Vec::new();
+
+        for source_pid in source_ids {
+            if source_pid != partition_id {
+                for node in self.nodes(source_pid) {
+                    gcx.traced_nodes.clear();
+                    self.trace_node(node, &mut gcx);
+
+                    while let Some(child) = gcx.traced_nodes.pop() {
+                        if unsafe { child.as_ref().partition_id() } == partition_id {
+                            incoming.push(child);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(par) = self.partition_mut(partition_id) {
+            for child in incoming {
+                par.add_gray_node(child);
+            }
+        }
+    }
+
     pub fn add_gray_node(&mut self, node: NonNull<GcHead>) {
         if unsafe { node.as_ref().color() } != GcTriColor::Black {
             self.partition_mut(unsafe { node.as_ref().partition_id() })
                 .unwrap()
                 .add_gray_node(node);
         }
+    }
+
+    /// Check whether the partition that `node` belongs to is currently marking.
+    #[inline]
+    pub(crate) fn is_node_partition_marking<T: GcNode>(&self, node: GcRef<T>) -> bool {
+        let pid = unsafe { node.node_info().partition_id() };
+        self.partition(pid).is_some_and(|p| p.is_marking())
     }
 
     pub fn mark_reset(&mut self, partition_id: GcPartitionId) {
@@ -73,6 +107,10 @@ impl GcHeap {
                     }
                 }
             }
+        }
+
+        if self.partition(partition_id).is_some_and(|p| p.is_marking()) {
+            self.seed_cross_partition_incoming_refs(partition_id);
         }
     }
 
@@ -140,13 +178,11 @@ impl GcHeap {
                                 child.set_color(GcTriColor::Gray);
                                 par.gray_list.push(ch);
                             }
-                        } else {
-                            // Cross-partition reference: buffer the child for later processing
-                            // to avoid aliased mutable access to self.partitions.
-                            if matches!(child.color(), GcTriColor::White | GcTriColor::Gray) {
-                                child.set_color(GcTriColor::Gray);
-                                cross_nodes.push((ch, pid));
-                            }
+                        } else if matches!(child.color(), GcTriColor::White | GcTriColor::Gray) {
+                            // Cross-partition references are processed after the current
+                            // partition borrow ends. If the target partition is actively
+                            // marking, enqueue the child there as well.
+                            cross_nodes.push((ch, pid));
                         }
                     }
 
@@ -159,10 +195,14 @@ impl GcHeap {
 
             // Flush cross-partition gray nodes into their target partitions.
             // This is done after releasing the mutable borrow on `par`.
-            for (node, pid) in cross_nodes {
+            for (mut node, pid) in cross_nodes {
                 if let Some(p2) = self.partition_mut(pid)
+                    && p2.is_marking()
                     && !p2.gray_list.contains(&node)
                 {
+                    unsafe {
+                        node.as_mut().set_color(GcTriColor::Gray);
+                    }
                     p2.gray_list.push(node);
                 }
             }
