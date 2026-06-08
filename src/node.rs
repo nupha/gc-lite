@@ -262,6 +262,7 @@ pub struct GcRef<T: GcNode> {
 }
 
 impl<T: GcNode> Clone for GcRef<T> {
+    #[inline(always)]
     fn clone(&self) -> Self {
         *self
     }
@@ -508,6 +509,7 @@ impl<'a, T: GcNode> DerefMut for Gc<'a, T> {
 }
 
 impl<'a, T: GcNode> Clone for Gc<'a, T> {
+    #[inline(always)]
     fn clone(&self) -> Self {
         *self
     }

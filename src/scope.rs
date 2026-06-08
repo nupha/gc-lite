@@ -1,6 +1,7 @@
-use std::{num::NonZeroU8, ops::DerefMut};
-
-use {core::ptr::NonNull, std::cell::RefCell, std::marker::PhantomData};
+use {
+    core::ptr::NonNull,
+    std::{cell::RefCell, marker::PhantomData, num::NonZeroU8, ops::DerefMut},
+};
 
 use smallvec::SmallVec;
 

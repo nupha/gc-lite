@@ -39,6 +39,7 @@ pub struct GcWeak<T: GcNode> {
 }
 
 impl<T: GcNode> Clone for GcWeak<T> {
+    #[inline(always)]
     fn clone(&self) -> Self {
         *self
     }
