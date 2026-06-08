@@ -210,11 +210,12 @@ impl GcHeap {
 
         #[cfg(debug_assertions)]
         unsafe {
-            // Poison only the fields checked by debug_assert_node_valid_simple():
-            // clear attrs (removing the 0xFF sentinel) and null out next.
-            // This must happen AFTER drop_fn so that the payload's Drop impl
-            // can still access the GcHead (e.g. via gc_ref() in finalize).
-            (*node.as_ptr()).attrs = 0;
+            // Poison GcHead fields so any subsequent use-after-free is caught.
+            // 0xDEAD_BEEF destroys the 0xFF sentinel byte (debug_assert_node_valid_simple
+            // will fail) and is non-zero so even writes that only modify low bits
+            // (e.g. remove_flag) change the value, triggering malloc checksum detection.
+            // Must run AFTER drop_fn so the payload Drop can still access GcHead.
+            (*node.as_ptr()).attrs = 0xDEAD_BEEF;
             (*node.as_ptr()).next = None;
         }
 
