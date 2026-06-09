@@ -439,7 +439,7 @@ impl GcHeap {
 
     /// run closure with last (top-most) scope from the stack
     #[inline]
-    pub fn with_current_scope<R>(
+    pub fn with_current_scope_of<R>(
         &mut self,
         stack_id: GcScopeStackId,
         f: impl FnOnce(&mut GcScopeState) -> R,
@@ -842,7 +842,7 @@ mod tests {
             assert_eq!((*heap_ptr).current_scope(stack1).unwrap().depth(), 2);
             assert_eq!((*heap_ptr).current_scope(stack2).unwrap().depth(), 1);
 
-            (*heap_ptr).with_current_scope(stack1, |ctx| {
+            (*heap_ptr).with_current_scope_of(stack1, |ctx| {
                 let (parent, parent_level) = ctx.parent().unwrap();
                 assert_eq!(parent_level, 1);
                 assert_eq!(parent.depth(), 1);
