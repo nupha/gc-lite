@@ -15,13 +15,13 @@ mod weak;
 mod xref;
 
 pub use {
-    gctype::{GcTypeInfo, GcTypeRegistry, drop_fn as gctype_drop, trace_fn as gctype_trace},
+    gctype::{GcTypeInfo, GcTypeRegistry, gctype_drop, gctype_trace},
     heap::GcHeap,
     helpers::{GcError, GcResult},
     node::{Gc, GcHead, GcNode, GcRef},
     partition::{GcPartition, GcPartitionId},
     scope::{GcScope, GcScopeStackId, GcScopeState},
-    trace::{GcTrace, GcTraceCtx},
+    trace::{GcTrace, GcTraceCtx, GcTraceFn},
     weak::GcWeak,
 };
 

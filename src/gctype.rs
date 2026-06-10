@@ -87,7 +87,7 @@ pub const fn layout_align_of<T>() -> usize {
     }
 }
 
-pub fn trace_fn<T: GcTrace>(node: NonNull<GcHead>, gcx: &mut GcTraceCtx) {
+pub fn gctype_trace<T: GcTrace>(node: NonNull<GcHead>, gcx: &mut GcTraceCtx) {
     unsafe {
         node.cast::<u8>()
             .add(payload_offset_of::<T>())
@@ -98,7 +98,7 @@ pub fn trace_fn<T: GcTrace>(node: NonNull<GcHead>, gcx: &mut GcTraceCtx) {
 }
 
 /// Generic dispose function, used to call drop_in_place of specific type
-pub fn drop_fn<T: GcNode>(data_ptr: *mut u8) {
+pub fn gctype_drop<T: GcNode>(data_ptr: *mut u8) {
     unsafe { std::ptr::drop_in_place(data_ptr.cast::<T>()) };
 }
 

@@ -5,6 +5,10 @@ use std::{collections::VecDeque, marker::PhantomData, ptr::NonNull};
 
 use crate::{GcHeap, GcNode, GcPartitionId, GcRef, node::GcHead};
 
+/// Gc trace function trait
+pub trait GcTraceFn: Fn(&mut GcTraceCtx) {}
+impl<C: Fn(&mut GcTraceCtx)> GcTraceFn for C {}
+
 pub trait GcTrace: 'static {
     /// Collect directly referenced children gc nodes
     fn trace(&self, gcx: &mut GcTraceCtx);
