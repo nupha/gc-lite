@@ -122,24 +122,40 @@ impl GcHeap {
         id
     }
 
-    /// Remove a partition, and dispose unused nodes.
-    pub fn remove_partition(
-        &mut self,
-        partition_id: GcPartitionId,
-        on_dispose: impl Fn(&GcHeap, &GcHead),
-    ) -> usize {
+    // ── Two-phase partition removal ──────────────────────────────────────
+    //
+    //  Phase 1 (finalize): takes &self, calls Drop on all node payloads without
+    //    deallocating memory. Drop implementations can safely access GcHeap
+    //    through a shared reference (e.g. &GcHeap), avoiding the aliasing
+    //    problem that existed in the single-phase remove_partition.
+    //
+    //  Phase 2 (dealloc):   takes &mut self, frees the memory of all finalized
+    //    nodes and removes the partition from the heap. No Drop callbacks run
+    //    at this point, so there is no risk of reentrant &mut self access.
+    //
+    //  remove_partition remains for backward compatibility and calls both
+    //    phases in sequence.
+
+    /// Phase 1: Finalize — call `Drop` on all node payloads without freeing memory.
+    ///
+    /// Only takes `&self`, so `Drop` implementations can safely access `GcHeap`
+    /// via a shared reference. Returns the node link containing all finalized
+    /// nodes, which must be passed to [`dealloc_partition`] to reclaim memory.
+    ///
+    /// Scope caches associated with this partition are cleared before any drops
+    /// are called, so that `GcScopeState::clear()` (which only touches node flags)
+    /// runs before payload drops.
+    pub fn finalize_partition(&self, partition_id: GcPartitionId) -> Option<GcNodeLink> {
         if partition_id.is_null() {
-            return 0;
+            return None;
         }
 
-        // Clear scope caches associated with this partition BEFORE disposing nodes.
-        // This prevents use-after-free when GcScopeState::clear() dereferences
-        // GC nodes that may be freed during dispose_all_nodes. The same guard
-        // already exists in GcHeap::drop.
-        //
+        let par = self.partitions.get(&partition_id)?;
+
+        // Clear scope caches associated with this partition BEFORE dropping nodes.
         // GcScopeState::clear() only touches node flags and does not access any
-        // GcHeap fields, so it is safe to call during remove_partition.
-        for stack in &mut self.scope_stacks {
+        // GcHeap fields, so it is safe to call during finalize_partition.
+        for stack in &self.scope_stacks {
             if stack.partition == Some(partition_id) {
                 for s in &stack.list {
                     s.clear();
@@ -147,40 +163,138 @@ impl GcHeap {
             }
         }
 
-        #[cfg(debug_assertions)]
-        {
-            self.dbg_dropping_root_partition = Some(partition_id);
+        log::trace!("[finalize_partition] {partition_id:?}");
+
+        // Clone the partition's node link so we can iterate without borrowing &self.
+        let link = par.nodes.clone();
+
+        // Process nodes by drop pass order.
+        // We iterate all nodes for each pass to respect inter-pass dependencies.
+        for &pass in self.node_dtypes.drop_passes {
+            for node in link.iter() {
+                let dtype = unsafe { node.as_ref().dtype() } as usize;
+                let info = &self.node_dtypes.type_info_list[dtype];
+                if info.drop_pass == pass {
+                    self.drop_node_payload_without_dealloc(node);
+                }
+            }
         }
 
-        log::trace!("[close_scope] {partition_id:?}");
+        Some(link)
+    }
 
+    /// Phase 2: Dealloc — free memory of all finalized nodes and remove the
+    /// partition from the heap.
+    ///
+    /// Takes `&mut self` — no `Drop` callbacks run at this point, so there is
+    /// no risk of reentrant `&mut self` access. The `link` must be the value
+    /// returned by [`finalize_partition`] for the same partition.
+    ///
+    /// Returns the total number of bytes freed.
+    pub fn dealloc_partition(
+        &mut self,
+        partition_id: GcPartitionId,
+        link: GcNodeLink,
+    ) -> usize {
+        debug_assert!(
+            !partition_id.is_null(),
+            "dealloc_partition: partition_id must not be null"
+        );
+
+        let par = match self.partitions.remove(&partition_id) {
+            Some(p) => p,
+            None => return 0,
+        };
+
+        let partition_mem = par.memory_used;
         let mut freed_bytes = 0;
 
-        if let Some(mut par) = self.partitions.remove(&partition_id) {
-            // Record partition memory before disposal; after remove() the partition
-            // is gone, so dispose() cannot find it via update_mem_use().
-            let partition_mem = par.memory_used;
-            let link = std::mem::take(&mut par.nodes);
-            freed_bytes += self.dispose_all_nodes(link, &on_dispose);
+        // Deallocate all finalized nodes in the link.
+        for node in link.iter() {
+            // Handle weak reference cleanup.
+            unsafe {
+                if !node.as_ref().weak_id.is_null() {
+                    let widx = node.as_ref().weak_id.index();
+                    debug_assert!(
+                        (widx as usize) < self.weak_slots.len(),
+                        "dealloc_partition: weak slot index {} out of bounds (len {})",
+                        widx,
+                        self.weak_slots.len(),
+                    );
+                    self.weak_slots.get_unchecked_mut(widx as usize).1.take();
+                }
+            }
 
-            // Reclaim partition-level memory from the global counter.
-            debug_assert!(
-                self.total_memory_used >= partition_mem,
-                "remove_partition: global memory underflow ({} < {})",
-                self.total_memory_used,
-                partition_mem,
-            );
-            self.total_memory_used -= partition_mem;
+            let dtype = unsafe { node.as_ref().dtype() } as usize;
+            let info = &self.node_dtypes.type_info_list[dtype];
+            let layout = info.layout();
+            let gross_size = layout.size();
+
+            #[cfg(debug_assertions)]
+            unsafe {
+                // Poison GcHead fields so any subsequent use-after-free is caught.
+                (*node.as_ptr()).attrs = 0xDEAD_BEEF;
+                (*node.as_ptr()).next = None;
+            }
+
+            self.mem_dealloc(node.cast::<u8>(), layout);
+            freed_bytes += gross_size;
         }
 
-        log::trace!("[close_scope_done] {partition_id:?}");
+        debug_assert!(
+            self.total_memory_used >= partition_mem,
+            "dealloc_partition: global memory underflow ({} < {})",
+            self.total_memory_used,
+            partition_mem,
+        );
+        self.total_memory_used -= partition_mem;
 
-        #[cfg(debug_assertions)]
-        {
-            self.dbg_dropping_root_partition = None;
-        }
+        log::trace!("[dealloc_partition] {partition_id:?}, freed {freed_bytes} bytes");
 
         freed_bytes
+    }
+
+    /// Remove a partition and reclaim all its memory.
+    ///
+    /// ⚠️ **DEPRECATED** — This method is inherently unsound. It holds `&mut self`
+    /// while `Drop` callbacks run inside [`finalize_partition`], and those
+    /// callbacks can re-enter `GcHeap` through raw pointers, creating aliasing
+    /// `&mut` references (UB).
+    ///
+    /// **Use the two-phase API instead:**
+    ///
+    /// ```ignore
+    /// let link = gc_heap.finalize_partition(pid);
+    /// // ... (Drop callbacks that access GcHeap are safe here) ...
+    /// if let Some(link) = link {
+    ///     gc_heap.dealloc_partition(pid, link);
+    /// }
+    /// ```
+    ///
+    /// See [`finalize_partition`] (takes `&self`) and [`dealloc_partition`]
+    /// (takes `&mut self`) for details.
+    ///
+    /// The `on_dispose` parameter is kept for API compatibility but is no
+    /// longer called — `Drop` is handled internally by `finalize_partition`.
+    #[deprecated(note = "unsound — use finalize_partition(&self) + dealloc_partition(&mut self) instead")]
+    pub fn remove_partition(
+        &mut self,
+        partition_id: GcPartitionId,
+        _on_dispose: impl Fn(&GcHeap, &GcHead),
+    ) -> usize {
+        let link = self.finalize_partition(partition_id);
+        link.map_or(0, |link| {
+            #[cfg(debug_assertions)]
+            {
+                self.dbg_dropping_root_partition = Some(partition_id);
+            }
+            let result = self.dealloc_partition(partition_id, link);
+            #[cfg(debug_assertions)]
+            {
+                self.dbg_dropping_root_partition = None;
+            }
+            result
+        })
     }
 
     /// Get partition information
@@ -223,10 +337,9 @@ mod tests {
         let partition = heap.partition(id).unwrap();
         assert_eq!(partition.memory_used(), 0);
 
-        // Clean up partition
-        heap.remove_partition(id, |_, n| {
-            println!("dispose: {n:?}");
-        });
+        // Clean up partition using two-phase API
+        let link = heap.finalize_partition(id).unwrap();
+        heap.dealloc_partition(id, link);
         assert!(heap.partition(id).is_none());
     }
 
@@ -302,8 +415,9 @@ mod tests {
         assert_eq!(heap.partition(p1).unwrap().memory_used(), 80);
         assert_eq!(heap.partition(p2).unwrap().memory_used(), 50);
 
-        // Clean up
-        heap.remove_partition(p1, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        // Clean up using two-phase API
+        let link = heap.finalize_partition(p1).unwrap();
+        heap.dealloc_partition(p1, link);
     }
 
     #[test]
@@ -335,8 +449,9 @@ mod tests {
         assert!(p1_used > 0, "partition memory_used should be > 0");
 
         // Remove p1 — all its nodes should be disposed and memory reclaimed
-        let freed = heap.remove_partition(p1, GcHeap::DUMMY_DISPOSE_CALLBACK);
-        assert!(freed > 0, "remove_partition should free some bytes");
+        let link1 = heap.finalize_partition(p1).unwrap();
+        let freed = heap.dealloc_partition(p1, link1);
+        assert!(freed > 0, "should free some bytes");
 
         // p1 is gone
         assert!(heap.partition(p1).is_none());
@@ -358,7 +473,8 @@ mod tests {
         );
 
         // Clean up p2
-        heap.remove_partition(p2, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        let link2 = heap.finalize_partition(p2).unwrap();
+        heap.dealloc_partition(p2, link2);
         assert_eq!(heap.memory_used(), 0, "all memory should be reclaimed");
     }
 }

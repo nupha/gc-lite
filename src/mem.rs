@@ -34,7 +34,7 @@ impl GcHeap {
         }
     }
 
-    fn mem_dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
+    pub(crate) fn mem_dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
         debug_assert_ne!(layout.size(), 0, "mem_dealloc: zero-sized layout");
 
         #[cfg(debug_assertions)]
@@ -230,5 +230,27 @@ impl GcHeap {
         self.update_mem_use(partition_id, -(gross_size as i32));
 
         gross_size
+    }
+
+    /// Call `Drop::drop` on a node's payload without deallocating memory.
+    ///
+    /// This is the Phase 1 operation in the two-phase partition removal design.
+    /// It only calls the type's `drop_fn` on the payload — no weak slot cleanup,
+    /// no memory deallocation, no memory accounting update. Those happen in
+    /// Phase 2 (`dealloc_partition`), which takes `&mut self`.
+    ///
+    /// # Safety
+    ///
+    /// - `node` must point to a valid, live GC node managed by `self`.
+    /// - After calling this, the node's payload is considered dropped and must
+    ///   not be accessed again (except for deallocation).
+    pub(crate) fn drop_node_payload_without_dealloc(&self, node: NonNull<GcHead>) {
+        let dtype = unsafe { node.as_ref().dtype() } as usize;
+        let info = &self.node_dtypes.type_info_list[dtype];
+        if let Some(f) = info.drop_fn {
+            unsafe {
+                f(info.payload_ptr(node).as_ptr());
+            }
+        }
     }
 }

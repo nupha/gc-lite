@@ -350,8 +350,9 @@ mod heap_tests {
             gross_size
         );
 
-        // Use remove_partition to cleanly dispose all nodes and reclaim memory
-        let freed = heap.remove_partition(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        // Use two-phase partition removal to cleanly dispose all nodes and reclaim memory
+        let link = heap.finalize_partition(id).unwrap();
+        let freed = heap.dealloc_partition(id, link);
         assert_eq!(freed, gross_size);
 
         let mem_after = heap.memory_used();
@@ -411,7 +412,8 @@ mod heap_tests {
         assert_eq!(par_mem_after_gc, par_mem_before + root_size);
 
         // Remove the partition to clean up remaining root node
-        let freed_rem = heap.remove_partition(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        let link = heap.finalize_partition(id).unwrap();
+        let freed_rem = heap.dealloc_partition(id, link);
         assert_eq!(freed_rem, root_size);
         assert_eq!(heap.memory_used(), mem_before);
     }
@@ -452,13 +454,15 @@ mod heap_tests {
         assert_eq!(total_after, total_before + p1_used + p2_used);
 
         // Remove p1 — p2 should be unaffected
-        let freed1 = heap.remove_partition(p1, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        let link1 = heap.finalize_partition(p1).unwrap();
+        let freed1 = heap.dealloc_partition(p1, link1);
         assert_eq!(freed1, p1_used);
         assert_eq!(heap.memory_used(), total_before + p2_used);
         assert_eq!(heap.partition(p2).unwrap().memory_used(), p2_used);
 
         // Remove p2
-        let freed2 = heap.remove_partition(p2, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        let link2 = heap.finalize_partition(p2).unwrap();
+        let freed2 = heap.dealloc_partition(p2, link2);
         assert_eq!(freed2, p2_used);
         assert_eq!(heap.memory_used(), total_before);
     }

@@ -5,9 +5,9 @@ use std::ptr::NonNull;
 
 use crate::{GcPartition, GcPartitionId, heap::GcHeap, node::GcHead};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 #[repr(transparent)]
-pub(crate) struct GcNodeLink {
+pub struct GcNodeLink {
     link_head: Option<NonNull<GcHead>>,
 }
 

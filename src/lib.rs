@@ -19,6 +19,7 @@ pub use {
     heap::GcHeap,
     helpers::{GcError, GcResult},
     node::{Gc, GcHead, GcNode, GcRef},
+    node_link::GcNodeLink,
     partition::{GcPartition, GcPartitionId},
     scope::{GcScope, GcScopeStackId, GcScopeState},
     trace::{GcTrace, GcTraceCtx, GcTraceFn},
