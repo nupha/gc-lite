@@ -12,83 +12,58 @@ use crate::{
 };
 
 impl GcHeap {
-    fn seed_cross_partition_incoming_refs(&mut self, partition_id: GcPartitionId) {
-        let source_ids = self.partition_ids();
-        let mut gcx = self.create_trace_ctx(64);
-        let mut incoming = Vec::new();
-
-        for source_pid in source_ids {
-            if source_pid != partition_id {
-                for node in self.nodes(source_pid) {
-                    gcx.traced_nodes.clear();
-                    self.trace_node(node, &mut gcx);
-
-                    while let Some(child) = gcx.traced_nodes.pop() {
-                        if unsafe { child.as_ref().partition_id() } == partition_id {
-                            incoming.push(child);
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(par) = self.partition_mut(partition_id) {
-            for child in incoming {
-                par.add_gray_node(child);
-            }
-        }
-    }
-
     pub fn add_gray_node(&mut self, node: NonNull<GcHead>) {
         if unsafe { node.as_ref().color() } != GcTriColor::Black {
-            self.partition_mut(unsafe { node.as_ref().partition_id() })
-                .unwrap()
-                .add_gray_node(node);
+            let pid = unsafe { node.as_ref().partition_id() };
+            self.partitions[pid.0 as usize].add_gray_node(node);
         }
     }
 
     /// Check whether the partition that `node` belongs to is currently marking.
     #[inline]
     pub(crate) unsafe fn is_node_partition_marking<T: GcNode>(&self, node: GcRef<T>) -> bool {
-        let pid = unsafe { node.node_info().partition_id() };
-        self.partition(pid).is_some_and(|p| p.is_marking())
+        let pid = unsafe { node.head_ptr.as_ref().partition_id() };
+        self.partitions[pid.0 as usize].is_marking()
     }
 
     pub fn mark_reset(&mut self, partition_id: GcPartitionId) {
-        if let Some(par) = self.partition_mut(partition_id) {
-            par.set_marking(false);
+        let par = &mut self.partitions[partition_id.0 as usize];
+        par.set_marking(false);
 
-            // Drain gray list and clear flags so stale GRAY_LISTED bits
-            // don't affect the next marking cycle.
-            for mut n in par.gray_list.drain(..) {
-                unsafe {
-                    n.as_mut().set_gray_listed(false);
-                }
+        // Drain gray list and clear flags so stale GRAY_LISTED bits
+        // don't affect the next marking cycle.
+        for mut n in par.gray_list.drain(..) {
+            unsafe {
+                n.as_mut().set_gray_listed(false);
             }
+        }
 
-            for n in par.nodes_mut() {
-                n.set_color(GcTriColor::White);
-            }
+        for n in par.nodes_mut() {
+            n.set_color(GcTriColor::White);
         }
     }
 
-    /// Prepare a partition for a new mark cycle.
-    ///
-    /// If the partition is already marking, this is a no-op.
-    /// Otherwise, resets all nodes to White and marks root/LOCAL nodes as Gray.
-    /// Any nodes already in the gray list (e.g., from with_write_barrier or
-    /// cross-partition references) are preserved rather than cleared.
     pub fn mark_prepare(&mut self, partition_id: GcPartitionId) {
-        if let Some(par) = self.partitions.get_mut(&partition_id)
-            && !par.is_marking()
-        {
-            par.set_marking(true);
+        if (partition_id.0 as usize) >= self.partitions.len() {
+            return;
+        }
 
-            // If the gray list is non-empty (e.g., nodes were added by
-            // with_write_barrier before this partition started marking, or
-            // pushed from cross-partition references), preserve them and
-            // only add root/LOCAL nodes that are not already present.
-            let has_pending_grays = !par.gray_list.is_empty();
+        // If the target partition is already marking, no-op (its gray_list
+        // is being processed by mark_grays).
+        if self.partitions[partition_id.0 as usize].is_marking() {
+            return;
+        }
+
+        // Set ALL partitions to marking mode so that cross-partition
+        // references can be pushed into any partition's gray_list.
+        for par in &mut self.partitions {
+            par.set_marking(true);
+        }
+
+        // Seed roots from ALL partitions.
+        for i in 0..self.partitions.len() {
+            let has_pending_grays = !self.partitions[i].gray_list.is_empty();
+            let par = &mut self.partitions[i];
 
             for mut n in par.nodes.iter() {
                 let node = unsafe { n.as_mut() };
@@ -117,10 +92,6 @@ impl GcHeap {
                 }
             }
         }
-
-        if self.partition(partition_id).is_some_and(|p| p.is_marking()) {
-            self.seed_cross_partition_incoming_refs(partition_id);
-        }
     }
 
     pub fn mark_grays(&mut self, partition_id: GcPartitionId, max_steps: usize) -> bool {
@@ -129,37 +100,37 @@ impl GcHeap {
         }
 
         // Pre-acquire the opaque pointer and type registry so we don't need &self
-        // while holding a mutable borrow on a partition.
+        // while holding a mutable borrow on the partition.
         let opaque = self.opaque();
         let node_dtypes: *const crate::gctype::GcTypeRegistry = self.node_dtypes;
 
-        if let Some(par) = self.partitions.get_mut(&partition_id)
-            && !par.gray_list.is_empty()
+        if !self.partitions[partition_id.0 as usize]
+            .gray_list
+            .is_empty()
         {
             let mut gcx = GcTraceCtx {
                 traced_nodes: Vec::with_capacity(64),
                 opaque,
                 _mark: std::marker::PhantomData,
             };
-            let mut cnt = 0;
-            // Buffer for cross-partition gray nodes: (node_ptr, target_partition_id)
-            let mut cross_nodes: Vec<(NonNull<GcHead>, GcPartitionId)> = Vec::new();
 
-            while let Some(mut node_ptr) = par.gray_list.pop() {
+            // Buffer for children that need to be pushed to a different
+            // partition's gray_list (avoids borrow-checker conflicts when
+            // indexing self.partitions at different indices).
+            let mut cross_buffer: Vec<(u16, NonNull<GcHead>)> = Vec::with_capacity(8);
+            let mut cnt = 0;
+
+            while let Some(mut node_ptr) = self.partitions[partition_id.0 as usize].gray_list.pop()
+            {
                 let node = unsafe { node_ptr.as_mut() };
                 // Clear gray_listed flag when popping (O(1) instead of O(n) contains)
                 node.set_gray_listed(false);
-                debug_assert_eq!(
-                    node.partition_id(),
-                    partition_id,
-                    "mark_grays: node partition {} does not match expected partition {}",
-                    node.partition_id().0,
-                    partition_id.0,
-                );
 
                 if node.color() == GcTriColor::Gray {
                     if cnt >= max_steps {
-                        par.gray_list.push(node_ptr);
+                        self.partitions[partition_id.0 as usize]
+                            .gray_list
+                            .push(node_ptr);
                         return false;
                     }
 
@@ -183,41 +154,32 @@ impl GcHeap {
                         #[cfg(debug_assertions)]
                         child.debug_assert_node_valid_simple();
 
-                        let pid = child.partition_id();
-                        if pid == partition_id {
-                            if matches!(child.color(), GcTriColor::White | GcTriColor::Gray) {
-                                child.set_color(GcTriColor::Gray);
-                                child.set_gray_listed(true);
-                                par.gray_list.push(ch);
+                        if matches!(child.color(), GcTriColor::White | GcTriColor::Gray) {
+                            child.set_color(GcTriColor::Gray);
+                            child.set_gray_listed(true);
+
+                            let child_pid = child.partition_id();
+                            if child_pid == partition_id {
+                                // Same partition: push directly
+                                self.partitions[partition_id.0 as usize].gray_list.push(ch);
+                            } else {
+                                // Cross-partition child: buffer and push after
+                                // the inner loop so we don't contend with the
+                                // while-let borrow on self.partitions[pid].
+                                cross_buffer.push((child_pid.0, ch));
                             }
-                        } else if matches!(child.color(), GcTriColor::White | GcTriColor::Gray) {
-                            // Cross-partition references are processed after the current
-                            // partition borrow ends. If the target partition is actively
-                            // marking, enqueue the child there as well.
-                            cross_nodes.push((ch, pid));
                         }
+                    }
+
+                    // Flush cross-partition children to their own partitions
+                    for (cpid, node) in cross_buffer.drain(..) {
+                        self.partitions[cpid as usize].gray_list.push(node);
                     }
 
                     // Mark current node as black.
                     node.set_color(GcTriColor::Black);
 
                     cnt += 1;
-                }
-            }
-
-            // Flush cross-partition gray nodes into their target partitions.
-            // This is done after releasing the mutable borrow on `par`.
-            for (mut node, pid) in cross_nodes {
-                if let Some(p2) = self.partition_mut(pid)
-                    && p2.is_marking()
-                {
-                    unsafe {
-                        if !node.as_ref().is_gray_listed() {
-                            node.as_mut().set_gray_listed(true);
-                            node.as_mut().set_color(GcTriColor::Gray);
-                            p2.gray_list.push(node);
-                        }
-                    }
                 }
             }
         }
@@ -241,14 +203,18 @@ impl GcHeap {
         partition_id: GcPartitionId,
         on_dispose: impl Fn(&GcHeap, &GcHead),
     ) -> usize {
-        if let Some(link0) = self.partition_mut(partition_id).and_then(|p| {
-            if p.is_marking() && p.gray_list.is_empty() {
-                p.set_marking(false);
-                std::mem::take(&mut p.nodes).into_inner()
+        if (partition_id.0 as usize) >= self.partitions.len() {
+            return 0;
+        }
+        if let Some(link0) = {
+            let par = &mut self.partitions[partition_id.0 as usize];
+            if par.is_marking() && par.gray_list.is_empty() {
+                par.set_marking(false);
+                std::mem::take(&mut par.nodes).into_inner()
             } else {
                 None // mark cycle not done
             }
-        }) {
+        } {
             #[cfg(debug_assertions)]
             for n in NodeLinkIter::new(Some(link0)) {
                 unsafe {
@@ -305,8 +271,7 @@ impl GcHeap {
             }
 
             debug_assert!(
-                self.partition_mut(partition_id)
-                    .unwrap()
+                self.partitions[partition_id.0 as usize]
                     .gray_list
                     .is_empty()
             );
@@ -324,8 +289,8 @@ impl GcHeap {
                     }
                 }
 
-                let p = self.partition_mut(partition_id).unwrap();
-                p.nodes = crate::node_link::GcNodeLink::new(link1);
+                self.partitions[partition_id.0 as usize].nodes =
+                    crate::node_link::GcNodeLink::new(link1);
             }
 
             // Memory accounting is already handled by dispose() which calls
@@ -503,10 +468,7 @@ mod sweep_test {
         assert_eq!(count_nodes_in_partition(&heap, partition_id), 2);
 
         // Verify chain head is now the node with value 4
-        let head = heap
-            .partitions
-            .get(&partition_id)
-            .and_then(|p| p.nodes.head());
+        let head = heap.partitions[partition_id.0 as usize].nodes.head();
         assert!(head.is_some(), "Chain head should exist");
 
         unsafe {
@@ -557,10 +519,7 @@ mod sweep_test {
         assert_eq!(count_nodes_in_partition(&heap, partition_id), 0);
 
         // Chain head should be None
-        let head = heap
-            .partitions
-            .get(&partition_id)
-            .and_then(|p| p.nodes.head());
+        let head = heap.partitions[partition_id.0 as usize].nodes.head();
         assert!(
             head.is_none(),
             "Chain head should be None after removing all nodes"

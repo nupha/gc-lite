@@ -199,17 +199,6 @@ impl GcHead {
         GcPartitionId((self.partition & 0x0000_FFFF) as u16)
     }
 
-    #[inline(always)]
-    pub(crate) fn set_partition_id(&mut self, id: GcPartitionId) {
-        debug_assert!(
-            self.partition_id().is_null() || self.partition_id() == id,
-            "set_partition_id: node already belongs to partition {}, cannot reassign to {}",
-            self.partition_id().0,
-            id.0,
-        );
-        self.partition = (self.partition & 0xFFFF_0000) | id.0 as u32;
-    }
-
     /// Get raw pointer to payload data using the heap's type registry.
     #[inline(always)]
     pub fn payload(&self, registry: &GcTypeRegistry) -> NonNull<u8> {
@@ -634,7 +623,7 @@ impl GcHeap {
             let master_pid = master.as_ref().partition_id();
             let slave_pid = slave.as_ref().partition_id();
 
-            if master_pid != slave_pid && !slave_pid.is_null() && !master_pid.is_null() {
+            if master_pid != slave_pid {
                 let slave_color = slave.as_ref().color();
 
                 if matches!(slave_color, GcTriColor::White | GcTriColor::Gray)

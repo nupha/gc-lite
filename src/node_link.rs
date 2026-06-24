@@ -107,11 +107,7 @@ impl<'a> Iterator for NodeLinkIter<'a> {
 impl GcHeap {
     #[inline]
     pub fn nodes(&self, partition_id: GcPartitionId) -> NodeLinkIter<'_> {
-        NodeLinkIter::new(
-            self.partitions
-                .get(&partition_id)
-                .and_then(|p| p.nodes.head()),
-        )
+        NodeLinkIter::new(self.partitions[partition_id.0 as usize].nodes.head())
     }
 }
 

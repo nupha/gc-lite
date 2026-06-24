@@ -67,10 +67,6 @@ impl<'s> GcScopeState<'s> {
         partition_id: GcPartitionId,
     ) -> Self {
         debug_assert!(
-            !partition_id.is_null(),
-            "GcScopeState partition_id must not be null"
-        );
-        debug_assert!(
             (stack_id.0 as usize) < heap.scope_stacks.len(),
             "GcScopeState stack_id {} out of bounds (max {})",
             stack_id.0,
@@ -406,11 +402,7 @@ impl GcHeap {
     ///
     /// Caller must ensure `index < scope_max_depth(stack_id)`.
     #[inline(always)]
-    pub unsafe fn scope_unchecked(
-        &self,
-        stack_id: GcScopeStackId,
-        index: u8,
-    ) -> &GcScopeState<'_> {
+    pub unsafe fn scope_unchecked(&self, stack_id: GcScopeStackId, index: u8) -> &GcScopeState<'_> {
         debug_assert!(
             (index as usize) < self.scope_stacks[stack_id.0 as usize].list.len(),
             "scope_unchecked: index {index} out of bounds for stack {} (len {})",

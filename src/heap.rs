@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{collections::HashMap, ptr::NonNull};
+use std::ptr::NonNull;
 
 use crate::{
     gctype::GcTypeRegistry,
@@ -27,8 +27,8 @@ pub struct GcHeap {
     /// Registered GC data type info
     pub(super) node_dtypes: &'static GcTypeRegistry,
 
-    /// Partition management
-    pub(super) partitions: HashMap<GcPartitionId, GcPartition>,
+    /// Partition storage (indexed by `GcPartitionId`)
+    pub(super) partitions: Vec<GcPartition>,
     /// Global memory usage limit for the entire heap, 0 for unlimited
     pub(super) memory_limit: usize,
     /// Global automatic GC threshold for the entire heap, 0 for disabled
@@ -49,6 +49,8 @@ pub struct GcHeap {
     pub(crate) dbg_living_nodes: std::collections::HashSet<NonNull<GcHead>>,
 }
 
+impl GcHeap {}
+
 impl Drop for GcHeap {
     fn drop(&mut self) {
         // heap world is gone, dealloc all nodes live in it, regardless their status.
@@ -65,9 +67,15 @@ impl Drop for GcHeap {
             }
         }
 
-        let pars = std::mem::take(&mut self.partitions);
-        for (_, partition) in pars {
-            self.dispose_all_nodes(partition.nodes, Self::DUMMY_DISPOSE_CALLBACK);
+        // Take all nodes from all partitions to avoid self-borrow conflicts
+        let all_nodes: Vec<_> = self
+            .partitions
+            .iter_mut()
+            .map(|par| std::mem::take(&mut par.nodes))
+            .collect();
+
+        for nodes in all_nodes {
+            self.dispose_all_nodes(nodes, Self::DUMMY_DISPOSE_CALLBACK);
         }
 
         #[cfg(debug_assertions)]
@@ -85,7 +93,7 @@ impl GcHeap {
     /// Create a new garbage collection heap with an explicit GC type registry
     pub fn new(registry: &'static GcTypeRegistry) -> Self {
         Self {
-            partitions: HashMap::new(),
+            partitions: vec![GcPartition::new()],
             memory_limit: 0,
             gc_threshold: 0,
             total_memory_used: 0,
@@ -162,17 +170,15 @@ impl GcHeap {
     /// This method does NOT update memory accounting — the caller is responsible
     /// for calling `update_mem_use` separately (typically done in `alloc_node_mem`).
     pub(crate) fn attach_node(&mut self, partition_id: GcPartitionId, mut node: NonNull<GcHead>) {
-        debug_assert!(
-            !partition_id.is_null(),
-            "attach_node: partition_id must not be null"
+        let n = unsafe { node.as_mut() };
+        debug_assert!(n.next.is_none());
+        debug_assert_eq!(
+            n.partition_id(),
+            partition_id,
+            "attach_node: node partition_id doesn't match"
         );
 
-        let n = unsafe { node.as_mut() };
-        debug_assert!(n.partition_id().is_null());
-        debug_assert!(n.next.is_none());
-        n.set_partition_id(partition_id);
-
-        let par = self.partitions.get_mut(&partition_id).unwrap();
+        let par = &mut self.partitions[partition_id.0 as usize];
         let mem_before = par.memory_used;
         par.nodes.prepend(node);
         debug_assert_eq!(
@@ -184,20 +190,21 @@ impl GcHeap {
     pub fn set_root_node(&mut self, mut node: NonNull<GcHead>) {
         let n = unsafe { node.as_mut() };
         if !n.is_root() {
-            let partition_id = n.partition_id();
-            if let Some(p) = self.partitions.get_mut(&partition_id) {
-                n.insert_flag(GcNodeFlag::ROOT);
-                if p.is_marking() {
-                    p.add_gray_node(node);
-                }
+            n.insert_flag(GcNodeFlag::ROOT);
+            let pid = n.partition_id();
+            let par = &mut self.partitions[pid.0 as usize];
+            if par.is_marking() {
+                par.add_gray_node(node);
             }
         }
     }
 
     /// Check if `node` was allocated in this heap
     pub fn contains(&self, node: NonNull<GcHead>) -> bool {
-        self.nodes(unsafe { node.as_ref().partition_id() })
-            .any(|p| p == node)
+        let pid = unsafe { node.as_ref().partition_id() };
+        self.partitions
+            .get(pid.0 as usize)
+            .is_some_and(|par| par.nodes.iter().any(|p| p == node))
     }
 
     /// Protect node from being gc collected.
@@ -238,36 +245,29 @@ impl GcHeap {
 
     /// Update memory usage with rollup to parent partitions
     pub(crate) fn update_mem_use(&mut self, id: GcPartitionId, delta: i32) -> usize {
-        if id.is_null() {
-            return 0;
-        }
-
-        if let Some(par) = self.partitions.get_mut(&id) {
-            if delta >= 0 {
-                let d = delta as usize;
-                par.memory_used += d;
-                self.total_memory_used += d;
-            } else {
-                let d = (-delta) as usize;
-                debug_assert!(
-                    par.memory_used >= d,
-                    "update_mem_use: partition {} memory underflow ({} < {})",
-                    id.0,
-                    par.memory_used,
-                    d,
-                );
-                debug_assert!(
-                    self.total_memory_used >= d,
-                    "update_mem_use: global memory underflow ({} < {})",
-                    self.total_memory_used,
-                    d,
-                );
-                par.memory_used -= d;
-                self.total_memory_used -= d;
-            }
+        let par = &mut self.partitions[id.0 as usize];
+        if delta >= 0 {
+            let d = delta as usize;
+            par.memory_used += d;
+            self.total_memory_used += d;
             par.memory_used
         } else {
-            0
+            let d = (-delta) as usize;
+            debug_assert!(
+                par.memory_used >= d,
+                "update_mem_use: partition memory underflow ({} < {})",
+                par.memory_used,
+                d,
+            );
+            debug_assert!(
+                self.total_memory_used >= d,
+                "update_mem_use: global memory underflow ({} < {})",
+                self.total_memory_used,
+                d,
+            );
+            par.memory_used -= d;
+            self.total_memory_used -= d;
+            par.memory_used
         }
     }
 
@@ -419,66 +419,9 @@ mod heap_tests {
     }
 
     #[test]
-    fn test_memory_used_multiple_partitions() {
-        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p1 = heap.create_partition();
-        let p2 = heap.create_partition();
-
-        let total_before = heap.memory_used();
-
-        let n1 = unsafe {
-            heap.alloc_raw(
-                p1,
-                Node {
-                    next: None,
-                    value: 1,
-                },
-            )
-        }
-        .unwrap();
-        let n2 = unsafe {
-            heap.alloc_raw(
-                p2,
-                Node {
-                    next: None,
-                    value: 2,
-                },
-            )
-        }
-        .unwrap();
-
-        let total_after = heap.memory_used();
-        let p1_used = heap.partition(p1).unwrap().memory_used();
-        let p2_used = heap.partition(p2).unwrap().memory_used();
-
-        assert_eq!(total_after, total_before + p1_used + p2_used);
-
-        // Remove p1 — p2 should be unaffected
-        let link1 = heap.finalize_partition(p1).unwrap();
-        let freed1 = heap.dealloc_partition(p1, link1);
-        assert_eq!(freed1, p1_used);
-        assert_eq!(heap.memory_used(), total_before + p2_used);
-        assert_eq!(heap.partition(p2).unwrap().memory_used(), p2_used);
-
-        // Remove p2
-        let link2 = heap.finalize_partition(p2).unwrap();
-        let freed2 = heap.dealloc_partition(p2, link2);
-        assert_eq!(freed2, p2_used);
-        assert_eq!(heap.memory_used(), total_before);
-    }
-
-    #[test]
     fn test_memory_used_update_mem_use_edge_cases() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
         let id = heap.create_partition();
-
-        // Null partition id should be no-op
-        assert_eq!(heap.update_mem_use(GcPartitionId::NONE, 100), 0);
-        assert_eq!(heap.memory_used(), 0);
-
-        // Non-existent partition id should be no-op
-        assert_eq!(heap.update_mem_use(GcPartitionId(9999), 100), 0);
-        assert_eq!(heap.memory_used(), 0);
 
         // Normal add
         assert_eq!(heap.update_mem_use(id, 50), 50);

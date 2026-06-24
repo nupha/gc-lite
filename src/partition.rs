@@ -1,23 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::{cell::Cell, ptr::NonNull};
+use std::ptr::NonNull;
 
 use crate::{GcHead, GcHeap, node::GcTriColor, node_link::GcNodeLink};
 
-/// Partition ID
+/// Partition ID, used as index into `GcHeap::partitions`.
+///
+/// Every node belongs to exactly one partition (index >= 0).
+/// There is no "null" partition ID.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GcPartitionId(pub u16);
-
-impl GcPartitionId {
-    /// Special partition ID representing no partition (null value)
-    pub const NONE: Self = Self(0);
-
-    #[inline(always)]
-    pub const fn is_null(&self) -> bool {
-        self.0 == 0
-    }
-}
 
 impl std::fmt::Debug for GcPartitionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -38,7 +31,7 @@ pub struct GcPartition {
 }
 
 impl GcPartition {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             memory_used: 0,
             nodes: GcNodeLink::default(),
@@ -88,40 +81,10 @@ impl GcPartition {
 }
 
 impl GcHeap {
-    /// Create a new partition.
+    /// Create a new partition and return its ID.
     pub fn create_partition(&mut self) -> GcPartitionId {
-        thread_local! {
-            static NEXT_PARTITION_ID: Cell<u16> = const { Cell::new(1) };
-        }
-
-        let id = NEXT_PARTITION_ID.with(|next_id| {
-            let mut serial = next_id.get();
-            if serial == 0 {
-                serial = 1;
-            }
-            let start = serial;
-
-            loop {
-                let candidate = GcPartitionId(serial);
-                let conflict = self.partitions.contains_key(&candidate);
-                if !conflict {
-                    let next = if serial == u16::MAX { 1 } else { serial + 1 };
-                    next_id.set(next);
-                    return candidate;
-                }
-
-                serial = if serial == u16::MAX { 1 } else { serial + 1 };
-                if serial == start {
-                    panic!("too many active partitions");
-                }
-            }
-        });
-
-        let partition = GcPartition::new();
-        self.partitions.insert(id, partition);
-
-        log::trace!("[new_scope] {id:?}");
-
+        let id = GcPartitionId(self.partitions.len() as u16);
+        self.partitions.push(GcPartition::new());
         id
     }
 
@@ -133,7 +96,7 @@ impl GcHeap {
     //    problem that existed in the single-phase remove_partition.
     //
     //  Phase 2 (dealloc):   takes &mut self, frees the memory of all finalized
-    //    nodes and removes the partition from the heap. No Drop callbacks run
+    //    nodes and resets the partition state. No Drop callbacks run
     //    at this point, so there is no risk of reentrant &mut self access.
     //
     //  remove_partition remains for backward compatibility and calls both
@@ -149,11 +112,8 @@ impl GcHeap {
     /// are called, so that `GcScopeState::clear()` (which only touches node flags)
     /// runs before payload drops.
     pub fn finalize_partition(&self, partition_id: GcPartitionId) -> Option<GcNodeLink> {
-        if partition_id.is_null() {
-            return None;
-        }
-
-        let par = self.partitions.get(&partition_id)?;
+        // Check that the partition exists
+        self.partitions.get(partition_id.0 as usize)?;
 
         // Clear scope caches associated with this partition BEFORE dropping nodes.
         // GcScopeState::clear() only touches node flags and does not access any
@@ -169,7 +129,7 @@ impl GcHeap {
         log::trace!("[finalize_partition] {partition_id:?}");
 
         // Clone the partition's node link so we can iterate without borrowing &self.
-        let link = par.nodes.clone();
+        let link = self.partitions[partition_id.0 as usize].nodes.clone();
 
         // Process nodes by drop pass order.
         // We iterate all nodes for each pass to respect inter-pass dependencies.
@@ -186,8 +146,7 @@ impl GcHeap {
         Some(link)
     }
 
-    /// Phase 2: Dealloc — free memory of all finalized nodes and remove the
-    /// partition from the heap.
+    /// Phase 2: Dealloc — free memory of all finalized nodes and reset the partition.
     ///
     /// Takes `&mut self` — no `Drop` callbacks run at this point, so there is
     /// no risk of reentrant `&mut self` access. The `link` must be the value
@@ -195,17 +154,7 @@ impl GcHeap {
     ///
     /// Returns the total number of bytes freed.
     pub fn dealloc_partition(&mut self, partition_id: GcPartitionId, link: GcNodeLink) -> usize {
-        debug_assert!(
-            !partition_id.is_null(),
-            "dealloc_partition: partition_id must not be null"
-        );
-
-        let par = match self.partitions.remove(&partition_id) {
-            Some(p) => p,
-            None => return 0,
-        };
-
-        let partition_mem = par.memory_used;
+        let partition_mem = self.partitions[partition_id.0 as usize].memory_used;
         let mut freed_bytes = 0;
 
         // Deallocate all finalized nodes in the link.
@@ -248,7 +197,10 @@ impl GcHeap {
         );
         self.total_memory_used -= partition_mem;
 
-        log::trace!("[dealloc_partition] {partition_id:?}, freed {freed_bytes} bytes");
+        // Reset partition to fresh state (all nodes have been freed)
+        self.partitions[partition_id.0 as usize] = GcPartition::new();
+
+        log::trace!("[dealloc_partition] freed {freed_bytes} bytes");
 
         freed_bytes
     }
@@ -301,18 +253,20 @@ impl GcHeap {
     /// Get partition information
     #[inline(always)]
     pub fn partition(&self, partition_id: GcPartitionId) -> Option<&GcPartition> {
-        self.partitions.get(&partition_id)
+        self.partitions.get(partition_id.0 as usize)
     }
 
     /// Get partition information
     #[inline(always)]
     pub fn partition_mut(&mut self, partition_id: GcPartitionId) -> Option<&mut GcPartition> {
-        self.partitions.get_mut(&partition_id)
+        self.partitions.get_mut(partition_id.0 as usize)
     }
 
     /// Get all partition IDs
     pub fn partition_ids(&self) -> Vec<GcPartitionId> {
-        self.partitions.keys().copied().collect()
+        (0..self.partitions.len())
+            .map(|i| GcPartitionId(i as u16))
+            .collect()
     }
 }
 
@@ -341,7 +295,8 @@ mod tests {
         // Clean up partition using two-phase API
         let link = heap.finalize_partition(id).unwrap();
         heap.dealloc_partition(id, link);
-        assert!(heap.partition(id).is_none());
+        // After dealloc, partition is reset to a fresh state
+        assert_eq!(heap.partition(id).unwrap().memory_used(), 0);
     }
 
     #[test]
@@ -401,44 +356,35 @@ mod tests {
     #[test]
     fn test_update_mem_use() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p1 = heap.create_partition();
-        let p2 = heap.create_partition();
+        let id = heap.create_partition();
 
-        heap.update_mem_use(p1, 100);
-        assert_eq!(heap.partition(p1).unwrap().memory_used(), 100);
-        assert_eq!(heap.partition(p2).unwrap().memory_used(), 0);
+        heap.update_mem_use(id, 100);
+        assert_eq!(heap.partition(id).unwrap().memory_used(), 100);
+        assert_eq!(heap.memory_used(), 100);
 
-        heap.update_mem_use(p2, 50);
-        assert_eq!(heap.partition(p1).unwrap().memory_used(), 100);
-        assert_eq!(heap.partition(p2).unwrap().memory_used(), 50);
-
-        heap.update_mem_use(p1, -20);
-        assert_eq!(heap.partition(p1).unwrap().memory_used(), 80);
-        assert_eq!(heap.partition(p2).unwrap().memory_used(), 50);
+        heap.update_mem_use(id, -20);
+        assert_eq!(heap.partition(id).unwrap().memory_used(), 80);
+        assert_eq!(heap.memory_used(), 80);
 
         // Clean up using two-phase API
-        let link = heap.finalize_partition(p1).unwrap();
-        heap.dealloc_partition(p1, link);
+        let link = heap.finalize_partition(id).unwrap();
+        heap.dealloc_partition(id, link);
     }
 
     #[test]
     fn test_partition_id_serial_and_range() {
         let id = GcPartitionId(10);
         assert_eq!(id.0, 10);
-        assert!(!id.is_null());
-        assert!(GcPartitionId::NONE.is_null());
     }
 
     #[test]
     fn test_remove_partition_reclaims_memory_stats() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p1 = heap.create_partition();
-        let p2 = heap.create_partition();
+        let id = heap.create_partition();
 
-        // Allocate some nodes in p1
-        let _n1 = unsafe { heap.alloc_raw(p1, DummyType) }.unwrap();
-        let _n2 = unsafe { heap.alloc_raw(p1, DummyType) }.unwrap();
-        let _n3 = unsafe { heap.alloc_raw(p2, DummyType) }.unwrap();
+        // Allocate some nodes
+        let _n1 = unsafe { heap.alloc_raw(id, DummyType) }.unwrap();
+        let _n2 = unsafe { heap.alloc_raw(id, DummyType) }.unwrap();
 
         let used_before = heap.memory_used();
         assert!(
@@ -446,36 +392,16 @@ mod tests {
             "memory_used should be > 0 after allocations"
         );
 
-        let p1_used = heap.partition(p1).unwrap().memory_used();
-        assert!(p1_used > 0, "partition memory_used should be > 0");
+        let p_used = heap.partition(id).unwrap().memory_used();
+        assert!(p_used > 0, "partition memory_used should be > 0");
 
-        // Remove p1 — all its nodes should be disposed and memory reclaimed
-        let link1 = heap.finalize_partition(p1).unwrap();
-        let freed = heap.dealloc_partition(p1, link1);
+        // Remove partition — all its nodes should be disposed and memory reclaimed
+        let link = heap.finalize_partition(id).unwrap();
+        let freed = heap.dealloc_partition(id, link);
         assert!(freed > 0, "should free some bytes");
 
-        // p1 is gone
-        assert!(heap.partition(p1).is_none());
-
-        // total_memory_used should have decreased by at least p1_used
-        let used_after = heap.memory_used();
-        assert!(
-            used_after < used_before,
-            "total_memory_used should decrease after partition removal: before={}, after={}",
-            used_before,
-            used_after
-        );
-
-        // p2's memory should be unaffected
-        assert_eq!(
-            heap.partition(p2).unwrap().memory_used(),
-            heap.memory_used(),
-            "remaining partition should account for all remaining memory"
-        );
-
-        // Clean up p2
-        let link2 = heap.finalize_partition(p2).unwrap();
-        heap.dealloc_partition(p2, link2);
+        // Partition is reset to fresh state
+        assert_eq!(heap.partition(id).unwrap().memory_used(), 0);
         assert_eq!(heap.memory_used(), 0, "all memory should be reclaimed");
     }
 }

@@ -97,7 +97,7 @@ impl GcHeap {
 
                 let node_info = GcHead {
                     attrs: { 0xFF00_0000 | ((gc_type as u32) << 8) },
-                    partition: 0,
+                    partition: partition_id.0 as u32,
                     weak_id: GcWeakRawId::NULL,
                     next: None,
 

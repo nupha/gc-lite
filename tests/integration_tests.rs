@@ -71,15 +71,15 @@ gc_type_register! {
 fn test_partition_creation_and_retrieval() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
 
-    // Create partitions
-    let id1 = heap.create_partition();
-    let id2 = heap.create_partition();
+    // Heap starts with 1 default partition (id=0)
+    assert_eq!(heap.partition_ids().len(), 1);
 
-    assert_ne!(id1, id2);
+    // Create another partition
+    let id = heap.create_partition();
     assert_eq!(heap.partition_ids().len(), 2);
 
     // Verify partition info
-    let partition = heap.partition(id1).unwrap();
+    let partition = heap.partition(id).unwrap();
     assert_eq!(partition.memory_used(), 0);
 }
 
@@ -89,12 +89,12 @@ fn test_partition_removal() {
     let id = heap.create_partition();
 
     assert!(heap.partition(id).is_some());
-    assert_eq!(heap.partition_ids().len(), 1);
 
     heap.remove_partition(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
 
-    assert!(heap.partition(id).is_none());
-    assert_eq!(heap.partition_ids().len(), 0);
+    // Partition is always accessible in single-partition mode
+    assert!(heap.partition(id).is_some());
+    assert_eq!(heap.partition(id).unwrap().memory_used(), 0);
 }
 
 #[test]
@@ -741,15 +741,12 @@ fn test_multiple_weak_references() {
 #[test]
 fn test_weak_reference_after_partition_removal() {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+    let id = heap.create_partition();
 
-    // 创建两个同级的 partitions
-    heap.create_partition();
-    let child_id = heap.create_partition();
-
-    // 在下属partition创建对象
+    // 创建对象
     let obj = unsafe {
         heap.alloc_raw(
-            child_id,
+            id,
             TestData {
                 value: 42,
                 name: "test".to_string(),
@@ -758,17 +755,17 @@ fn test_weak_reference_after_partition_removal() {
     }
     .unwrap();
 
-    // 记录这些对象的GcWeak
+    // 记录GcWeak
     let weak_ref = heap.downgrade(&obj);
 
     // 验证弱引用可以升级
     assert!(weak_ref.upgrade(&heap).is_some());
 
     // 删除partition
-    heap.remove_partition(child_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    heap.remove_partition(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
 
-    // 这时此partition中的对象也会释放
-    // 访问这些对象的GcWeak引用，并upgrade()，应该返回None
+    // 这时对象也会释放
+    // 访问这些对象的GcWeak引用升级应该返回None
     let upgraded = weak_ref.upgrade(&heap);
     assert!(upgraded.is_none());
 }

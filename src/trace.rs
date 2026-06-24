@@ -99,11 +99,11 @@ impl GcHeap {
 
     /// Traverses the node tree starting at `node` in depth-first order,
     /// invoking `callback` on each visited node with its optional parent.
-    /// If `filter` is non-null, only nodes in the specified partition are visited.
+    /// If `filter` is `Some`, only nodes in the specified partition are visited.
     pub fn traverse(
         &mut self,
         node: NonNull<GcHead>,
-        filter: GcPartitionId,
+        filter: Option<GcPartitionId>,
         mut callback: impl FnMut(NonNull<GcHead>, Option<NonNull<GcHead>>),
     ) {
         let mut stack: VecDeque<(NonNull<GcHead>, Option<NonNull<GcHead>>)> =
@@ -122,7 +122,7 @@ impl GcHeap {
 
                 current.as_mut().set_traverse_visited(true);
 
-                if filter.is_null() || filter == current.as_ref().partition_id() {
+                if filter.is_none() || filter == Some(current.as_ref().partition_id()) {
                     callback(current, parent);
                 }
 
@@ -728,5 +728,277 @@ mod tests {
         for (i, node) in nodes.iter().enumerate() {
             assert_eq!(unsafe { node.as_ref() }.id, i as u64);
         }
+    }
+
+    // ── Cross-partition reference marking tests ──────────────────────────
+    //
+    // These tests verify that the GC correctly handles references between
+    // objects in different partitions during the mark phase. The key behaviors
+    // tested are:
+    //
+    // 1. When a node in partition A references a node in partition B, the
+    //    referenced node is pushed to partition B's gray_list (not A's).
+    // 2. mark_prepare seeds roots from ALL partitions, so cross-partition
+    //    root chains are discovered regardless of which partition triggers GC.
+    // 3. Cross-partition marking correctly protects reachable sub-graphs
+    //    across partition boundaries.
+
+    /// Helper: count total nodes in a partition's node chain.
+    fn count_nodes_in_partition(heap: &GcHeap, pid: GcPartitionId) -> usize {
+        heap.nodes(pid).count()
+    }
+
+    /// Test 1: Basic cross-partition reference.
+    ///
+    ///   p0: Root(0) → A(1) → B(2)
+    ///   p1:                       B(2)
+    ///
+    /// Mark from p0. B (in p1) should be pushed to p1's gray_list and
+    /// survive.
+    #[test]
+    fn test_cross_partition_basic_ref() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let p0 = GcPartitionId(0);
+        let p1 = heap.create_partition();
+
+        let node_b = unsafe { heap.alloc_raw(p1, TestNode::new(2)) }.unwrap();
+
+        let mut node_a = TestNode::new(1);
+        node_a.add_child(node_b);
+        let node_a_ref = unsafe { heap.alloc_raw(p0, node_a) }.unwrap();
+
+        let mut root = TestNode::new(0);
+        root.add_child(node_a_ref);
+        let _root_ref = unsafe { heap.alloc_root_raw(p0, root) }.unwrap();
+
+        assert_eq!(count_nodes_in_partition(&heap, p0), 2);
+        assert_eq!(count_nodes_in_partition(&heap, p1), 1);
+
+        // Mark from p0 — the cross-partition reference should
+        // correctly push B to p1's gray_list.
+        while !heap.mark(p0, 16) {}
+
+        assert_eq!(
+            count_non_white_nodes(&heap, p0),
+            2,
+            "p0: Root + NodeA should be marked"
+        );
+        assert_eq!(
+            count_non_white_nodes(&heap, p1),
+            1,
+            "p1: NodeB should be marked via cross-partition push"
+        );
+
+        // Sweep p0 — only p0's White nodes are removed.
+        let freed = heap.sweep(p0, |_, _| {});
+        assert!(freed >= 0);
+
+        // NodeB still present in p1's node chain.
+        assert_eq!(count_nodes_in_partition(&heap, p1), 1);
+
+        // Now GC p1 to verify NodeB is properly traced and survives.
+        while !heap.mark(p1, 16) {}
+        let freed = heap.sweep(p1, |_, _| {});
+        assert_eq!(freed, 0, "p1 should have no garbage to collect");
+
+        let ids1 = get_all_node_ids(&heap, p1);
+        assert_eq!(ids1, vec![2], "NodeB should survive p1's sweep");
+    }
+
+    /// Test 2: Cross-partition chain with isolated node collected.
+    ///
+    ///   p0: Root(0) → A(1) ─────────────────┐
+    ///                                       ↓
+    ///   p1:                               B(2) → C(3) ,  D(4)[isolated]
+    ///
+    /// Mark from p0. B and C are pushed to p1's gray_list.
+    /// D (isolated, no incoming cross-ref) stays White.
+    /// After GC(p1), D should be collected; B and C survive.
+    #[test]
+    fn test_cross_partition_chain_with_garbage() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let p0 = GcPartitionId(0);
+        let p1 = heap.create_partition();
+
+        let node_c = unsafe { heap.alloc_raw(p1, TestNode::new(3)) }.unwrap();
+
+        let mut node_b = TestNode::new(2);
+        node_b.add_child(node_c);
+        let node_b_ref = unsafe { heap.alloc_raw(p1, node_b) }.unwrap();
+
+        let mut node_a = TestNode::new(1);
+        node_a.add_child(node_b_ref);
+        let node_a_ref = unsafe { heap.alloc_raw(p0, node_a) }.unwrap();
+
+        let mut root = TestNode::new(0);
+        root.add_child(node_a_ref);
+        let _root_ref = unsafe { heap.alloc_root_raw(p0, root) }.unwrap();
+
+        // Isolated node in p1 — no incoming references.
+        let _node_d = unsafe { heap.alloc_raw(p1, TestNode::new(4)) }.unwrap();
+
+        assert_eq!(count_nodes_in_partition(&heap, p0), 2);
+        assert_eq!(count_nodes_in_partition(&heap, p1), 3);
+
+        // ── Mark from p0 ─────────────────────────────────────────────
+        while !heap.mark(p0, 16) {}
+
+        assert_eq!(
+            count_non_white_nodes(&heap, p0),
+            2,
+            "p0: Root + NodeA marked"
+        );
+        // Cross-partition push makes B(Gray) in p1's gray_list, but
+        // B's children (C) are not traced until p1 processes its own
+        // gray_list.
+        assert_eq!(
+            count_non_white_nodes(&heap, p1),
+            1,
+            "p1: NodeB marked via cross-partition push; C needs p1's own mark"
+        );
+
+        heap.sweep(p0, |_, _| {});
+
+        // ── GC p1 — traces B → discovers C; B + C survive, D collected
+        while !heap.mark(p1, 16) {}
+        assert_eq!(
+            count_non_white_nodes(&heap, p1),
+            2,
+            "p1: B + C both marked after p1 processes its gray_list"
+        );
+        let freed = heap.sweep(p1, |_, _| {});
+        assert!(freed > 0, "p1 should free isolated node D");
+
+        let ids1 = get_all_node_ids(&heap, p1);
+        assert!(
+            ids1.contains(&2),
+            "NodeB should survive (cross-partition protected)"
+        );
+        assert!(
+            ids1.contains(&3),
+            "NodeC should survive (transitive cross-partition protected)"
+        );
+        assert!(
+            !ids1.contains(&4),
+            "NodeD should be collected (no incoming ref)"
+        );
+    }
+
+    /// Test 3: Three-partition cascade.
+    ///
+    ///   p0: Root(0) → A(1)
+    ///                     ↓
+    ///   p1:             B(2)
+    ///                     ↓
+    ///   p2:             C(3)
+    ///
+    /// Mark from p0. The cross-partition push cascades across three
+    /// partitions correctly.
+    #[test]
+    fn test_cross_partition_three_way_cascade() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let p0 = GcPartitionId(0);
+        let p1 = heap.create_partition();
+        let p2 = heap.create_partition();
+
+        let node_c = unsafe { heap.alloc_raw(p2, TestNode::new(3)) }.unwrap();
+
+        let mut node_b = TestNode::new(2);
+        node_b.add_child(node_c);
+        let node_b_ref = unsafe { heap.alloc_raw(p1, node_b) }.unwrap();
+
+        let mut node_a = TestNode::new(1);
+        node_a.add_child(node_b_ref);
+        let node_a_ref = unsafe { heap.alloc_raw(p0, node_a) }.unwrap();
+
+        let mut root = TestNode::new(0);
+        root.add_child(node_a_ref);
+        let _root_ref = unsafe { heap.alloc_root_raw(p0, root) }.unwrap();
+
+        // ── Mark from p0 ─────────────────────────────────────────────
+        while !heap.mark(p0, 16) {}
+
+        assert_eq!(count_non_white_nodes(&heap, p0), 2, "p0: Root + NodeA");
+        assert_eq!(
+            count_non_white_nodes(&heap, p1),
+            1,
+            "p1: NodeB (cross-partition from A)"
+        );
+        // C is pushed to p2's gray_list but not traced until p2
+        // processes it.
+        assert_eq!(
+            count_non_white_nodes(&heap, p2),
+            0,
+            "p2: NodeC not yet traced (needs p2's mark_grays)"
+        );
+
+        // ── Cascade marks — each partition processes its gray_list ──
+        heap.sweep(p0, |_, _| {});
+        while !heap.mark(p1, 16) {}
+        heap.sweep(p1, |_, _| {});
+        while !heap.mark(p2, 16) {}
+        let freed = heap.sweep(p2, |_, _| {});
+        assert_eq!(freed, 0, "no garbage in cascade");
+
+        assert!(
+            get_all_node_ids(&heap, p2).contains(&3),
+            "NodeC should survive entire GC cascade"
+        );
+    }
+
+    /// Test 4: Bidirectional (circular) cross-partition reference.
+    ///
+    ///   p0: Root(0) → A(1) ──→ B(2)
+    ///                        ←──┘
+    ///   p1:                       B(2) ──→ A(1)
+    ///
+    /// The cycle should not cause infinite loops or false collection.
+    #[test]
+    fn test_cross_partition_bidirectional_circular() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let p0 = GcPartitionId(0);
+        let p1 = heap.create_partition();
+
+        // Build A(p0) with empty children, allocate first.
+        let node_a = TestNode::new(1);
+        let mut node_a_ref = unsafe { heap.alloc_raw(p0, node_a) }.unwrap();
+
+        // Build B(p1) with children=[A], then allocate.
+        let mut node_b = TestNode::new(2);
+        node_b.add_child(node_a_ref);
+        let node_b_ref = unsafe { heap.alloc_raw(p1, node_b) }.unwrap();
+
+        // Set up A → B via write barrier (goes through bind()).
+        unsafe {
+            node_a_ref.with_write_barrier(&mut heap, |a| {
+                a.add_child(node_b_ref);
+            });
+        }
+
+        let mut root = TestNode::new(0);
+        root.add_child(node_a_ref);
+        let _root_ref = unsafe { heap.alloc_root_raw(p0, root) }.unwrap();
+
+        assert_eq!(count_nodes_in_partition(&heap, p0), 2);
+        assert_eq!(count_nodes_in_partition(&heap, p1), 1);
+
+        // ── Mark from p0 ─────────────────────────────────────────────
+        while !heap.mark(p0, 16) {}
+
+        assert_eq!(count_non_white_nodes(&heap, p0), 2, "Root + NodeA");
+        assert_eq!(
+            count_non_white_nodes(&heap, p1),
+            1,
+            "NodeB reachable via cross-partition cycle"
+        );
+
+        // Sweep both partitions
+        heap.sweep(p0, |_, _| {});
+        while !heap.mark(p1, 16) {}
+        let freed = heap.sweep(p1, |_, _| {});
+        assert_eq!(freed, 0);
+
+        assert!(get_all_node_ids(&heap, p0).contains(&1), "NodeA survives");
+        assert!(get_all_node_ids(&heap, p1).contains(&2), "NodeB survives");
     }
 }
