@@ -129,8 +129,20 @@ impl GcHeap {
                     return Ok((head, gross_size));
                 }
 
-                // Arena full — trigger GC and retry
-                self.garbage_collect(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+                // Arena full — trigger GC and retry.
+                //
+                // Prefer the host-provided `custom_gc_collect` callback when
+                // registered: it runs the host's complete GC cycle (with all
+                // host-side roots such as shape registry, contexts, stack
+                // frames), which is necessary because the built-in
+                // `garbage_collect` only traces ROOT/LOCAL nodes and would
+                // prematurely reclaim objects kept alive solely through
+                // host-side roots (e.g. shapes, atoms during parser window).
+                if let Some(cb) = self.custom_gc_collect() {
+                    unsafe { cb(self as *mut GcHeap, partition_id) };
+                } else {
+                    self.garbage_collect(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+                }
 
                 if let Some(arena_ptr) =
                     self.partitions[partition_id.0 as usize].arena.alloc(layout)

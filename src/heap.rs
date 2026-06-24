@@ -43,6 +43,21 @@ pub struct GcHeap {
     /// User provided opaque raw pointer
     opaque: *mut u8,
 
+    /// Optional host-provided full GC collect callback.
+    ///
+    /// When set, arena-full allocations (see `mem.rs::alloc_node_mem`) invoke
+    /// this callback instead of the built-in `garbage_collect`, allowing the
+    /// host to run its complete GC cycle (with all host-side roots such as
+    /// shape registry, contexts, stack frames, etc.). If `None`, the built-in
+    /// `garbage_collect` (ROOT/LOCAL only) is used.
+    ///
+    /// # Safety
+    ///
+    /// The callback receives a raw `*mut GcHeap` (the heap itself) and the
+    /// partition id. It must not recursively trigger arena allocation. The
+    /// host implementation typically forwards to its own `gc_collect_in`.
+    custom_gc_collect: Option<unsafe extern "C" fn(*mut GcHeap, GcPartitionId) -> usize>,
+
     #[cfg(debug_assertions)]
     pub(crate) dbg_dropping_root_partition: Option<GcPartitionId>,
     #[cfg(debug_assertions)]
@@ -99,6 +114,7 @@ impl GcHeap {
             total_memory_used: 0,
             weak_slots: Vec::new(),
             opaque: std::ptr::null_mut(),
+            custom_gc_collect: None,
             node_dtypes: registry,
             scope_stacks: vec![ScopeStack::new(None)],
 
@@ -117,6 +133,29 @@ impl GcHeap {
     #[inline(always)]
     pub const fn set_opaque(&mut self, opaque: *mut u8) {
         self.opaque = opaque;
+    }
+
+    /// Register a host-provided full GC collect callback.
+    ///
+    /// When set, arena-full allocations will invoke this callback instead of
+    /// the built-in `garbage_collect`, so the host can run its complete GC
+    /// cycle (tracing shape registry, contexts, stack frames, etc.).
+    ///
+    /// See `alloc_node_mem` in `mem.rs` for the invocation site.
+    #[inline]
+    pub fn set_custom_gc_collect(
+        &mut self,
+        cb: Option<unsafe extern "C" fn(*mut GcHeap, GcPartitionId) -> usize>,
+    ) {
+        self.custom_gc_collect = cb;
+    }
+
+    /// Get the registered custom GC collect callback, if any.
+    #[inline(always)]
+    pub const fn custom_gc_collect(
+        &self,
+    ) -> Option<unsafe extern "C" fn(*mut GcHeap, GcPartitionId) -> usize> {
+        self.custom_gc_collect
     }
 
     #[inline(always)]

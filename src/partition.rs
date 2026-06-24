@@ -13,6 +13,7 @@ use crate::arena::GcArena;
 /// Every node belongs to exactly one partition (index >= 0).
 /// There is no "null" partition ID.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
 pub struct GcPartitionId(pub u16);
 
 impl std::fmt::Debug for GcPartitionId {
