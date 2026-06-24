@@ -43,12 +43,12 @@ bitflags::bitflags! {
     #[repr(transparent)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct GcNodeFlag :u8 {
+        /// node is in gray list (mark phase optimization)
+        const GRAY_LISTED = 1 << 3;
         /// is root node
         const ROOT = 1 << 5;
-
         /// node is inside a GcContext
         const LOCAL = 1 << 6;
-
         /// internal traversal visited flag
         const TRAVERSE_VISITED = 1 << 7;
     }
@@ -174,6 +174,22 @@ impl GcHead {
             self.insert_flag(GcNodeFlag::TRAVERSE_VISITED);
         } else {
             self.remove_flag(GcNodeFlag::TRAVERSE_VISITED);
+        }
+    }
+
+    /// Check if node is already in the gray list (O(1) check)
+    #[inline(always)]
+    pub(super) fn is_gray_listed(&self) -> bool {
+        (self.attrs & (GcNodeFlag::GRAY_LISTED.bits() as u32)) != 0
+    }
+
+    /// Set/clear the gray-listed flag
+    #[inline(always)]
+    pub(super) fn set_gray_listed(&mut self, b: bool) {
+        if b {
+            self.attrs |= GcNodeFlag::GRAY_LISTED.bits() as u32;
+        } else {
+            self.attrs &= !(GcNodeFlag::GRAY_LISTED.bits() as u32);
         }
     }
 
@@ -626,7 +642,8 @@ impl GcHeap {
                     && slave_par.is_marking()
                 {
                     slave.as_mut().set_color(GcTriColor::Gray);
-                    if !slave_par.gray_list.contains(&slave) {
+                    if !slave.as_ref().is_gray_listed() {
+                        slave.as_mut().set_gray_listed(true);
                         slave_par.gray_list.push(slave);
                     }
                 }

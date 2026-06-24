@@ -78,8 +78,11 @@ impl GcPartition {
             }
         }
 
-        if !self.gray_list.contains(&node) {
-            self.gray_list.push(node);
+        unsafe {
+            if !node.as_ref().is_gray_listed() {
+                node.as_mut().set_gray_listed(true);
+                self.gray_list.push(node);
+            }
         }
     }
 }
@@ -191,11 +194,7 @@ impl GcHeap {
     /// returned by [`finalize_partition`] for the same partition.
     ///
     /// Returns the total number of bytes freed.
-    pub fn dealloc_partition(
-        &mut self,
-        partition_id: GcPartitionId,
-        link: GcNodeLink,
-    ) -> usize {
+    pub fn dealloc_partition(&mut self, partition_id: GcPartitionId, link: GcNodeLink) -> usize {
         debug_assert!(
             !partition_id.is_null(),
             "dealloc_partition: partition_id must not be null"
@@ -276,7 +275,9 @@ impl GcHeap {
     ///
     /// The `on_dispose` parameter is kept for API compatibility but is no
     /// longer called — `Drop` is handled internally by `finalize_partition`.
-    #[deprecated(note = "unsound — use finalize_partition(&self) + dealloc_partition(&mut self) instead")]
+    #[deprecated(
+        note = "unsound — use finalize_partition(&self) + dealloc_partition(&mut self) instead"
+    )]
     pub fn remove_partition(
         &mut self,
         partition_id: GcPartitionId,

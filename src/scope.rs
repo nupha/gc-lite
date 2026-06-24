@@ -1,7 +1,10 @@
 use {
     core::ptr::NonNull,
-    std::{cell::RefCell, marker::PhantomData, num::NonZeroU8, ops::DerefMut},
+    std::{cell::UnsafeCell, marker::PhantomData, num::NonZeroU8},
 };
+
+#[cfg(debug_assertions)]
+use std::cell::Cell;
 
 use smallvec::SmallVec;
 
@@ -45,7 +48,9 @@ pub struct GcScopeState<'s> {
     partition_id: GcPartitionId,
     stack_id: GcScopeStackId,
     depth: NonZeroU8,
-    cache: RefCell<SmallVec<[NonNull<GcHead>; 8]>>,
+    cache: UnsafeCell<SmallVec<[NonNull<GcHead>; 8]>>,
+    #[cfg(debug_assertions)]
+    borrow_flag: Cell<bool>,
     _marker: PhantomData<&'s ()>,
 }
 
@@ -78,7 +83,9 @@ impl<'s> GcScopeState<'s> {
             stack_id,
             partition_id,
             depth: NonZeroU8::new(depth).unwrap(),
-            cache: RefCell::new(SmallVec::new()),
+            cache: UnsafeCell::new(SmallVec::new()),
+            #[cfg(debug_assertions)]
+            borrow_flag: Cell::new(false),
             _marker: PhantomData,
         }
     }
@@ -108,8 +115,9 @@ impl<'s> GcScopeState<'s> {
         self.depth.get()
     }
 
+    #[inline(always)]
     pub fn count(&self) -> usize {
-        self.cache.borrow().len()
+        unsafe { (*self.cache.get()).len() }
     }
 
     /// get parent scope, and its level.
@@ -153,7 +161,17 @@ impl<'s> GcScopeState<'s> {
             }
         }
 
-        self.cache.borrow_mut().push(node);
+        #[cfg(debug_assertions)]
+        debug_assert!(!self.borrow_flag.get(), "GcScopeState: reentrant borrow");
+        #[cfg(debug_assertions)]
+        self.borrow_flag.set(true);
+
+        unsafe {
+            (*self.cache.get()).push(node);
+        }
+
+        #[cfg(debug_assertions)]
+        self.borrow_flag.set(false);
     }
 
     // if node is neither root, nor local, then add it to `self` scope
@@ -188,7 +206,7 @@ impl<'s> GcScopeState<'s> {
         unsafe {
             node.as_ref().debug_assert_node_valid_simple();
         }
-        let mut cache = self.cache.borrow_mut();
+        let cache = unsafe { &mut *self.cache.get() };
         if let Some(pos) = cache.iter().position(|&n| n == node) {
             cache.swap_remove(pos);
             unsafe {
@@ -201,7 +219,7 @@ impl<'s> GcScopeState<'s> {
     }
 
     pub fn contains(&self, node: NonNull<GcHead>) -> bool {
-        self.cache.borrow().contains(&node)
+        unsafe { (*self.cache.get()).contains(&node) }
     }
 
     /// Move a node from this scope's cache to the target scope's cache.
@@ -215,7 +233,7 @@ impl<'s> GcScopeState<'s> {
     /// Returns `false` if the node was not in this scope's cache (e.g., it
     /// is a root node, or already belongs to another scope).
     pub fn promote_node_to(&self, node: NonNull<GcHead>, target: &GcScopeState<'_>) -> bool {
-        let mut cache = self.cache.borrow_mut();
+        let cache = unsafe { &mut *self.cache.get() };
 
         if let Some(pos) = cache.iter().position(|&n| n == node) {
             debug_assert!(
@@ -223,8 +241,9 @@ impl<'s> GcScopeState<'s> {
                 "promote_node_to: node is not LOCAL",
             );
             cache.swap_remove(pos);
-            drop(cache);
-            target.cache.borrow_mut().push(node);
+            unsafe {
+                (*target.cache.get()).push(node);
+            }
             true
         } else {
             // Node not found in this scope's cache. This is safe — the node
@@ -244,7 +263,7 @@ impl<'s> GcScopeState<'s> {
 
     // clear and unprotect locals nodes in this scope, remote LOCAL flag of each
     pub fn clear(&self) {
-        let lst = std::mem::take(self.cache.borrow_mut().deref_mut());
+        let lst = std::mem::take(unsafe { &mut *self.cache.get() });
         for mut n in lst {
             unsafe {
                 n.as_mut().remove_flag(crate::node::GcNodeFlag::LOCAL);
@@ -381,6 +400,33 @@ impl GcHeap {
         }
     }
 
+    /// Get scope state by 0-based index without bounds check.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure `index < scope_max_depth(stack_id)`.
+    #[inline(always)]
+    pub unsafe fn scope_unchecked(
+        &self,
+        stack_id: GcScopeStackId,
+        index: u8,
+    ) -> &GcScopeState<'_> {
+        debug_assert!(
+            (index as usize) < self.scope_stacks[stack_id.0 as usize].list.len(),
+            "scope_unchecked: index {index} out of bounds for stack {} (len {})",
+            stack_id.0,
+            self.scope_stacks[stack_id.0 as usize].list.len(),
+        );
+        // SAFETY: caller ensures index < scope_max_depth(stack_id)
+        unsafe {
+            std::mem::transmute::<&GcScopeState<'static>, &GcScopeState<'_>>(
+                self.scope_stacks[stack_id.0 as usize]
+                    .list
+                    .get_unchecked(index as usize),
+            )
+        }
+    }
+
     /// pop the last scope from the stack
     #[inline(always)]
     fn pop_scope(&mut self, stack_id: GcScopeStackId) -> Option<GcScopeState<'_>> {
@@ -408,7 +454,9 @@ impl GcHeap {
             stack_id,
             partition_id: stack.partition.unwrap(),
             depth: NonZeroU8::new(depth).unwrap(),
-            cache: RefCell::new(SmallVec::new()),
+            cache: UnsafeCell::new(SmallVec::new()),
+            #[cfg(debug_assertions)]
+            borrow_flag: Cell::new(false),
             _marker: PhantomData,
         };
 

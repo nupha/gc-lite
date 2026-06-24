@@ -57,7 +57,15 @@ impl GcHeap {
     pub fn mark_reset(&mut self, partition_id: GcPartitionId) {
         if let Some(par) = self.partition_mut(partition_id) {
             par.set_marking(false);
-            par.gray_list.clear();
+
+            // Drain gray list and clear flags so stale GRAY_LISTED bits
+            // don't affect the next marking cycle.
+            for mut n in par.gray_list.drain(..) {
+                unsafe {
+                    n.as_mut().set_gray_listed(false);
+                }
+            }
+
             for n in par.nodes_mut() {
                 n.set_color(GcTriColor::White);
             }
@@ -101,7 +109,8 @@ impl GcHeap {
                     let node = unsafe { n.as_mut() };
                     if node.is_root_or_local() {
                         node.set_color(GcTriColor::Gray);
-                        if !par.gray_list.contains(&n) {
+                        if !node.is_gray_listed() {
+                            node.set_gray_listed(true);
                             par.gray_list.push(n);
                         }
                     }
@@ -138,6 +147,8 @@ impl GcHeap {
 
             while let Some(mut node_ptr) = par.gray_list.pop() {
                 let node = unsafe { node_ptr.as_mut() };
+                // Clear gray_listed flag when popping (O(1) instead of O(n) contains)
+                node.set_gray_listed(false);
                 debug_assert_eq!(
                     node.partition_id(),
                     partition_id,
@@ -176,6 +187,7 @@ impl GcHeap {
                         if pid == partition_id {
                             if matches!(child.color(), GcTriColor::White | GcTriColor::Gray) {
                                 child.set_color(GcTriColor::Gray);
+                                child.set_gray_listed(true);
                                 par.gray_list.push(ch);
                             }
                         } else if matches!(child.color(), GcTriColor::White | GcTriColor::Gray) {
@@ -198,12 +210,14 @@ impl GcHeap {
             for (mut node, pid) in cross_nodes {
                 if let Some(p2) = self.partition_mut(pid)
                     && p2.is_marking()
-                    && !p2.gray_list.contains(&node)
                 {
                     unsafe {
-                        node.as_mut().set_color(GcTriColor::Gray);
+                        if !node.as_ref().is_gray_listed() {
+                            node.as_mut().set_gray_listed(true);
+                            node.as_mut().set_color(GcTriColor::Gray);
+                            p2.gray_list.push(node);
+                        }
                     }
-                    p2.gray_list.push(node);
                 }
             }
         }
