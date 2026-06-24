@@ -11,6 +11,9 @@ use crate::{
     trace::GcTraceCtx,
 };
 
+#[cfg(feature = "gc_arena")]
+use crate::node::GcNodeFlag;
+
 impl GcHeap {
     pub fn add_gray_node(&mut self, node: NonNull<GcHead>) {
         if unsafe { node.as_ref().color() } != GcTriColor::Black {
@@ -230,6 +233,9 @@ impl GcHeap {
             let mut link1 = Some(link0);
             let mut freed_bytes = 0;
 
+            #[cfg(feature = "gc_arena")]
+            let mut holes: Vec<crate::arena::Hole> = Vec::new();
+
             for &pass in self.node_dtypes.drop_passes {
                 let mut current = link1;
                 let mut prev: Option<NonNull<GcHead>> = None;
@@ -258,7 +264,28 @@ impl GcHeap {
                             if call_on_dispose {
                                 on_dispose(self, this.as_ref());
                             }
+
+                            // Cache arena info before dispose poisons GcHead
+                            #[cfg(feature = "gc_arena")]
+                            let arena_info = {
+                                let hd = this.as_ref();
+                                let is_arena = hd.contains_flag(GcNodeFlag::ARENA_ALLOC);
+                                let dtype = hd.dtype() as usize;
+                                let info = &self.node_dtypes.type_info_list[dtype];
+                                (is_arena, info.layout().size())
+                            };
+
                             freed_bytes += self.dispose(this);
+
+                            // Arena hole collection (after dispose, which skips mem_dealloc)
+                            #[cfg(feature = "gc_arena")]
+                            if arena_info.0 {
+                                self.partitions[partition_id.0 as usize].arena.collect_hole(
+                                    &mut holes,
+                                    this.cast::<u8>(),
+                                    arena_info.1,
+                                );
+                            }
                         } else {
                             prev = Some(this);
                         }
@@ -269,6 +296,11 @@ impl GcHeap {
                     break;
                 }
             }
+
+            #[cfg(feature = "gc_arena")]
+            self.partitions[partition_id.0 as usize]
+                .arena
+                .finish_sweep(&mut holes);
 
             debug_assert!(
                 self.partitions[partition_id.0 as usize]

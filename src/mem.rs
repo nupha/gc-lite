@@ -57,64 +57,165 @@ impl GcHeap {
         partition_id: GcPartitionId,
         payload: T,
     ) -> Result<(NonNull<GcHead>, usize), (GcError, T)> {
-        match self.partition_mut(partition_id) {
-            Some(_) => {
-                let layout =
-                    match Layout::from_size_align(layout_size_of::<T>(), layout_align_of::<T>()) {
-                        Ok(layout) => layout,
-                        Err(_) => return Err((GcError::AllocationFailed, payload)),
+        // Early bound check: ensure partition exists
+        if self.partition(partition_id).is_none() {
+            return Err((GcError::PartitionNotFound, payload));
+        }
+
+        let layout = match Layout::from_size_align(layout_size_of::<T>(), layout_align_of::<T>()) {
+            Ok(layout) => layout,
+            Err(_) => return Err((GcError::AllocationFailed, payload)),
+        };
+
+        // gross_size equals `GcTypeInfo::layout_size` for this type,
+        // which is set by the `gc_type_table_internal` macro via the same
+        // `layout_size_of::<T>()` call. This ensures alloc/dealloc symmetry.
+        let gross_size = layout.size();
+
+        if unlikely(
+            self.memory_limit > 0 && self.total_memory_used + gross_size > self.memory_limit,
+        ) {
+            return Err((GcError::PartitionFull, payload));
+        }
+
+        let gc_type = T::GC_TYPE_ID;
+
+        // ── Arena allocation path ────────────────────────────────────────
+        #[cfg(feature = "gc_arena")]
+        {
+            if gross_size <= crate::MAX_ARENA_ALLOC {
+                if let Some(arena_ptr) =
+                    self.partitions[partition_id.0 as usize].arena.alloc(layout)
+                {
+                    let head = arena_ptr.cast::<GcHead>();
+
+                    // Write payload
+                    unsafe {
+                        std::ptr::write(
+                            arena_ptr.add(payload_offset_of::<T>()).cast::<T>().as_ptr(),
+                            payload,
+                        );
+                    }
+
+                    let mut attrs = 0xFF00_0000 | ((gc_type as u32) << 8);
+                    attrs |= crate::node::GcNodeFlag::ARENA_ALLOC.bits() as u32;
+
+                    let node_info = GcHead {
+                        attrs,
+                        partition: partition_id.0 as u32,
+                        weak_id: GcWeakRawId::NULL,
+                        next: None,
+
+                        #[cfg(debug_assertions)]
+                        dbg_string: std::any::type_name::<T>().into(),
                     };
 
-                // gross_size equals `GcTypeInfo::layout_size` for this type,
-                // which is set by the `gc_type_table_internal` macro via the same
-                // `layout_size_of::<T>()` call. This ensures alloc/dealloc symmetry.
-                let gross_size = layout.size();
-
-                if unlikely(
-                    self.memory_limit > 0
-                        && self.total_memory_used + gross_size > self.memory_limit,
-                ) {
-                    return Err((GcError::PartitionFull, payload));
-                }
-
-                let gc_type = T::GC_TYPE_ID;
-                let ptr = match self.mem_alloc(layout) {
-                    Some(p) => p,
-                    None => {
-                        return Err((GcError::AllocationFailed, payload));
+                    unsafe {
+                        std::ptr::write(head.as_ptr(), node_info);
                     }
-                };
 
-                let head = ptr.cast::<GcHead>();
-
-                // setup node info and data
-                unsafe {
-                    std::ptr::write(
-                        ptr.add(payload_offset_of::<T>()).cast::<T>().as_ptr(),
-                        payload,
-                    );
-                }
-
-                let node_info = GcHead {
-                    attrs: { 0xFF00_0000 | ((gc_type as u32) << 8) },
-                    partition: partition_id.0 as u32,
-                    weak_id: GcWeakRawId::NULL,
-                    next: None,
+                    self.update_mem_use(partition_id, gross_size as i32);
 
                     #[cfg(debug_assertions)]
-                    dbg_string: std::any::type_name::<T>().into(),
-                };
+                    unsafe {
+                        let n = NonNull::new_unchecked(head.as_ptr().cast());
+                        debug_assert!(
+                            !self.dbg_living_nodes.contains(&n),
+                            "node {head:?} already exists"
+                        );
+                        self.dbg_living_nodes.insert(n);
+                    }
 
-                unsafe {
-                    std::ptr::write(head.as_ptr(), node_info);
+                    return Ok((head, gross_size));
                 }
 
-                self.update_mem_use(partition_id, gross_size as i32);
+                // Arena full — trigger GC and retry
+                self.garbage_collect(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
 
-                Ok((head, gross_size))
+                if let Some(arena_ptr) =
+                    self.partitions[partition_id.0 as usize].arena.alloc(layout)
+                {
+                    // Same as above...
+                    let head = arena_ptr.cast::<GcHead>();
+
+                    unsafe {
+                        std::ptr::write(
+                            arena_ptr.add(payload_offset_of::<T>()).cast::<T>().as_ptr(),
+                            payload,
+                        );
+                    }
+
+                    let mut attrs = 0xFF00_0000 | ((gc_type as u32) << 8);
+                    attrs |= crate::node::GcNodeFlag::ARENA_ALLOC.bits() as u32;
+
+                    let node_info = GcHead {
+                        attrs,
+                        partition: partition_id.0 as u32,
+                        weak_id: GcWeakRawId::NULL,
+                        next: None,
+
+                        #[cfg(debug_assertions)]
+                        dbg_string: std::any::type_name::<T>().into(),
+                    };
+
+                    unsafe {
+                        std::ptr::write(head.as_ptr(), node_info);
+                    }
+
+                    self.update_mem_use(partition_id, gross_size as i32);
+
+                    #[cfg(debug_assertions)]
+                    unsafe {
+                        let n = NonNull::new_unchecked(head.as_ptr().cast());
+                        debug_assert!(
+                            !self.dbg_living_nodes.contains(&n),
+                            "node {head:?} already exists"
+                        );
+                        self.dbg_living_nodes.insert(n);
+                    }
+
+                    return Ok((head, gross_size));
+                }
+
+                // Still full — fall through to system malloc path
             }
-            None => Err((GcError::PartitionNotFound, payload)),
         }
+
+        // ── System malloc path (also serves as fallback when arena is full) ──
+        let ptr = match self.mem_alloc(layout) {
+            Some(p) => p,
+            None => {
+                return Err((GcError::AllocationFailed, payload));
+            }
+        };
+
+        let head = ptr.cast::<GcHead>();
+
+        // setup node info and data
+        unsafe {
+            std::ptr::write(
+                ptr.add(payload_offset_of::<T>()).cast::<T>().as_ptr(),
+                payload,
+            );
+        }
+
+        let node_info = GcHead {
+            attrs: { 0xFF00_0000 | ((gc_type as u32) << 8) },
+            partition: partition_id.0 as u32,
+            weak_id: GcWeakRawId::NULL,
+            next: None,
+
+            #[cfg(debug_assertions)]
+            dbg_string: std::any::type_name::<T>().into(),
+        };
+
+        unsafe {
+            std::ptr::write(head.as_ptr(), node_info);
+        }
+
+        self.update_mem_use(partition_id, gross_size as i32);
+
+        Ok((head, gross_size))
     }
 
     /// Allocate a typed gc node with payload data, do not put to any scope, even if the current scope is present.
@@ -221,6 +322,23 @@ impl GcHeap {
             // Must run AFTER drop_fn so the payload Drop can still access GcHead.
             (*node.as_ptr()).attrs = 0xDEAD_BEEF;
             (*node.as_ptr()).next = None;
+        }
+
+        #[cfg(feature = "gc_arena")]
+        {
+            if hd.contains_flag(crate::node::GcNodeFlag::ARENA_ALLOC) {
+                // Arena-allocated node: memory is owned by GcArena, not by
+                // individual system malloc. Skip mem_dealloc — hole collection
+                // (or frontier merge) is handled by sweep.
+                self.update_mem_use(partition_id, -(gross_size as i32));
+
+                #[cfg(debug_assertions)]
+                {
+                    self.dbg_living_nodes.remove(&node.cast());
+                }
+
+                return gross_size;
+            }
         }
 
         self.mem_dealloc(node.cast::<u8>(), layout);

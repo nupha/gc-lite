@@ -43,6 +43,8 @@ bitflags::bitflags! {
     #[repr(transparent)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct GcNodeFlag :u8 {
+        /// allocated from arena (bump+free-list)
+        const ARENA_ALLOC = 1 << 2;
         /// node is in gray list (mark phase optimization)
         const GRAY_LISTED = 1 << 3;
         /// is root node

@@ -5,6 +5,9 @@ use std::ptr::NonNull;
 
 use crate::{GcHead, GcHeap, node::GcTriColor, node_link::GcNodeLink};
 
+#[cfg(feature = "gc_arena")]
+use crate::arena::GcArena;
+
 /// Partition ID, used as index into `GcHeap::partitions`.
 ///
 /// Every node belongs to exactly one partition (index >= 0).
@@ -28,6 +31,10 @@ pub struct GcPartition {
     marking: bool,
 
     pub(crate) memory_used: usize,
+
+    /// bump + free-list arena allocator
+    #[cfg(feature = "gc_arena")]
+    pub(crate) arena: GcArena,
 }
 
 impl GcPartition {
@@ -37,6 +44,9 @@ impl GcPartition {
             nodes: GcNodeLink::default(),
             gray_list: Vec::new(),
             marking: false,
+
+            #[cfg(feature = "gc_arena")]
+            arena: GcArena::new(crate::arena::ARENA_CAPACITY).expect("arena alloc failed"),
         }
     }
 
@@ -183,6 +193,23 @@ impl GcHeap {
                 // Poison GcHead fields so any subsequent use-after-free is caught.
                 (*node.as_ptr()).attrs = 0xDEAD_BEEF;
                 (*node.as_ptr()).next = None;
+            }
+
+            #[cfg(feature = "gc_arena")]
+            {
+                let head = unsafe { node.as_ref() };
+                if head.contains_flag(crate::node::GcNodeFlag::ARENA_ALLOC) {
+                    // Arena-allocated node: memory is owned by GcArena,
+                    // which will be dropped when the partition is reset below.
+                    // Do NOT individually dealloc — that would be a double-free.
+                    #[cfg(debug_assertions)]
+                    {
+                        self.dbg_living_nodes.remove(&node.cast());
+                    }
+
+                    freed_bytes += gross_size;
+                    continue;
+                }
             }
 
             self.mem_dealloc(node.cast::<u8>(), layout);

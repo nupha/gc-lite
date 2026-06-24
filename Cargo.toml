@@ -9,6 +9,11 @@ readme = "README.md"
 repository = "https://github.com/nupha/gc-lite"
 keywords = ["gc", "memory"]
 
+[features]
+gc_arena = []
+
+default = ["gc_arena"]
+
 [dependencies]
 gc-lite-macros = { version = "0.2.0", path = "gc-lite-macros" }
 bitflags = "2.0"

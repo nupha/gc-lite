@@ -14,6 +14,9 @@ mod trace;
 mod weak;
 mod xref;
 
+#[cfg(feature = "gc_arena")]
+mod arena;
+
 pub use {
     gctype::{GcTypeInfo, GcTypeRegistry, gctype_drop, gctype_trace},
     heap::GcHeap,
@@ -25,6 +28,9 @@ pub use {
     trace::{GcTrace, GcTraceCtx, GcTraceFn},
     weak::GcWeak,
 };
+
+#[cfg(feature = "gc_arena")]
+pub(crate) use arena::{ARENA_CAPACITY, GcArena, MAX_ARENA_ALLOC};
 
 pub(crate) use helpers::unlikely;
 
