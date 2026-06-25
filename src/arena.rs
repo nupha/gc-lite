@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use core::{alloc::Layout, cell::Cell, ptr::NonNull};
+use core::{alloc::Layout, cell::Cell, mem::size_of, ptr::NonNull};
 
-/// Minimum free slot size (16 bytes = two `usize` values)
-const MIN_ALLOC_SIZE: usize = 16;
+/// Minimum free slot size: two pointer-width values (`size` + `next`).
+/// On 64-bit: 16 bytes; on 32-bit: 8 bytes.
+const MIN_ALLOC_SIZE: usize = size_of::<usize>() * 2;
 
 /// Arena capacity (64 KB)
 pub const ARENA_CAPACITY: usize = 64 * 1024;
@@ -47,24 +48,33 @@ impl GcArena {
         })
     }
 
-    /// Main allocation path: free-list → bump → `None`.
+    /// Main allocation path: bump → free-list → `None`.
+    ///
+    /// Bump is checked first because in practice most dead nodes are
+    /// reclaimed via frontier rewind (see [`collect_hole`]), so the free-list
+    /// is usually empty. Swapping the order avoids an unnecessary linked-list
+    /// traversal on the common (bump) path.
     pub fn alloc(&self, layout: Layout) -> Option<NonNull<u8>> {
         let needed = layout.size().max(MIN_ALLOC_SIZE);
-        // 1. Try free-list first
+
+        // 1. Bump allocation (fast path — no memory indirection)
+        let align = layout.align();
+        let offset = (self.bump.get() + align - 1) & !(align - 1);
+        if offset + needed <= self.capacity {
+            self.bump.set(offset + needed);
+            self.live_count.set(self.live_count.get() + 1);
+            let ptr = unsafe { self.base.as_ptr().add(offset) };
+            return Some(unsafe { NonNull::new_unchecked(ptr) });
+        }
+
+        // 2. Bump full → try free-list (slow path: linked-list walk)
         if let Some(ptr) = self.alloc_from_free_list(needed) {
             self.live_count.set(self.live_count.get() + 1);
             return Some(ptr);
         }
-        // 2. Bump allocation
-        let align = layout.align();
-        let offset = (self.bump.get() + align - 1) & !(align - 1);
-        if offset + needed > self.capacity {
-            return None; // arena full
-        }
-        self.bump.set(offset + needed);
-        self.live_count.set(self.live_count.get() + 1);
-        let ptr = unsafe { self.base.as_ptr().add(offset) };
-        Some(unsafe { NonNull::new_unchecked(ptr) })
+
+        // 3. Truly full
+        None
     }
 
     /// First-fit free-list search.
@@ -130,28 +140,33 @@ impl GcArena {
             return;
         }
 
-        // 1. Sort by address
+        // 1. Sort by address (sweep order ≠ address order because
+        //    free-list reuse breaks the correspondence, so sort is mandatory).
         holes.sort_by_key(|h| h.offset);
 
-        // 2. Merge adjacent holes
-        let mut merged: Vec<Hole> = Vec::with_capacity(holes.len());
-        let mut iter = holes.drain(..);
-        if let Some(mut cur) = iter.next() {
-            for next in iter {
-                if cur.offset + cur.size == next.offset {
-                    // Adjacent → merge
-                    cur.size += next.size;
+        // 2. In-place adjacent merge via two-pointer compaction.
+        //    Avoids a second Vec allocation compared to the previous approach.
+        let merged_len = if holes.is_empty() {
+            0
+        } else {
+            let mut wi = 0;
+            for ri in 1..holes.len() {
+                if holes[wi].offset + holes[wi].size == holes[ri].offset {
+                    holes[wi].size += holes[ri].size;
                 } else {
-                    merged.push(cur);
-                    cur = next;
+                    wi += 1;
+                    if wi != ri {
+                        holes.swap(wi, ri);
+                    }
                 }
             }
-            merged.push(cur);
-        }
+            wi + 1
+        };
+        holes.truncate(merged_len);
 
         // 3. Rebuild the free-list (reverse order for correct head-insertion)
         self.free_head.set(None);
-        for hole in merged.into_iter().rev() {
+        for hole in holes.drain(..).rev() {
             let ptr = unsafe { NonNull::new_unchecked(self.base.as_ptr().add(hole.offset)) };
             unsafe { write_free_size(ptr, hole.size) };
             unsafe { write_free_next(ptr, self.free_head.get()) };
@@ -169,9 +184,9 @@ impl Drop for GcArena {
 
 // ── FreeEntry read / write (re-uses dead GcHead space) ──────────────────
 //
-// Memory layout of a dead node (first 16 bytes):
-//   offset 0: size (8 bytes, reuses the attrs + partition area)
-//   offset 8: next  (8 bytes, reuses the first 8 bytes of weak_id)
+// Memory layout of a dead node (first 2 × pointer-width bytes):
+//   offset 0:          size (size_of::<usize> bytes, reuses attrs + partition area)
+//   offset size_of::<usize>: next (size_of::<usize> bytes, reuses first portion of weak_id)
 
 unsafe fn read_free_size(entry: NonNull<u8>) -> usize {
     unsafe { *(entry.as_ptr().cast::<usize>()) }
@@ -184,12 +199,12 @@ unsafe fn write_free_size(entry: NonNull<u8>, size: usize) {
 }
 
 unsafe fn read_free_next(entry: NonNull<u8>) -> Option<NonNull<u8>> {
-    unsafe { *(entry.as_ptr().add(8).cast::<Option<NonNull<u8>>>()) }
+    unsafe { *(entry.as_ptr().add(size_of::<usize>()).cast::<Option<NonNull<u8>>>()) }
 }
 
 unsafe fn write_free_next(entry: NonNull<u8>, next: Option<NonNull<u8>>) {
     unsafe {
-        *(entry.as_ptr().add(8).cast::<Option<NonNull<u8>>>()) = next;
+        *(entry.as_ptr().add(size_of::<usize>()).cast::<Option<NonNull<u8>>>()) = next;
     }
 }
 
@@ -254,6 +269,20 @@ mod tests {
 
     // ── Free-list: collect holes and rebuild ───────────────────────────
 
+    /// Fill remaining bump space so subsequent allocations hit the free-list.
+    /// Advances bump directly without touching the free-list.
+    fn exhaust_bump(arena: &GcArena) {
+        let remaining = arena.capacity - arena.bump.get();
+        if remaining > 0 {
+            // Simulate N sequential MIN_ALLOC_SIZE bumps in one shot.
+            let count = remaining / MIN_ALLOC_SIZE;
+            arena.bump.set(arena.capacity);
+            arena
+                .live_count
+                .set(arena.live_count.get() + count);
+        }
+    }
+
     #[test]
     fn test_free_list_reuses_hole() {
         let arena = GcArena::new(256).unwrap();
@@ -268,6 +297,10 @@ mod tests {
         // finish_sweep should rebuild the free-list
         arena.finish_sweep(&mut holes);
         assert!(holes.is_empty());
+
+        // Bump still has space, so bump-first order uses bump for the
+        // next alloc. Exhaust bump so the next alloc hits the free-list.
+        exhaust_bump(&arena);
 
         // Now allocate again — it should come from the free-list,
         // specifically from p2's old location.
@@ -290,6 +323,9 @@ mod tests {
         assert_eq!(holes.len(), 2);
 
         arena.finish_sweep(&mut holes);
+
+        // Exhaust bump so allocation hits the free-list.
+        exhaust_bump(&arena);
 
         // The two adjacent 8-byte holes should be merged into one 16-byte hole.
         // Allocating a 16-byte object should reuse the merged hole.
@@ -314,6 +350,9 @@ mod tests {
         arena.collect_hole(&mut holes, p3, 8);
         arena.collect_hole(&mut holes, p4, 8);
         arena.finish_sweep(&mut holes);
+
+        // Exhaust bump so allocation hits the free-list.
+        exhaust_bump(&arena);
 
         // Allocate a 24-byte slot — should land on the merged triple hole
         let big = arena
@@ -413,7 +452,10 @@ mod tests {
         arena.finish_sweep(&mut holes);
         assert!(holes.is_empty());
 
-        // Allocate 2 objects — they should come from free-list (holes)
+        // Exhaust bump space so allocs hit the free-list.
+        exhaust_bump(&arena);
+
+        // Now allocs should come from free-list (holes)
         let n1 = alloc_one(&arena).unwrap();
         // free_head → p1 (lowest addr) → p3 (highest addr) → None
         // First alloc pops the head → p1
@@ -422,11 +464,10 @@ mod tests {
         let n2 = alloc_one(&arena).unwrap();
         assert_eq!(n2, p3, "second free-list alloc should reuse p3");
 
-        // Now empty free-list, next alloc bumps after p4
-        let n3 = alloc_one(&arena).unwrap();
+        // Now empty free-list, and bump is full → next alloc should fail
         assert!(
-            (n3.as_ptr() > p4.as_ptr()),
-            "bump after p4 after free-list exhausted"
+            alloc_one(&arena).is_none(),
+            "arena should be full after exhausting bump and free-list"
         );
     }
 
@@ -461,6 +502,9 @@ mod tests {
             let mut holes = Vec::new();
             arena.collect_hole(&mut holes, p1, 8);
             arena.finish_sweep(&mut holes);
+
+            // Exhaust bump so the next alloc hits the free-list.
+            exhaust_bump(&arena);
 
             // Reuse p1's slot — write new data
             let p_new = alloc_one(&arena).unwrap();
