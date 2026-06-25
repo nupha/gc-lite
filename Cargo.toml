@@ -11,7 +11,6 @@ keywords = ["gc", "memory"]
 
 [features]
 gc_arena = []
-
 default = ["gc_arena"]
 
 [dependencies]

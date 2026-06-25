@@ -533,7 +533,7 @@ mod tests {
     #[test]
     fn test_gc_context_local_flag_set_and_cleared_on_commit() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         let head;
@@ -568,7 +568,7 @@ mod tests {
     #[test]
     fn test_gc_context_alloc_protects_and_unprotects_on_drop() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         let head;
@@ -607,7 +607,7 @@ mod tests {
     #[test]
     fn test_gc_context_add_sets_local_and_clears_on_commit() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         let node: GcRef<Node> = unsafe {
@@ -655,7 +655,7 @@ mod tests {
     #[test]
     fn test_gc_context_add_on_local_node_returns_false() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         let ctx = heap.new_scope(stack_id);
@@ -688,7 +688,7 @@ mod tests {
     #[test]
     fn test_root_node_not_collected_by_sweep() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
 
         let head;
 
@@ -718,7 +718,7 @@ mod tests {
     #[test]
     fn test_gc_context_alloc_multiple_nodes() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         let head1;
@@ -768,7 +768,7 @@ mod tests {
     #[test]
     fn test_gc_context_reset_unprotects_and_clears_cache() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         let head;
@@ -805,7 +805,7 @@ mod tests {
     #[test]
     fn test_gc_context_level_for_heap_scopes() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         assert_eq!(heap.scope_max_depth(stack_id), 0);
@@ -832,7 +832,7 @@ mod tests {
     #[test]
     fn test_gc_context_parent_mut_returns_parent_and_level() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         let heap_ptr = &mut heap as *mut GcHeap;
@@ -863,7 +863,7 @@ mod tests {
     #[test]
     fn test_multi_scope_stacks_are_independent() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
         let stack1 = heap.acquire_scope_stack(partition_id);
         let stack2 = heap.acquire_scope_stack(partition_id);
 
@@ -903,7 +903,7 @@ mod tests {
     #[test]
     fn test_gc_scope_drop_is_lifo_per_stack() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
         let stack1 = heap.acquire_scope_stack(partition_id);
         let stack2 = heap.acquire_scope_stack(partition_id);
         let heap_ptr = &mut heap as *mut GcHeap;

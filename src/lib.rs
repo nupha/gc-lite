@@ -30,7 +30,7 @@ pub use {
 };
 
 #[cfg(feature = "gc_arena")]
-pub(crate) use arena::{ARENA_CAPACITY, GcArena, MAX_ARENA_ALLOC};
+pub use arena::{ARENA_CAPACITY, GcArena, MAX_ARENA_ALLOC};
 
 pub(crate) use helpers::unlikely;
 

@@ -36,7 +36,7 @@ fn demonstrate_out_of_memory() -> GcResult<()> {
 
     let mut context = GcHeap::new(&GC_TYPE_REGISTRY);
     context.set_memory_limit(2048); // 2KB global limit
-    let partition_id = context.create_partition();
+    let partition_id = context.create_partition(64 * 1024, 16 * 1024);
 
     // Allocate first large object (1KB + header)
     println!("2. Allocate first large object...");
@@ -122,7 +122,7 @@ fn demonstrate_partition_management_errors() -> GcResult<()> {
     println!("  ✓ Removing non-existent partition silently fails");
 
     println!("\n2. Test non-empty partition deletion...");
-    let partition_id = context.create_partition();
+    let partition_id = context.create_partition(64 * 1024, 16 * 1024);
 
     // Allocate objects in partition
     let obj = unsafe {
@@ -150,7 +150,7 @@ fn demonstrate_gc_threshold_errors() -> GcResult<()> {
 
     let mut context = GcHeap::new(&GC_TYPE_REGISTRY);
     context.set_memory_limit(1024);
-    let _partition_id = context.create_partition();
+    let _partition_id = context.create_partition(64 * 1024, 16 * 1024);
 
     // Test default values
     println!("2. Test default threshold...");

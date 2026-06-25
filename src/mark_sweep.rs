@@ -280,11 +280,17 @@ impl GcHeap {
                             // Arena hole collection (after dispose, which skips mem_dealloc)
                             #[cfg(feature = "gc_arena")]
                             if arena_info.0 {
-                                self.partitions[partition_id.0 as usize].arena.collect_hole(
-                                    &mut holes,
-                                    this.cast::<u8>(),
-                                    arena_info.1,
-                                );
+                                // SAFETY: an arena-allocated node exists only if the
+                                // partition has an arena — this is an invariant.
+                                self.partitions[partition_id.0 as usize]
+                                    .arena
+                                    .as_ref()
+                                    .unwrap()
+                                    .collect_hole(
+                                        &mut holes,
+                                        this.cast::<u8>(),
+                                        arena_info.1,
+                                    );
                             }
                         } else {
                             prev = Some(this);
@@ -298,9 +304,9 @@ impl GcHeap {
             }
 
             #[cfg(feature = "gc_arena")]
-            self.partitions[partition_id.0 as usize]
-                .arena
-                .finish_sweep(&mut holes);
+            if let Some(ref arena) = self.partitions[partition_id.0 as usize].arena {
+                arena.finish_sweep(&mut holes);
+            }
 
             debug_assert!(
                 self.partitions[partition_id.0 as usize]
@@ -409,6 +415,14 @@ mod sweep_test {
 
     use crate::trace::{GcTrace, GcTraceCtx};
 
+    /// Shorthand for creating a partition with default arena config.
+    fn create_default_partition(heap: &mut crate::GcHeap) -> GcPartitionId {
+        heap.create_partition(
+            crate::arena::ARENA_CAPACITY,
+            crate::arena::MAX_ARENA_ALLOC,
+        )
+    }
+
     #[derive(Debug)]
     struct MyI32(i32);
 
@@ -437,7 +451,7 @@ mod sweep_test {
     #[test]
     fn test_sweep_with_basic() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = create_default_partition(&mut heap);
 
         let objects: Vec<GcRef<MyI32>> = (0..5)
             .map(|i| unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap())
@@ -481,7 +495,7 @@ mod sweep_test {
     #[test]
     fn test_sweep_with_chain_head_removal() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = create_default_partition(&mut heap);
 
         let objects: Vec<GcRef<MyI32>> = (0..5)
             .map(|i| unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap())
@@ -533,7 +547,7 @@ mod sweep_test {
     #[test]
     fn test_sweep_with_all_chain_head_removal() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = create_default_partition(&mut heap);
 
         let _objects: Vec<GcRef<MyI32>> = (0..3)
             .map(|i| unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap())
@@ -562,7 +576,7 @@ mod sweep_test {
     #[test]
     fn test_sweep_with_middle_node_removal() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = create_default_partition(&mut heap);
 
         let _objects: Vec<GcRef<MyI32>> = (0..5)
             .map(|i| {
@@ -606,7 +620,7 @@ mod sweep_test {
     #[test]
     fn test_sweep_with_root_node_removal() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = create_default_partition(&mut heap);
 
         let root_obj = unsafe { heap.alloc_raw(partition_id, MyI32(0)) }.unwrap();
         let _objects: Vec<GcRef<MyI32>> = (1..3)
@@ -634,7 +648,7 @@ mod sweep_test {
     #[test]
     fn test_sweep_with_empty_partition() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = create_default_partition(&mut heap);
 
         while !heap.mark(partition_id, 64) {}
 

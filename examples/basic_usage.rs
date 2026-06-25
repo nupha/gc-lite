@@ -55,8 +55,8 @@ fn main() -> GcResult<()> {
 
     // Create two partitions
     println!("\nCreate partitions:");
-    let partition1 = heap.create_partition();
-    let partition2 = heap.create_partition();
+    let partition1 = heap.create_partition(64 * 1024, 16 * 1024);
+    let partition2 = heap.create_partition(64 * 1024, 16 * 1024);
     println!("  Created partition1: {:?}", partition1);
     println!("  Created partition2: {:?}", partition2);
     println!("  Number of partitions: {}", heap.partition_ids().len());
@@ -150,7 +150,7 @@ fn main() -> GcResult<()> {
     println!("\nDemonstrate automatic garbage collection...");
 
     // Create a small partition to demonstrate automatic GC
-    let small_partition = heap.create_partition();
+    let small_partition = heap.create_partition(64 * 1024, 16 * 1024);
 
     // Allocate multiple objects to fill partition
     for i in 0..5 {
@@ -204,7 +204,7 @@ fn main() -> GcResult<()> {
     println!("\nDemonstrate partition deletion:");
 
     // Create an empty partition
-    let empty_partition = heap.create_partition();
+    let empty_partition = heap.create_partition(64 * 1024, 16 * 1024);
     println!("  Created empty partition: {:?}", empty_partition);
 
     // Delete empty partition

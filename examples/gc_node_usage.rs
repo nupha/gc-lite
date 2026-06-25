@@ -55,7 +55,7 @@ fn alloc_other(
 
 fn main() -> GcResult<()> {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let partition = heap.create_partition();
+    let partition = heap.create_partition(64 * 1024, 16 * 1024);
     let stack_id = heap.acquire_scope_stack(partition);
 
     let static_ref = alloc_static(&mut heap, stack_id, 10)?;

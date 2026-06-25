@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn test_trace_propagate_simple_tree() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
 
         let child1 = unsafe { heap.alloc_raw(partition_id, TestNode::new(1)) }.unwrap();
         let child2 = unsafe { heap.alloc_raw(partition_id, TestNode::new(2)) }.unwrap();
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn test_trace_continue_simple_tree() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
 
         let child1 = unsafe { heap.alloc_raw(partition_id, TestNode::new(1)) }.unwrap();
         let child2 = unsafe { heap.alloc_raw(partition_id, TestNode::new(2)) }.unwrap();
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn test_trace_deep_nested_tree() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
 
         let level3 = unsafe { heap.alloc_raw(partition_id, TestNode::new(3)) }.unwrap();
 
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn test_trace_complex_tree() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
 
         // Create a complex tree:
         //        root
@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn test_trace_algorithms_equivalence() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
 
         // Create a tree with 10 nodes in a balanced structure
         let mut nodes = Vec::new();
@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn test_trace_circular_reference() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
 
         let mut node1 = unsafe { heap.alloc_raw(partition_id, TestNode::new(1)) }.unwrap();
         let mut node2 = unsafe { heap.alloc_raw(partition_id, TestNode::new(2)) }.unwrap();
@@ -490,7 +490,7 @@ mod tests {
     #[test]
     fn test_write_barrier_black_node_adds_white_child() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
 
         // Allocate a white child node (not reachable from root yet)
         let child = unsafe { heap.alloc_raw(partition_id, TestNode::new(1)) }.unwrap();
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     fn test_write_barrier_incremental_black_adds_white() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
 
         // Create a chain: root -> a -> b -> c
         let c = unsafe { heap.alloc_raw(partition_id, TestNode::new(3)) }.unwrap();
@@ -585,7 +585,7 @@ mod tests {
     #[test]
     fn test_write_barrier_bypass_leaks_white_child() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
 
         let child = unsafe { heap.alloc_raw(partition_id, TestNode::new(1)) }.unwrap();
         let mut root = unsafe { heap.alloc_root_raw(partition_id, TestNode::new(0)) }.unwrap();
@@ -646,7 +646,7 @@ mod tests {
     #[test]
     fn test_high_alignment_payload_alloc_and_access() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
 
         let node: GcRef<Align32Node> = unsafe {
             heap.alloc_root_raw(
@@ -686,7 +686,7 @@ mod tests {
     #[test]
     fn test_high_alignment_payload_multiple_nodes() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
 
         let nodes: Vec<GcRef<Align32Node>> = (0..10)
             .map(|i| {
@@ -758,8 +758,8 @@ mod tests {
     #[test]
     fn test_cross_partition_basic_ref() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p0 = GcPartitionId(0);
-        let p1 = heap.create_partition();
+        let p0 = heap.create_partition(64 * 1024, 16 * 1024);
+        let p1 = heap.create_partition(64 * 1024, 16 * 1024);
 
         let node_b = unsafe { heap.alloc_raw(p1, TestNode::new(2)) }.unwrap();
 
@@ -817,8 +817,8 @@ mod tests {
     #[test]
     fn test_cross_partition_chain_with_garbage() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p0 = GcPartitionId(0);
-        let p1 = heap.create_partition();
+        let p0 = heap.create_partition(64 * 1024, 16 * 1024);
+        let p1 = heap.create_partition(64 * 1024, 16 * 1024);
 
         let node_c = unsafe { heap.alloc_raw(p1, TestNode::new(3)) }.unwrap();
 
@@ -897,9 +897,9 @@ mod tests {
     #[test]
     fn test_cross_partition_three_way_cascade() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p0 = GcPartitionId(0);
-        let p1 = heap.create_partition();
-        let p2 = heap.create_partition();
+        let p0 = heap.create_partition(64 * 1024, 16 * 1024);
+        let p1 = heap.create_partition(64 * 1024, 16 * 1024);
+        let p2 = heap.create_partition(64 * 1024, 16 * 1024);
 
         let node_c = unsafe { heap.alloc_raw(p2, TestNode::new(3)) }.unwrap();
 
@@ -956,8 +956,8 @@ mod tests {
     #[test]
     fn test_cross_partition_bidirectional_circular() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p0 = GcPartitionId(0);
-        let p1 = heap.create_partition();
+        let p0 = heap.create_partition(64 * 1024, 16 * 1024);
+        let p1 = heap.create_partition(64 * 1024, 16 * 1024);
 
         // Build A(p0) with empty children, allocate first.
         let node_a = TestNode::new(1);

@@ -43,21 +43,6 @@ pub struct GcHeap {
     /// User provided opaque raw pointer
     opaque: *mut u8,
 
-    /// Optional host-provided full GC collect callback.
-    ///
-    /// When set, arena-full allocations (see `mem.rs::alloc_node_mem`) invoke
-    /// this callback instead of the built-in `garbage_collect`, allowing the
-    /// host to run its complete GC cycle (with all host-side roots such as
-    /// shape registry, contexts, stack frames, etc.). If `None`, the built-in
-    /// `garbage_collect` (ROOT/LOCAL only) is used.
-    ///
-    /// # Safety
-    ///
-    /// The callback receives a raw `*mut GcHeap` (the heap itself) and the
-    /// partition id. It must not recursively trigger arena allocation. The
-    /// host implementation typically forwards to its own `gc_collect_in`.
-    custom_gc_collect: Option<unsafe extern "C" fn(*mut GcHeap, GcPartitionId) -> usize>,
-
     #[cfg(debug_assertions)]
     pub(crate) dbg_dropping_root_partition: Option<GcPartitionId>,
     #[cfg(debug_assertions)]
@@ -105,16 +90,18 @@ impl Drop for GcHeap {
 impl GcHeap {
     pub const DUMMY_DISPOSE_CALLBACK: fn(&GcHeap, &GcHead) = |_, _| {};
 
-    /// Create a new garbage collection heap with an explicit GC type registry
+    /// Create a new garbage collection heap with an explicit GC type registry.
+    ///
+    /// The heap starts with no partitions. Use [`create_partition`](GcHeap::create_partition)
+    /// to add partitions as needed.
     pub fn new(registry: &'static GcTypeRegistry) -> Self {
         Self {
-            partitions: vec![GcPartition::new()],
+            partitions: Vec::with_capacity(1),
             memory_limit: 0,
             gc_threshold: 0,
             total_memory_used: 0,
-            weak_slots: Vec::new(),
+            weak_slots: Vec::with_capacity(8),
             opaque: std::ptr::null_mut(),
-            custom_gc_collect: None,
             node_dtypes: registry,
             scope_stacks: vec![ScopeStack::new(None)],
 
@@ -133,29 +120,6 @@ impl GcHeap {
     #[inline(always)]
     pub const fn set_opaque(&mut self, opaque: *mut u8) {
         self.opaque = opaque;
-    }
-
-    /// Register a host-provided full GC collect callback.
-    ///
-    /// When set, arena-full allocations will invoke this callback instead of
-    /// the built-in `garbage_collect`, so the host can run its complete GC
-    /// cycle (tracing shape registry, contexts, stack frames, etc.).
-    ///
-    /// See `alloc_node_mem` in `mem.rs` for the invocation site.
-    #[inline]
-    pub fn set_custom_gc_collect(
-        &mut self,
-        cb: Option<unsafe extern "C" fn(*mut GcHeap, GcPartitionId) -> usize>,
-    ) {
-        self.custom_gc_collect = cb;
-    }
-
-    /// Get the registered custom GC collect callback, if any.
-    #[inline(always)]
-    pub const fn custom_gc_collect(
-        &self,
-    ) -> Option<unsafe extern "C" fn(*mut GcHeap, GcPartitionId) -> usize> {
-        self.custom_gc_collect
     }
 
     #[inline(always)]
@@ -319,6 +283,7 @@ impl GcHeap {
 #[cfg(test)]
 mod heap_tests {
     use crate::{GcRef, GcTraceCtx, node::GcNode, trace::GcTrace};
+    use crate::arena::{ARENA_CAPACITY, MAX_ARENA_ALLOC};
 
     use super::*;
 
@@ -344,7 +309,7 @@ mod heap_tests {
     #[test]
     fn test_heap_with_context_alloc_and_cleanup() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition();
+        let partition_id = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         let _head = heap.with_new_scope(stack_id, |ctx| {
@@ -366,7 +331,7 @@ mod heap_tests {
     #[test]
     fn test_memory_used_symmetry_alloc_dispose() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let id = heap.create_partition();
+        let id = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
 
         let mem_before = heap.memory_used();
         let par_mem_before = heap.partition(id).unwrap().memory_used();
@@ -404,7 +369,7 @@ mod heap_tests {
     #[test]
     fn test_memory_used_symmetry_sweep() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let id = heap.create_partition();
+        let id = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
 
         // Allocate 3 non-root nodes and 1 root node
         let mem_before = heap.memory_used();
@@ -460,7 +425,7 @@ mod heap_tests {
     #[test]
     fn test_memory_used_update_mem_use_edge_cases() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let id = heap.create_partition();
+        let id = heap.create_partition(0, 0);
 
         // Normal add
         assert_eq!(heap.update_mem_use(id, 50), 50);

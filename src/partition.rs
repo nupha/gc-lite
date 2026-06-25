@@ -33,13 +33,38 @@ pub struct GcPartition {
 
     pub(crate) memory_used: usize,
 
-    /// bump + free-list arena allocator
+    /// bump + free-list arena allocator (`None` = arena disabled for this partition)
     #[cfg(feature = "gc_arena")]
-    pub(crate) arena: GcArena,
+    pub(crate) arena: Option<GcArena>,
+    /// Arena capacity used when creating / resetting (`0` = disabled)
+    #[cfg(feature = "gc_arena")]
+    arena_capacity: usize,
+    /// Allocations larger than this skip the arena (`0` = all skip)
+    #[cfg(feature = "gc_arena")]
+    pub(crate) arena_max_alloc: usize,
 }
 
 impl GcPartition {
-    pub(super) fn new() -> Self {
+    /// Create a new partition.
+    ///
+    /// # Parameters
+    ///
+    /// - `capacity`: arena size in bytes. `0` = disable arena for this partition
+    ///   (all allocations go through system malloc directly).
+    /// - `max_alloc`: allocations larger than this skip the arena.
+    ///   When `capacity == 0` this is forced to `0`.
+    #[allow(unused_variables)]
+    pub fn new(capacity: usize, max_alloc: usize) -> Self {
+        #[cfg(feature = "gc_arena")]
+        let (arena, arena_max_alloc) = if capacity > 0 {
+            (
+                Some(GcArena::new(capacity).expect("arena alloc failed")),
+                max_alloc,
+            )
+        } else {
+            (None, 0)
+        };
+
         Self {
             memory_used: 0,
             nodes: GcNodeLink::default(),
@@ -47,8 +72,23 @@ impl GcPartition {
             marking: false,
 
             #[cfg(feature = "gc_arena")]
-            arena: GcArena::new(crate::arena::ARENA_CAPACITY).expect("arena alloc failed"),
+            arena,
+            #[cfg(feature = "gc_arena")]
+            arena_capacity: capacity,
+            #[cfg(feature = "gc_arena")]
+            arena_max_alloc,
         }
+    }
+
+    /// Reset the arena with the same capacity used at creation time.
+    /// Used by `dealloc_partition` after freeing all nodes.
+    #[cfg(feature = "gc_arena")]
+    pub(super) fn reset_arena(&mut self) {
+        self.arena = if self.arena_capacity > 0 {
+            Some(GcArena::new(self.arena_capacity).expect("arena alloc failed"))
+        } else {
+            None
+        };
     }
 
     #[inline(always)]
@@ -93,9 +133,19 @@ impl GcPartition {
 
 impl GcHeap {
     /// Create a new partition and return its ID.
-    pub fn create_partition(&mut self) -> GcPartitionId {
+    ///
+    /// # Parameters
+    ///
+    /// - `arena_capacity`: arena size in bytes. `0` = disable arena for this partition.
+    /// - `arena_max_alloc`: allocations larger than this skip the arena.
+    pub fn create_partition(
+        &mut self,
+        arena_capacity: usize,
+        arena_max_alloc: usize,
+    ) -> GcPartitionId {
         let id = GcPartitionId(self.partitions.len() as u16);
-        self.partitions.push(GcPartition::new());
+        self.partitions
+            .push(GcPartition::new(arena_capacity, arena_max_alloc));
         id
     }
 
@@ -225,8 +275,14 @@ impl GcHeap {
         );
         self.total_memory_used -= partition_mem;
 
-        // Reset partition to fresh state (all nodes have been freed)
-        self.partitions[partition_id.0 as usize] = GcPartition::new();
+        // Reset partition to fresh state (all nodes have been freed).
+        // Use reset_arena to preserve the original arena configuration.
+        #[cfg(feature = "gc_arena")]
+        self.partitions[partition_id.0 as usize].reset_arena();
+        self.partitions[partition_id.0 as usize].memory_used = 0;
+        self.partitions[partition_id.0 as usize].nodes = GcNodeLink::default();
+        self.partitions[partition_id.0 as usize].gray_list.clear();
+        self.partitions[partition_id.0 as usize].marking = false;
 
         log::trace!("[dealloc_partition] freed {freed_bytes} bytes");
 
@@ -301,6 +357,7 @@ impl GcHeap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arena::{ARENA_CAPACITY, MAX_ARENA_ALLOC};
 
     #[derive(Debug)]
     struct DummyType;
@@ -315,7 +372,7 @@ mod tests {
     #[test]
     fn test_partition_creation() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let id = heap.create_partition();
+        let id = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
 
         let partition = heap.partition(id).unwrap();
         assert_eq!(partition.memory_used(), 0);
@@ -347,7 +404,7 @@ mod tests {
     #[test]
     fn test_memory_limit() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let id = heap.create_partition();
+        let id = heap.create_partition(0, 0);
 
         assert_eq!(heap.memory_limit(), 0);
 
@@ -384,7 +441,7 @@ mod tests {
     #[test]
     fn test_update_mem_use() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let id = heap.create_partition();
+        let id = heap.create_partition(0, 0);
 
         heap.update_mem_use(id, 100);
         assert_eq!(heap.partition(id).unwrap().memory_used(), 100);
@@ -408,7 +465,7 @@ mod tests {
     #[test]
     fn test_remove_partition_reclaims_memory_stats() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let id = heap.create_partition();
+        let id = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
 
         // Allocate some nodes
         let _n1 = unsafe { heap.alloc_raw(id, DummyType) }.unwrap();
