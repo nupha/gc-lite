@@ -192,6 +192,18 @@ impl GcHeap {
         // Clone the partition's node link so we can iterate without borrowing &self.
         let link = self.partitions[partition_id.0 as usize].nodes.clone();
 
+        // Pre-clear all weak_slots BEFORE dropping any payloads.
+        // This prevents use-after-free when a Drop callback in a later node
+        // calls GcWeak::upgrade() on a node whose payload was already dropped
+        // earlier in this same pass. The node pointer is Cell-wrapped so we
+        // can mutate it through &self.
+        for node in link.iter() {
+            let hd = unsafe { node.as_ref() };
+            if !hd.weak_id.is_null() {
+                self.weak_slots[hd.weak_id.index() as usize].1.set(None);
+            }
+        }
+
         // Process nodes by drop pass order.
         // We iterate all nodes for each pass to respect inter-pass dependencies.
         for &pass in self.node_dtypes.drop_passes {
@@ -230,7 +242,7 @@ impl GcHeap {
                         widx,
                         self.weak_slots.len(),
                     );
-                    self.weak_slots.get_unchecked_mut(widx as usize).1.take();
+                    self.weak_slots.get_unchecked_mut(widx as usize).1.set(None);
                 }
             }
 

@@ -103,17 +103,13 @@ impl GcHeap {
                         // Write payload
                         unsafe {
                             std::ptr::write(
-                                arena_ptr
-                                    .add(payload_offset_of::<T>())
-                                    .cast::<T>()
-                                    .as_ptr(),
+                                arena_ptr.add(payload_offset_of::<T>()).cast::<T>().as_ptr(),
                                 payload,
                             );
                         }
 
                         let mut attrs = 0xFF00_0000 | ((gc_type as u32) << 8);
-                        attrs |=
-                            crate::node::GcNodeFlag::ARENA_ALLOC.bits() as u32;
+                        attrs |= crate::node::GcNodeFlag::ARENA_ALLOC.bits() as u32;
 
                         let node_info = GcHead {
                             attrs,
@@ -133,8 +129,7 @@ impl GcHeap {
 
                         #[cfg(debug_assertions)]
                         unsafe {
-                            let n =
-                                NonNull::new_unchecked(head.as_ptr().cast());
+                            let n = NonNull::new_unchecked(head.as_ptr().cast());
                             debug_assert!(
                                 !self.dbg_living_nodes.contains(&n),
                                 "node {head:?} already exists"
@@ -144,7 +139,7 @@ impl GcHeap {
 
                         return Ok((head, gross_size));
                     }
-                    
+
                     // Arena full → fall through to system malloc (NO GC)
                 }
             }
@@ -269,7 +264,7 @@ impl GcHeap {
                 self.weak_slots.len(),
             );
             unsafe {
-                self.weak_slots.get_unchecked_mut(widx as usize).1.take();
+                self.weak_slots.get_unchecked_mut(widx as usize).1.set(None);
             }
         }
 
@@ -328,9 +323,12 @@ impl GcHeap {
     /// Call `Drop::drop` on a node's payload without deallocating memory.
     ///
     /// This is the Phase 1 operation in the two-phase partition removal design.
-    /// It only calls the type's `drop_fn` on the payload — no weak slot cleanup,
-    /// no memory deallocation, no memory accounting update. Those happen in
-    /// Phase 2 (`dealloc_partition`), which takes `&mut self`.
+    /// It only calls the type's `drop_fn` on the payload — no memory deallocation,
+    /// no memory accounting update. Those happen in Phase 2 (`dealloc_partition`).
+    ///
+    /// Note: weak_slots are pre-cleared by `finalize_partition` before any drop
+    /// callbacks run, so `GcWeak::upgrade()` of nodes in the same partition will
+    /// return `None` during `Drop` callbacks.
     ///
     /// # Safety
     ///

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 John Ray <996351336@qq.com>
 
-use std::marker::PhantomData;
+use std::{cell::Cell, marker::PhantomData};
 
 use crate::{Gc, GcNode, GcRef, heap::GcHeap};
 
@@ -110,10 +110,10 @@ impl GcHeap {
             #[cfg(debug_assertions)]
             {
                 debug_assert!((node.weak_id.index() as usize) < self.weak_slots.len());
-                let (ver, ptr) = self.weak_slots[node.weak_id.index() as usize];
-                debug_assert!(
-                    ver == node.weak_id.version() && ptr.is_some_and(|p| p == gc_ref.head_ptr)
-                );
+                let slot = &self.weak_slots[node.weak_id.index() as usize];
+                let ver = slot.0;
+                let ptr = slot.1.get();
+                debug_assert!(ver == node.weak_id.version() && ptr == Some(gc_ref.head_ptr));
             }
             GcWeak::from_id(node.weak_id)
         } else {
@@ -125,10 +125,10 @@ impl GcHeap {
             let i = self
                 .weak_slots
                 .iter()
-                .position(|(_, slot)| slot.is_none())
+                .position(|(_, slot)| slot.get().is_none())
                 .unwrap_or_else(|| {
                     let n = self.weak_slots.len();
-                    self.weak_slots.push((0, None));
+                    self.weak_slots.push((0, Cell::new(None)));
                     n
                 });
 
@@ -142,7 +142,9 @@ impl GcHeap {
                 };
 
                 let weak = GcWeak::new(i as _, version);
-                *self.weak_slots.get_unchecked_mut(i) = (version, Some(gc_ref.head_ptr));
+                let slot = self.weak_slots.get_unchecked_mut(i);
+                slot.0 = version;
+                slot.1.set(Some(gc_ref.head_ptr));
                 node.weak_id = weak.weak_id;
 
                 weak
@@ -157,7 +159,7 @@ impl GcHeap {
                 .get(weak_ref.index() as usize)
                 .and_then(|(version, node)| {
                     if *version == weak_ref.version() {
-                        *node
+                        node.get()
                     } else {
                         None
                     }

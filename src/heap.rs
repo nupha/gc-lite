@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
-use std::ptr::NonNull;
+use std::{cell::Cell, ptr::NonNull};
 
 use crate::{
     gctype::GcTypeRegistry,
@@ -35,8 +35,11 @@ pub struct GcHeap {
     pub(super) gc_threshold: usize,
     /// Total memory used across all partitions
     pub(super) total_memory_used: usize,
-    /// Weak reference list, each slot stores (version, GcHeader)
-    pub(super) weak_slots: Vec<(u16, Option<NonNull<GcHead>>)>,
+    /// Weak reference list, each slot stores (version, GcHeader).
+    /// The node pointer is wrapped in `Cell` to allow clearing through `&self`
+    /// during `finalize_partition` — preventing use-after-free when a Drop
+    /// callback upgrades a weak ref to a node whose payload was already dropped.
+    pub(super) weak_slots: Vec<(u16, Cell<Option<NonNull<GcHead>>>)>,
     /// gc scope stack list
     pub(crate) scope_stacks: Vec<ScopeStack>, // DON'T use SmallVec here
 
@@ -282,8 +285,8 @@ impl GcHeap {
 
 #[cfg(test)]
 mod heap_tests {
-    use crate::{GcRef, GcTraceCtx, node::GcNode, trace::GcTrace};
     use crate::arena::{ARENA_CAPACITY, MAX_ARENA_ALLOC};
+    use crate::{GcRef, GcTraceCtx, node::GcNode, trace::GcTrace};
 
     use super::*;
 
