@@ -1,6 +1,6 @@
 use {
     core::ptr::NonNull,
-    std::{cell::UnsafeCell, marker::PhantomData, num::NonZeroU8},
+    std::{cell::UnsafeCell, marker::PhantomData, num::NonZeroU32},
 };
 
 #[cfg(debug_assertions)]
@@ -47,7 +47,7 @@ pub struct GcScopeState<'s> {
     heap: NonNull<GcHeap>,
     partition_id: GcPartitionId,
     stack_id: GcScopeStackId,
-    depth: NonZeroU8,
+    depth: NonZeroU32,
     cache: UnsafeCell<SmallVec<[NonNull<GcHead>; 8]>>,
     #[cfg(debug_assertions)]
     borrow_flag: Cell<bool>,
@@ -78,7 +78,7 @@ impl<'s> GcScopeState<'s> {
             heap: NonNull::from_ref(heap),
             stack_id,
             partition_id,
-            depth: NonZeroU8::new(depth).unwrap(),
+            depth: NonZeroU32::new(depth).unwrap(),
             cache: UnsafeCell::new(SmallVec::new()),
             #[cfg(debug_assertions)]
             borrow_flag: Cell::new(false),
@@ -107,7 +107,7 @@ impl<'s> GcScopeState<'s> {
     }
 
     #[inline(always)]
-    pub fn depth(&self) -> u8 {
+    pub fn depth(&self) -> u32 {
         self.depth.get()
     }
 
@@ -117,7 +117,7 @@ impl<'s> GcScopeState<'s> {
     }
 
     /// get parent scope, and its level.
-    pub fn parent(&self) -> Option<(&GcScopeState<'_>, u8)> {
+    pub fn parent(&self) -> Option<(&GcScopeState<'_>, u32)> {
         let d = self.depth();
         if d > 1 {
             let parent_index = d - 2;
@@ -276,7 +276,7 @@ impl<'s> GcScopeState<'s> {
 pub struct GcScope<'s> {
     heap: NonNull<GcHeap>,
     stack_id: GcScopeStackId,
-    index: u8,
+    index: u32,
     _marker: PhantomData<&'s ()>,
 }
 
@@ -292,8 +292,8 @@ impl<'s> Drop for GcScope<'s> {
                 self.stack_id.0,
             );
             debug_assert_eq!(
-                stack.list.len() as u8 - 1,
-                self.index,
+                stack.list.len() as u32 - 1,
+                self.index as u32,
                 "GcScope dropped out of LIFO order: scope stack {} has {} entries, expected top index {}",
                 self.stack_id.0,
                 stack.list.len(),
@@ -380,13 +380,13 @@ impl GcHeap {
 
     /// get max depth of a scope stack
     #[inline(always)]
-    pub fn scope_max_depth(&self, stack_id: GcScopeStackId) -> u8 {
+    pub fn scope_max_depth(&self, stack_id: GcScopeStackId) -> u32 {
         self.scope_stacks[stack_id.0 as usize].list.len() as _
     }
 
     /// get scope state specified by (stack_id, depth).
     /// where `depth` is 1-based (1 means index #0)
-    pub fn scope(&self, stack_id: GcScopeStackId, depth: u8) -> Option<&GcScopeState<'_>> {
+    pub fn scope(&self, stack_id: GcScopeStackId, depth: u32) -> Option<&GcScopeState<'_>> {
         if depth > 0 {
             self.scope_stacks[stack_id.0 as usize]
                 .list
@@ -402,7 +402,7 @@ impl GcHeap {
     ///
     /// Caller must ensure `index < scope_max_depth(stack_id)`.
     #[inline(always)]
-    pub unsafe fn scope_unchecked(&self, stack_id: GcScopeStackId, index: u8) -> &GcScopeState<'_> {
+    pub unsafe fn scope_unchecked(&self, stack_id: GcScopeStackId, index: u32) -> &GcScopeState<'_> {
         debug_assert!(
             (index as usize) < self.scope_stacks[stack_id.0 as usize].list.len(),
             "scope_unchecked: index {index} out of bounds for stack {} (len {})",
@@ -440,12 +440,16 @@ impl GcHeap {
             "scope stack {stack_id:?} is not acquired"
         );
 
-        let depth = stack.list.len() as u8 + 1;
+        let list_len = stack.list.len();
+        if list_len >= u32::MAX as usize {
+            panic!("scope stack overflow: depth {} exceeds u32::MAX", list_len);
+        }
+        let depth = list_len as u32 + 1;
         let state = GcScopeState {
             heap,
             stack_id,
             partition_id: stack.partition.unwrap(),
-            depth: NonZeroU8::new(depth).unwrap(),
+            depth: NonZeroU32::new(depth).unwrap(),
             cache: UnsafeCell::new(SmallVec::new()),
             #[cfg(debug_assertions)]
             borrow_flag: Cell::new(false),
@@ -461,7 +465,7 @@ impl GcHeap {
         GcScope {
             heap,
             stack_id,
-            index: depth - 1,
+            index: (depth - 1) as u32,
             _marker: PhantomData,
         }
     }
