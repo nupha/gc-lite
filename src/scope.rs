@@ -251,7 +251,7 @@ impl<'s> GcScopeState<'s> {
             if target_cache.is_none() {
                 *target_cache = Some(Vec::with_capacity(1));
             }
-            unsafe { target_cache.as_mut().unwrap().push(node); }
+            target_cache.as_mut().unwrap().push(node);
             true
         } else {
             // Node not found in this scope's cache. This is safe — the node
@@ -416,7 +416,11 @@ impl GcHeap {
     ///
     /// Caller must ensure `index < scope_max_depth(stack_id)`.
     #[inline(always)]
-    pub unsafe fn scope_unchecked(&self, stack_id: GcScopeStackId, index: u32) -> &GcScopeState<'_> {
+    pub unsafe fn scope_unchecked(
+        &self,
+        stack_id: GcScopeStackId,
+        index: u32,
+    ) -> &GcScopeState<'_> {
         debug_assert!(
             (index as usize) < self.scope_stacks[stack_id.0 as usize].list.len(),
             "scope_unchecked: index {index} out of bounds for stack {} (len {})",
