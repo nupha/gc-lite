@@ -6,8 +6,6 @@ use {
 #[cfg(debug_assertions)]
 use std::cell::Cell;
 
-use smallvec::SmallVec;
-
 use crate::{
     heap::GcHeap,
     helpers::GcError,
@@ -48,7 +46,7 @@ pub struct GcScopeState<'s> {
     partition_id: GcPartitionId,
     stack_id: GcScopeStackId,
     depth: NonZeroU32,
-    cache: UnsafeCell<SmallVec<[NonNull<GcHead>; 8]>>,
+    cache: UnsafeCell<Option<Vec<NonNull<GcHead>>>>,
     #[cfg(debug_assertions)]
     borrow_flag: Cell<bool>,
     _marker: PhantomData<&'s ()>,
@@ -79,7 +77,7 @@ impl<'s> GcScopeState<'s> {
             stack_id,
             partition_id,
             depth: NonZeroU32::new(depth).unwrap(),
-            cache: UnsafeCell::new(SmallVec::new()),
+            cache: UnsafeCell::new(None),
             #[cfg(debug_assertions)]
             borrow_flag: Cell::new(false),
             _marker: PhantomData,
@@ -113,7 +111,7 @@ impl<'s> GcScopeState<'s> {
 
     #[inline(always)]
     pub fn count(&self) -> usize {
-        unsafe { (*self.cache.get()).len() }
+        unsafe { (*self.cache.get()).as_ref().map_or(0, |c| c.len()) }
     }
 
     /// get parent scope, and its level.
@@ -163,7 +161,11 @@ impl<'s> GcScopeState<'s> {
         self.borrow_flag.set(true);
 
         unsafe {
-            (*self.cache.get()).push(node);
+            let cache = &mut *self.cache.get();
+            if cache.is_none() {
+                *cache = Some(Vec::with_capacity(1));
+            }
+            cache.as_mut().unwrap().push(node);
         }
 
         #[cfg(debug_assertions)]
@@ -202,8 +204,10 @@ impl<'s> GcScopeState<'s> {
         unsafe {
             node.as_ref().debug_assert_node_valid_simple();
         }
-        let cache = unsafe { &mut *self.cache.get() };
-        if let Some(pos) = cache.iter().position(|&n| n == node) {
+        let cache_opt = unsafe { &mut *self.cache.get() };
+        if let Some(cache) = cache_opt.as_mut()
+            && let Some(pos) = cache.iter().position(|&n| n == node)
+        {
             cache.swap_remove(pos);
             unsafe {
                 node.as_mut().remove_flag(GcNodeFlag::LOCAL);
@@ -215,7 +219,11 @@ impl<'s> GcScopeState<'s> {
     }
 
     pub fn contains(&self, node: NonNull<GcHead>) -> bool {
-        unsafe { (*self.cache.get()).contains(&node) }
+        unsafe {
+            (*self.cache.get())
+                .as_ref()
+                .map_or(false, |c| c.contains(&node))
+        }
     }
 
     /// Move a node from this scope's cache to the target scope's cache.
@@ -229,17 +237,21 @@ impl<'s> GcScopeState<'s> {
     /// Returns `false` if the node was not in this scope's cache (e.g., it
     /// is a root node, or already belongs to another scope).
     pub fn promote_node_to(&self, node: NonNull<GcHead>, target: &GcScopeState<'_>) -> bool {
-        let cache = unsafe { &mut *self.cache.get() };
+        let cache_opt = unsafe { &mut *self.cache.get() };
 
-        if let Some(pos) = cache.iter().position(|&n| n == node) {
+        if let Some(cache) = cache_opt.as_mut()
+            && let Some(pos) = cache.iter().position(|&n| n == node)
+        {
             debug_assert!(
                 unsafe { node.as_ref().is_local() },
                 "promote_node_to: node is not LOCAL",
             );
             cache.swap_remove(pos);
-            unsafe {
-                (*target.cache.get()).push(node);
+            let target_cache = unsafe { &mut *target.cache.get() };
+            if target_cache.is_none() {
+                *target_cache = Some(Vec::with_capacity(1));
             }
+            unsafe { target_cache.as_mut().unwrap().push(node); }
             true
         } else {
             // Node not found in this scope's cache. This is safe — the node
@@ -259,10 +271,12 @@ impl<'s> GcScopeState<'s> {
 
     // clear and unprotect locals nodes in this scope, remote LOCAL flag of each
     pub fn clear(&self) {
-        let lst = std::mem::take(unsafe { &mut *self.cache.get() });
-        for mut n in lst {
-            unsafe {
-                n.as_mut().remove_flag(crate::node::GcNodeFlag::LOCAL);
+        let cache_opt = unsafe { &mut *self.cache.get() };
+        if let Some(lst) = cache_opt.take() {
+            for mut n in lst {
+                unsafe {
+                    n.as_mut().remove_flag(crate::node::GcNodeFlag::LOCAL);
+                }
             }
         }
     }
@@ -450,7 +464,7 @@ impl GcHeap {
             stack_id,
             partition_id: stack.partition.unwrap(),
             depth: NonZeroU32::new(depth).unwrap(),
-            cache: UnsafeCell::new(SmallVec::new()),
+            cache: UnsafeCell::new(None),
             #[cfg(debug_assertions)]
             borrow_flag: Cell::new(false),
             _marker: PhantomData,
