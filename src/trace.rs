@@ -790,8 +790,7 @@ mod tests {
         );
 
         // Sweep p0 — only p0's White nodes are removed.
-        let freed = heap.sweep(p0, |_, _| {});
-        assert!(freed >= 0);
+        heap.sweep(p0, |_, _| {});
 
         // NodeB still present in p1's node chain.
         assert_eq!(count_nodes_in_partition(&heap, p1), 1);
