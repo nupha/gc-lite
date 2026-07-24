@@ -1,6 +1,6 @@
 [package]
 name = "gc-lite"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 authors = ["John Ray <996351336@qq.com>"]
 description = "A simple partitioned garbage collector"

@@ -108,7 +108,7 @@ impl std::fmt::Debug for GcHead {
 impl GcHead {
     /// Get gc node data type id
     #[inline(always)]
-    pub(crate) fn dtype(&self) -> u8 {
+    pub fn dtype(&self) -> u8 {
         ((self.attrs & 0xFF00) >> 8) as u8
     }
 
@@ -307,6 +307,13 @@ impl<T: GcNode> std::fmt::Debug for GcRef<T> {
 }
 
 impl<T: GcNode> GcRef<T> {
+    pub unsafe fn from_node_ptr(head_ptr: NonNull<GcHead>) -> Self {
+        Self {
+            head_ptr,
+            _marker: PhantomData::<T>,
+        }
+    }
+
     /// Access the underlying GC-managed object as a reference.
     ///
     /// # Safety
