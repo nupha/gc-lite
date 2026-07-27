@@ -5,8 +5,8 @@ use std::{cell::Cell, marker::PhantomData};
 
 use crate::{Gc, GcNode, GcRef, heap::GcHeap};
 
-/// bit 16-31: slot index in weak_list
-/// bit 0-15:  version
+/// bit 8-31: slot index in weak_list (24-bit)
+/// bit 0-7:  version (8-bit)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct GcWeakRawId(u32);
@@ -14,12 +14,12 @@ pub struct GcWeakRawId(u32);
 impl GcWeakRawId {
     pub(crate) const NULL: Self = Self(0);
 
-    pub const fn index(&self) -> u16 {
-        (self.0 >> 16) as u16
+    pub const fn index(&self) -> u32 {
+        self.0 >> 8
     }
 
-    pub const fn version(&self) -> u16 {
-        self.0 as u16
+    pub const fn version(&self) -> u8 {
+        (self.0 & 0xff) as u8
     }
 
     pub const fn is_null(&self) -> bool {
@@ -31,10 +31,8 @@ impl GcWeakRawId {
 #[derive(PartialEq)]
 #[repr(transparent)]
 pub struct GcWeak<T: GcNode> {
-    /// bit 16-31: slot index in weak_list
-    /// bit 0-15:  version
+    /// bit 8-31: slot index in weak_list (24-bit); bit 0-7:  version (8-bit)
     pub(crate) weak_id: GcWeakRawId,
-
     pub(crate) _marker: PhantomData<T>,
 }
 
@@ -64,10 +62,10 @@ impl<T: GcNode> std::fmt::Debug for GcWeak<T> {
 }
 
 impl<T: GcNode> GcWeak<T> {
-    pub(crate) fn new(index: u16, version: u16) -> Self {
+    pub(crate) fn new(index: u32, version: u8) -> Self {
         debug_assert!(version > 0, "GcWeak version must be non-zero");
         Self {
-            weak_id: GcWeakRawId(((index as u32) << 16) | (version as u32)),
+            weak_id: GcWeakRawId(((index << 8) | (version as u32))),
             _marker: PhantomData,
         }
     }
@@ -81,12 +79,12 @@ impl<T: GcNode> GcWeak<T> {
 
     /// get weakref index
     #[inline(always)]
-    pub fn index(&self) -> u16 {
+    pub fn index(&self) -> u32 {
         self.weak_id.index()
     }
 
     #[inline(always)]
-    pub fn version(&self) -> u16 {
+    pub fn version(&self) -> u8 {
         self.weak_id.version()
     }
 
@@ -117,8 +115,8 @@ impl GcHeap {
             }
             GcWeak::from_id(node.weak_id)
         } else {
-            if self.weak_slots.len() == u16::MAX as usize {
-                panic!("too may weakrefs");
+            if self.weak_slots.len() >= (1usize << 24) - 1 {
+                panic!("too many weakrefs");
             }
 
             // Get free slot
@@ -135,11 +133,7 @@ impl GcHeap {
             unsafe {
                 // Set slot `i` with node pointer and new version number
                 let curr_ver = self.weak_slots.get_unchecked(i).0;
-                let version = if curr_ver == u16::MAX {
-                    1
-                } else {
-                    curr_ver + 1
-                };
+                let version = if curr_ver == u8::MAX { 1 } else { curr_ver + 1 };
 
                 let weak = GcWeak::new(i as _, version);
                 let slot = self.weak_slots.get_unchecked_mut(i);
@@ -270,10 +264,10 @@ mod tests {
     /// Test WeakRef's edge cases
     #[test]
     fn test_weak_ref_edge_cases() {
-        // Test maximum slot value
-        let weak_max = GcWeak::<TestData1>::new(u16::MAX, 1);
+        // Test maximum slot value (24-bit index field)
+        let weak_max = GcWeak::<TestData1>::new(0xFFFFFF, 1);
 
-        debug_assert_eq!(weak_max.index(), u16::MAX);
+        debug_assert_eq!(weak_max.index(), 0xFFFFFF);
 
         // Test minimum slot value
         let weak_min = GcWeak::<TestData1>::new(0, 1);

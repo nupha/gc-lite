@@ -39,7 +39,7 @@ pub struct GcHeap {
     /// The node pointer is wrapped in `Cell` to allow clearing through `&self`
     /// during `finalize_partition` — preventing use-after-free when a Drop
     /// callback upgrades a weak ref to a node whose payload was already dropped.
-    pub(super) weak_slots: Vec<(u16, Cell<Option<NonNull<GcHead>>>)>,
+    pub(super) weak_slots: Vec<(u8, Cell<Option<NonNull<GcHead>>>)>,
     /// gc scope stack list
     pub(crate) scope_stacks: Vec<ScopeStack>, // DON'T use SmallVec here
 
