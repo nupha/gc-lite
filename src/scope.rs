@@ -222,7 +222,7 @@ impl<'s> GcScopeState<'s> {
         unsafe {
             (*self.cache.get())
                 .as_ref()
-                .map_or(false, |c| c.contains(&node))
+                .is_some_and(|c| c.contains(&node))
         }
     }
 
@@ -307,7 +307,7 @@ impl<'s> Drop for GcScope<'s> {
             );
             debug_assert_eq!(
                 stack.list.len() as u32 - 1,
-                self.index as u32,
+                self.index,
                 "GcScope dropped out of LIFO order: scope stack {} has {} entries, expected top index {}",
                 self.stack_id.0,
                 stack.list.len(),
@@ -483,7 +483,7 @@ impl GcHeap {
         GcScope {
             heap,
             stack_id,
-            index: (depth - 1) as u32,
+            index: depth - 1,
             _marker: PhantomData,
         }
     }

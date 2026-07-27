@@ -95,53 +95,53 @@ impl GcHeap {
         #[cfg(feature = "gc_arena")]
         if !skip_arena {
             let par = &self.partitions[partition_id.0 as usize];
-            if gross_size <= par.arena_max_alloc {
-                if let Some(ref arena) = par.arena {
-                    if let Some(arena_ptr) = arena.alloc(layout) {
-                        let head = arena_ptr.cast::<GcHead>();
 
-                        // Write payload
-                        unsafe {
-                            std::ptr::write(
-                                arena_ptr.add(payload_offset_of::<T>()).cast::<T>().as_ptr(),
-                                payload,
-                            );
-                        }
+            if gross_size <= par.arena_max_alloc
+                && let Some(ref arena) = par.arena
+                && let Some(arena_ptr) = arena.alloc(layout)
+            {
+                let head = arena_ptr.cast::<GcHead>();
 
-                        let mut attrs = 0xFF00_0000 | ((gc_type as u32) << 8);
-                        attrs |= crate::node::GcNodeFlag::ARENA_ALLOC.bits() as u32;
-
-                        let node_info = GcHead {
-                            attrs,
-                            partition: partition_id.0 as u32,
-                            weak_id: GcWeakRawId::NULL,
-                            next: None,
-
-                            #[cfg(debug_assertions)]
-                            dbg_string: std::any::type_name::<T>().into(),
-                        };
-
-                        unsafe {
-                            std::ptr::write(head.as_ptr(), node_info);
-                        }
-
-                        self.update_mem_use(partition_id, gross_size as i32);
-
-                        #[cfg(debug_assertions)]
-                        unsafe {
-                            let n = NonNull::new_unchecked(head.as_ptr().cast());
-                            debug_assert!(
-                                !self.dbg_living_nodes.contains(&n),
-                                "node {head:?} already exists"
-                            );
-                            self.dbg_living_nodes.insert(n);
-                        }
-
-                        return Ok((head, gross_size));
-                    }
-
-                    // Arena full → fall through to system malloc (NO GC)
+                // Write payload
+                unsafe {
+                    std::ptr::write(
+                        arena_ptr.add(payload_offset_of::<T>()).cast::<T>().as_ptr(),
+                        payload,
+                    );
                 }
+
+                let mut attrs = 0xFF00_0000 | ((gc_type as u32) << 8);
+                attrs |= crate::node::GcNodeFlag::ARENA_ALLOC.bits() as u32;
+
+                let node_info = GcHead {
+                    attrs,
+                    partition: partition_id.0 as u32,
+                    weak_id: GcWeakRawId::NULL,
+                    next: None,
+
+                    #[cfg(debug_assertions)]
+                    dbg_string: std::any::type_name::<T>().into(),
+                };
+
+                unsafe {
+                    std::ptr::write(head.as_ptr(), node_info);
+                }
+
+                self.update_mem_use(partition_id, gross_size as i32);
+
+                #[cfg(debug_assertions)]
+                unsafe {
+                    let n = NonNull::new_unchecked(head.as_ptr().cast());
+                    debug_assert!(
+                        !self.dbg_living_nodes.contains(&n),
+                        "node {head:?} already exists"
+                    );
+                    self.dbg_living_nodes.insert(n);
+                }
+
+                return Ok((head, gross_size));
+
+                // Arena full → fall through to system malloc (NO GC)
             }
         }
 

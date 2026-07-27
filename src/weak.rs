@@ -65,7 +65,7 @@ impl<T: GcNode> GcWeak<T> {
     pub(crate) fn new(index: u32, version: u8) -> Self {
         debug_assert!(version > 0, "GcWeak version must be non-zero");
         Self {
-            weak_id: GcWeakRawId(((index << 8) | (version as u32))),
+            weak_id: GcWeakRawId((index << 8) | (version as u32)),
             _marker: PhantomData,
         }
     }
