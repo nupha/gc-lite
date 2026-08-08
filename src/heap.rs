@@ -52,7 +52,14 @@ pub struct GcHeap {
     pub(crate) dbg_living_nodes: std::collections::HashSet<NonNull<GcHead>>,
 }
 
-impl GcHeap {}
+impl GcHeap {
+    /// Debug helper: whether the node is currently tracked as a living (never
+    /// freed) node. Exposed so embedders can diagnose use-after-free.
+    #[cfg(debug_assertions)]
+    pub fn is_dbg_living_node(&self, n: std::ptr::NonNull<GcHead>) -> bool {
+        self.dbg_living_nodes.contains(&n)
+    }
+}
 
 impl Drop for GcHeap {
     fn drop(&mut self) {
