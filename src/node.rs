@@ -165,6 +165,23 @@ impl GcHead {
         f.intersects(GcNodeFlag::ROOT | GcNodeFlag::LOCAL)
     }
 
+    /// Clear the LOCAL flag on this node.
+    ///
+    /// This is the inverse of `alloc_local`'s flag-setting side effect. Use it
+    /// when a LOCAL node must outlive its scope without being removed from the
+    /// scope cache first — for example, when throwing a cross-realm error that
+    /// was allocated on a different scope stack.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the node is still alive and that clearing the
+    /// flag does not violate GC invariants (e.g., the node must be reachable
+    /// through some other root or reference after the flag is cleared).
+    #[inline(always)]
+    pub unsafe fn clear_local_flag(&mut self) {
+        self.remove_flag(GcNodeFlag::LOCAL);
+    }
+
     #[inline(always)]
     pub(super) fn traverse_visited(&self) -> bool {
         self.contains_flag(GcNodeFlag::TRAVERSE_VISITED)
