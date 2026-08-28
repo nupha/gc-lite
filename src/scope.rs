@@ -530,9 +530,30 @@ impl GcHeap {
 
 #[cfg(test)]
 mod tests {
-    use crate::{GcRef, GcTraceCtx, trace::GcTrace};
+    use crate::{GcRef, GcTraceCtx, node::GcTriColor, trace::GcTrace};
 
     use super::*;
+
+    /// Two-phase sweep helper: unlink → drop payloads → dispose.
+    fn two_phase_sweep(heap: &mut GcHeap, pid: GcPartitionId) -> usize {
+        if let Some(white) = heap.sweep_unlink(pid) {
+            let registry = heap.type_registry();
+            for node in white.iter() {
+                let hd = unsafe { node.as_ref() };
+                if hd.color() != GcTriColor::White || hd.is_root_or_local() {
+                    continue;
+                }
+                let dtype = hd.dtype() as usize;
+                let info = &registry.type_info_list[dtype];
+                if let Some(f) = info.drop_fn {
+                    unsafe { f(info.payload_ptr(node).as_ptr()); }
+                }
+            }
+            heap.sweep_dispose(pid, white)
+        } else {
+            0
+        }
+    }
 
     #[derive(Debug)]
     struct Node {
@@ -610,9 +631,7 @@ mod tests {
             }
 
             while !ctx.heap_mut().mark(partition_id, 64) {}
-            let removed = ctx
-                .heap_mut()
-                .sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+            let removed = two_phase_sweep(ctx.heap_mut(), partition_id);
             assert_eq!(removed, 0);
             ctx.clear();
         }
@@ -622,7 +641,7 @@ mod tests {
         }
 
         while !heap.mark(partition_id, 64) {}
-        let removed_after = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        let removed_after = two_phase_sweep(&mut heap, partition_id);
         assert!(removed_after > 0);
     }
 
@@ -670,7 +689,7 @@ mod tests {
         }
 
         while !heap.mark(partition_id, 64) {}
-        let removed_after = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        let removed_after = two_phase_sweep(&mut heap, partition_id);
         assert!(removed_after > 0);
     }
 
@@ -733,7 +752,7 @@ mod tests {
         }
 
         while !heap.mark(partition_id, 64) {}
-        let removed_after = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        let removed_after = two_phase_sweep(&mut heap, partition_id);
         assert_eq!(removed_after, 0);
     }
 
@@ -770,9 +789,7 @@ mod tests {
             }
 
             while !ctx.heap_mut().mark(partition_id, 64) {}
-            let removed = ctx
-                .heap_mut()
-                .sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+            let removed = two_phase_sweep(ctx.heap_mut(), partition_id);
             assert_eq!(removed, 0);
             ctx.clear();
         }
@@ -783,7 +800,7 @@ mod tests {
         }
 
         while !heap.mark(partition_id, 64) {}
-        let removed_after = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        let removed_after = two_phase_sweep(&mut heap, partition_id);
         assert!(removed_after >= 2);
     }
 
@@ -817,9 +834,7 @@ mod tests {
             }
 
             while !ctx.heap_mut().mark(partition_id, 64) {}
-            let removed_before = ctx
-                .heap_mut()
-                .sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+            let removed_before = two_phase_sweep(ctx.heap_mut(), partition_id);
             assert!(removed_before > 0);
         }
     }

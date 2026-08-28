@@ -195,6 +195,27 @@ mod tests {
     use super::*;
     use crate::{GcHeap, GcRef, node::GcTriColor};
 
+    /// Two-phase sweep helper: unlink → drop payloads → dispose.
+    fn two_phase_sweep(heap: &mut GcHeap, pid: GcPartitionId) -> usize {
+        if let Some(white) = heap.sweep_unlink(pid) {
+            let registry = heap.type_registry();
+            for node in white.iter() {
+                let hd = unsafe { node.as_ref() };
+                if hd.color() != GcTriColor::White || hd.is_root_or_local() {
+                    continue;
+                }
+                let dtype = hd.dtype() as usize;
+                let info = &registry.type_info_list[dtype];
+                if let Some(f) = info.drop_fn {
+                    unsafe { f(info.payload_ptr(node).as_ptr()); }
+                }
+            }
+            heap.sweep_dispose(pid, white)
+        } else {
+            0
+        }
+    }
+
     /// Test node structure for tracing tests
     #[derive(Debug)]
     struct TestNode {
@@ -520,7 +541,7 @@ mod tests {
         );
 
         // Sweep should not free any nodes since all are marked.
-        let freed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        let freed = two_phase_sweep(&mut heap, partition_id);
         assert_eq!(freed, 0, "No nodes should be freed after write barrier");
 
         // Verify both nodes are still accessible
@@ -575,7 +596,7 @@ mod tests {
         );
 
         // Sweep should not free anything.
-        let freed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        let freed = two_phase_sweep(&mut heap, partition_id);
         assert_eq!(freed, 0);
     }
 
@@ -618,7 +639,7 @@ mod tests {
         );
 
         // Sweep will free the white child (freed > 0 indicates at least one node was collected).
-        let freed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        let freed = two_phase_sweep(&mut heap, partition_id);
         assert!(
             freed > 0,
             "The white child should be swept without write barrier"
@@ -676,7 +697,7 @@ mod tests {
 
         // GC should not collect root nodes
         while !heap.mark(partition_id, 64) {}
-        let freed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        let freed = two_phase_sweep(&mut heap, partition_id);
         assert_eq!(freed, 0);
 
         // Values still accessible after GC
@@ -721,7 +742,7 @@ mod tests {
 
         // GC should not collect root nodes
         while !heap.mark(partition_id, 64) {}
-        let freed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        let freed = two_phase_sweep(&mut heap, partition_id);
         assert_eq!(freed, 0);
 
         // All nodes still accessible after GC
@@ -790,14 +811,14 @@ mod tests {
         );
 
         // Sweep p0 — only p0's White nodes are removed.
-        heap.sweep(p0, |_, _| {});
+        two_phase_sweep(&mut heap, p0);
 
         // NodeB still present in p1's node chain.
         assert_eq!(count_nodes_in_partition(&heap, p1), 1);
 
         // Now GC p1 to verify NodeB is properly traced and survives.
         while !heap.mark(p1, 16) {}
-        let freed = heap.sweep(p1, |_, _| {});
+        let freed = two_phase_sweep(&mut heap, p1);
         assert_eq!(freed, 0, "p1 should have no garbage to collect");
 
         let ids1 = get_all_node_ids(&heap, p1);
@@ -856,7 +877,7 @@ mod tests {
             "p1: NodeB marked via cross-partition push; C needs p1's own mark"
         );
 
-        heap.sweep(p0, |_, _| {});
+        two_phase_sweep(&mut heap, p0);
 
         // ── GC p1 — traces B → discovers C; B + C survive, D collected
         while !heap.mark(p1, 16) {}
@@ -865,7 +886,7 @@ mod tests {
             2,
             "p1: B + C both marked after p1 processes its gray_list"
         );
-        let freed = heap.sweep(p1, |_, _| {});
+        let freed = two_phase_sweep(&mut heap, p1);
         assert!(freed > 0, "p1 should free isolated node D");
 
         let ids1 = get_all_node_ids(&heap, p1);
@@ -932,11 +953,11 @@ mod tests {
         );
 
         // ── Cascade marks — each partition processes its gray_list ──
-        heap.sweep(p0, |_, _| {});
+        two_phase_sweep(&mut heap, p0);
         while !heap.mark(p1, 16) {}
-        heap.sweep(p1, |_, _| {});
+        two_phase_sweep(&mut heap, p1);
         while !heap.mark(p2, 16) {}
-        let freed = heap.sweep(p2, |_, _| {});
+        let freed = two_phase_sweep(&mut heap, p2);
         assert_eq!(freed, 0, "no garbage in cascade");
 
         assert!(
@@ -992,9 +1013,9 @@ mod tests {
         );
 
         // Sweep both partitions
-        heap.sweep(p0, |_, _| {});
+        two_phase_sweep(&mut heap, p0);
         while !heap.mark(p1, 16) {}
-        let freed = heap.sweep(p1, |_, _| {});
+        let freed = two_phase_sweep(&mut heap, p1);
         assert_eq!(freed, 0);
 
         assert!(get_all_node_ids(&heap, p0).contains(&1), "NodeA survives");

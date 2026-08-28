@@ -244,7 +244,7 @@ impl GcHeap {
         })
     }
 
-    /// Dispose a node
+    /// Dispose a node: drop payload, free memory, update accounting.
     pub(crate) fn dispose(&mut self, node: NonNull<GcHead>) -> usize {
         let hd = unsafe { node.as_ref() };
         log::trace!("[dispose] {hd:?}");
@@ -270,10 +270,6 @@ impl GcHeap {
 
         let dtype = hd.dtype() as usize;
         let info = &self.node_dtypes.type_info_list[dtype];
-        // Layout comes from `GcTypeInfo::layout_size` / `layout_align`, which are
-        // set by the `gc_type_table_internal` macro via `layout_size_of::<T>()` /
-        // `layout_align_of::<T>()`. This matches the Layout used at allocation time
-        // in `alloc_node_mem`, ensuring alloc/dealloc symmetry.
         let layout = info.layout();
         let gross_size = layout.size();
 
@@ -283,40 +279,62 @@ impl GcHeap {
             }
         }
 
-        #[cfg(debug_assertions)]
-        unsafe {
-            // Poison GcHead fields so any subsequent use-after-free is caught.
-            // 0xDEAD_BEEF destroys the 0xFF sentinel byte (debug_assert_node_valid_simple
-            // will fail) and is non-zero so even writes that only modify low bits
-            // (e.g. remove_flag) change the value, triggering malloc checksum detection.
-            // Must run AFTER drop_fn so the payload Drop can still access GcHead.
-            (*node.as_ptr()).attrs = 0xDEAD_BEEF;
-            (*node.as_ptr()).next = None;
+        self.dispose_mem_only(node, partition_id, layout, gross_size)
+    }
+
+    /// Free node memory without calling drop_fn. Used in two-phase sweep
+    /// where the caller already dropped payloads via `sweep_unlink`.
+    pub(crate) fn dispose_no_drop(&mut self, node: NonNull<GcHead>) -> usize {
+        let hd = unsafe { node.as_ref() };
+
+        let partition_id = hd.partition_id();
+
+        if !hd.weak_id.is_null() {
+            let widx = hd.weak_id.index();
+            unsafe {
+                self.weak_slots.get_unchecked_mut(widx as usize).1.set(None);
+            }
         }
+
+        let dtype = hd.dtype() as usize;
+        let info = &self.node_dtypes.type_info_list[dtype];
+        let layout = info.layout();
+        let gross_size = layout.size();
+
+        self.dispose_mem_only(node, partition_id, layout, gross_size)
+    }
+
+    fn dispose_mem_only(
+        &mut self,
+        node: NonNull<GcHead>,
+        partition_id: GcPartitionId,
+        layout: core::alloc::Layout,
+        gross_size: usize,
+    ) -> usize {
+        let hd = unsafe { node.as_ref() };
 
         #[cfg(feature = "gc_arena")]
         {
             if hd.contains_flag(crate::node::GcNodeFlag::ARENA_ALLOC) {
-                // Arena-allocated node: memory is owned by GcArena, not by
-                // individual system malloc. Skip mem_dealloc — hole collection
-                // (or frontier merge) is handled by sweep.
-                self.update_mem_use(partition_id, -(gross_size as i32));
-
                 #[cfg(debug_assertions)]
-                {
+                unsafe {
+                    (*node.as_ptr()).attrs = 0xDEAD_BEEF;
+                    (*node.as_ptr()).next = None;
                     self.dbg_living_nodes.remove(&node.cast());
                 }
-
+                self.update_mem_use(partition_id, -(gross_size as i32));
                 return gross_size;
             }
         }
 
+        #[cfg(debug_assertions)]
+        unsafe {
+            (*node.as_ptr()).attrs = 0xDEAD_BEEF;
+            (*node.as_ptr()).next = None;
+        }
+
         self.mem_dealloc(node.cast::<u8>(), layout);
-
-        // Reclaim memory accounting for both partition and global counters.
-        // Use i32::MAX as a safe upper bound; gross_size is always well below that.
         self.update_mem_use(partition_id, -(gross_size as i32));
-
         gross_size
     }
 

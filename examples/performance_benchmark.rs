@@ -69,7 +69,7 @@ fn benchmark_object_sizes() {
 
         // Measure GC performance (all objects can be collected)
         let gc_start = Instant::now();
-        let freed = context.garbage_collect(partition, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        let freed = context.garbage_collect(partition);
         let gc_duration = gc_start.elapsed();
 
         println!("  GC回收 {} 字节耗时: {:?}", freed, gc_duration);
@@ -141,7 +141,7 @@ fn benchmark_complex_graphs() {
 
         // Measure GC performance
         let gc_start = Instant::now();
-        let freed = context.garbage_collect(partition, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        let freed = context.garbage_collect(partition);
         let gc_duration = gc_start.elapsed();
 
         println!("  GC回收 {} 字节耗时: {:?}", freed, gc_duration);
@@ -194,7 +194,7 @@ fn benchmark_memory_efficiency() {
     }
 
     // Collect all objects
-    let freed = context.garbage_collect(partition, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    let freed = context.garbage_collect(partition);
     println!("  Collected all objects, freed {} bytes", freed);
 
     // Verify complete memory collection
@@ -264,7 +264,7 @@ fn benchmark_auto_gc_threshold() {
     }
 
     // Manually trigger GC to see effect
-    let freed = context.garbage_collect(partition, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    let freed = context.garbage_collect(partition);
     println!("  Manual GC freed {} bytes", freed);
 }
 

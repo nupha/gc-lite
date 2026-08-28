@@ -117,7 +117,7 @@ fn main() -> GcResult<()> {
 
     // Manually trigger garbage collection for partition1
     println!("\nManually trigger garbage collection for partition1...");
-    let freed = heap.garbage_collect(partition1, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    let freed = heap.garbage_collect(partition1);
     println!("  Collected {} bytes", freed);
 
     // Verify root objects are still valid
@@ -127,7 +127,7 @@ fn main() -> GcResult<()> {
 
     // Manually trigger garbage collection for partition2
     println!("\nManually trigger garbage collection for partition2...");
-    let freed = heap.garbage_collect(partition2, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    let freed = heap.garbage_collect(partition2);
     println!("  Collected {} bytes", freed);
 
     // Verify partition2 root objects are still valid
@@ -138,7 +138,7 @@ fn main() -> GcResult<()> {
     println!("\nTrigger garbage collection for partition1 again...");
     // obj2 is no longer explicitly un-rooted, but we can simulate it going out of scope
     // to test collection. For this example, we'll just collect other garbage.
-    let freed = heap.garbage_collect(partition1, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    let freed = heap.garbage_collect(partition1);
     println!("  Collected {} bytes", freed);
 
     // Verify remaining root objects are still valid
@@ -197,7 +197,7 @@ fn main() -> GcResult<()> {
 
     // Trigger garbage collection, verify circular references are handled correctly
     println!("\nGarbage collection for handling circular references...");
-    let freed = heap.garbage_collect(partition1, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    let freed = heap.garbage_collect(partition1);
     println!("  回收了 {} 字节内存", freed);
 
     // Demonstrate partition deletion

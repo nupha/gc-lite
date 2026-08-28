@@ -201,6 +201,21 @@ impl GcHeap {
 
     /// dispose white nodes in the partition.
     /// `on_dispose` is called BEFORE a node will be disposed.
+    ///
+    /// ⚠️ **DEPRECATED** — This method is unsound: it calls `drop_fn` while
+    /// `&mut GcHeap` is live, and GC-node `Drop` impls that access
+    /// `RuntimePtr` through raw pointers create aliasing `&mut` references
+    /// (UB exposed by LTO + `panic=abort` as SEGV).
+    ///
+    /// **Use the two-phase API instead:**
+    ///
+    /// ```ignore
+    /// if let Some(white) = gc_heap.sweep_unlink(pid) {
+    ///     // drop payloads here — no &mut GcHeap alive
+    ///     gc_heap.sweep_dispose(pid, white);
+    /// }
+    /// ```
+    #[deprecated(note = "unsound — use sweep_unlink() + sweep_dispose() instead")]
     pub fn sweep(
         &mut self,
         partition_id: GcPartitionId,
@@ -340,12 +355,142 @@ impl GcHeap {
         }
     }
 
-    /// Collect garbage on given partition, call notify with node *BEFORE* it is disposed.
+    /// Phase 1 of two-phase sweep: unlink white (dead) nodes from the
+    /// partition's node list WITHOUT calling `drop_fn` or disposing them.
+    ///
+    /// Returns the linked list of unlinked white nodes, or `None` if the
+    /// mark cycle is not complete or the partition doesn't exist.
+    ///
+    /// After calling this, the caller MUST drop each node's payload
+    /// (via [`GcTypeRegistry::type_info_list`] `drop_fn`) while holding
+    /// **no** `&mut GcHeap` reference, then call [`sweep_dispose`] to
+    /// free memory and update accounting.
+    pub fn sweep_unlink(
+        &mut self,
+        partition_id: GcPartitionId,
+    ) -> Option<GcNodeLink> {
+        if (partition_id.0 as usize) >= self.partitions.len() {
+            return None;
+        }
+
+        let par = &mut self.partitions[partition_id.0 as usize];
+        if par.is_marking() && par.gray_list.is_empty() {
+            par.set_marking(false);
+            std::mem::take(&mut par.nodes).into_inner().map(|h| GcNodeLink::new(Some(h)))
+        } else {
+            None
+        }
+    }
+
+    /// Phase 2 of two-phase sweep: dispose a list of unlinked white nodes.
+    ///
+    /// Does **NOT** call `drop_fn` — the caller must have already dropped
+    /// each node's payload (e.g. via the type registry's `drop_fn` pointer)
+    /// before calling this method.
+    ///
+    /// Handles: weak slot clearing, debug poisoning, memory accounting,
+    /// arena hole collection, and deallocation.
+    ///
+    /// Returns the total bytes freed.
+    pub fn sweep_dispose(
+        &mut self,
+        partition_id: GcPartitionId,
+        mut white: GcNodeLink,
+    ) -> usize {
+        let registry = self.node_dtypes;
+        let mut freed_bytes = 0;
+
+        #[cfg(feature = "gc_arena")]
+        let mut holes: Vec<crate::arena::Hole> = Vec::new();
+
+        for &pass in registry.drop_passes {
+            let mut current = white.into_inner();
+            let mut prev: Option<NonNull<GcHead>> = None;
+            let mut head: Option<NonNull<GcHead>> = None;
+
+            while let Some(mut this) = current {
+                unsafe {
+                    current = this.as_mut().next;
+
+                    let drop_pass = registry.type_info_list
+                        [this.as_ref().dtype() as usize]
+                        .drop_pass;
+
+                    if drop_pass == pass
+                        && this.as_ref().color() == GcTriColor::White
+                        && !this.as_ref().is_root_or_local()
+                    {
+                        if let Some(mut p) = prev {
+                            p.as_mut().next = current;
+                        } else {
+                            head = current;
+                        }
+
+                        // Cache arena info before dispose poisons GcHead
+                        #[cfg(feature = "gc_arena")]
+                        let arena_info = {
+                            let hd = this.as_ref();
+                            let is_arena = hd.contains_flag(GcNodeFlag::ARENA_ALLOC);
+                            let dtype = hd.dtype() as usize;
+                            let info = &self.node_dtypes.type_info_list[dtype];
+                            (is_arena, info.layout().size())
+                        };
+
+                        freed_bytes += self.dispose_no_drop(this);
+
+                        // Arena hole collection (after dispose, which skips mem_dealloc)
+                        #[cfg(feature = "gc_arena")]
+                        if arena_info.0 {
+                            self.partitions[partition_id.0 as usize]
+                                .arena
+                                .as_ref()
+                                .unwrap()
+                                .collect_hole(
+                                    &mut holes,
+                                    this.cast::<u8>(),
+                                    arena_info.1,
+                                );
+                        }
+                    } else {
+                        if head.is_none() {
+                            head = Some(this);
+                        }
+                        prev = Some(this);
+                    }
+                }
+            }
+
+            white = GcNodeLink::new(head);
+            if white.head().is_none() {
+                break;
+            }
+        }
+
+        #[cfg(feature = "gc_arena")]
+        if let Some(ref arena) = self.partitions[partition_id.0 as usize].arena {
+            arena.finish_sweep(&mut holes);
+        }
+
+        debug_assert!(
+            self.partitions[partition_id.0 as usize]
+                .gray_list
+                .is_empty()
+        );
+
+        // update remainder node link of partition
+        if white.head().is_some() {
+            self.partitions[partition_id.0 as usize].nodes = white;
+        }
+
+        freed_bytes
+    }
+
+    /// Collect garbage on given partition: mark all reachable nodes, then
+    /// sweep unmarked (white) nodes using the safe two-phase approach.
     #[inline]
     pub fn garbage_collect(
         &mut self,
         partition_id: GcPartitionId,
-        on_dispose: impl Fn(&GcHeap, &GcHead),
     ) -> usize {
         if self.partition(partition_id).is_none() {
             return 0;
@@ -354,8 +499,25 @@ impl GcHeap {
         // Mark phase: incrementally process gray list until all reachable nodes are marked
         while !self.mark(partition_id, 64) {}
 
-        // Sweep phase: reclaim unmarked (white) nodes
-        self.sweep(partition_id, on_dispose)
+        // Sweep phase: two-phase (unlink → dispose) so Drop impls run
+        // without &mut GcHeap alive.
+        if let Some(white) = self.sweep_unlink(partition_id) {
+            let registry = self.node_dtypes;
+            for node in white.iter() {
+                let hd = unsafe { node.as_ref() };
+                if hd.color() != GcTriColor::White || hd.is_root_or_local() {
+                    continue;
+                }
+                let dtype = hd.dtype() as usize;
+                let info = &registry.type_info_list[dtype];
+                if let Some(f) = info.drop_fn {
+                    unsafe { f(info.payload_ptr(node).as_ptr()); }
+                }
+            }
+            self.sweep_dispose(partition_id, white)
+        } else {
+            0
+        }
     }
 
     /// Dispose all nodes along chain
@@ -447,16 +609,54 @@ mod sweep_test {
         heap.nodes(partition_id).collect()
     }
 
-    /// Test basic sweep functionality
+    /// Two-phase sweep helper: unlink → drop payloads → dispose.
+    fn two_phase_sweep(heap: &mut GcHeap, pid: GcPartitionId) -> usize {
+        if let Some(white) = heap.sweep_unlink(pid) {
+            let registry = heap.type_registry();
+            for node in white.iter() {
+                let hd = unsafe { node.as_ref() };
+                if hd.color() != GcTriColor::White || hd.is_root_or_local() {
+                    continue;
+                }
+                let dtype = hd.dtype() as usize;
+                let info = &registry.type_info_list[dtype];
+                if let Some(f) = info.drop_fn {
+                    unsafe { f(info.payload_ptr(node).as_ptr()); }
+                }
+            }
+            heap.sweep_dispose(pid, white)
+        } else {
+            0
+        }
+    }
+
+    // ── sweep_unlink / sweep_dispose tests ──────────────────────────────
+
     #[test]
-    fn test_sweep_with_basic() {
+    fn test_sweep_unlink_returns_none_when_not_marking() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = create_default_partition(&mut heap);
+        let pid = create_default_partition(&mut heap);
+
+        // No marking cycle started → sweep_unlink returns None.
+        assert!(heap.sweep_unlink(pid).is_none());
+    }
+
+    #[test]
+    fn test_sweep_unlink_returns_none_for_nonexistent_partition() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        assert!(heap.sweep_unlink(GcPartitionId(9999)).is_none());
+    }
+
+    #[test]
+    fn test_two_phase_sweep_basic() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let pid = create_default_partition(&mut heap);
 
         let objects: Vec<GcRef<MyI32>> = (0..5)
-            .map(|i| unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap())
+            .map(|i| unsafe { heap.alloc_raw(pid, MyI32(i)) }.unwrap())
             .collect();
 
+        // Mark odd-indexed as root (survives GC)
         for (i, obj) in objects.iter().enumerate() {
             if i % 2 == 1 {
                 unsafe {
@@ -467,202 +667,146 @@ mod sweep_test {
             }
         }
 
-        assert_eq!(count_nodes_in_partition(&heap, partition_id), 5);
+        assert_eq!(count_nodes_in_partition(&heap, pid), 5);
 
-        while !heap.mark(partition_id, 64) {}
+        while !heap.mark(pid, 64) {}
+        let freed = two_phase_sweep(&mut heap, pid);
 
-        let removed = heap.sweep(partition_id, |_, _| {});
-        assert!(removed > 0, "Should have freed some bytes");
+        assert!(freed > 0);
+        assert_eq!(count_nodes_in_partition(&heap, pid), 2, "Only root nodes remain");
 
-        assert_eq!(
-            count_nodes_in_partition(&heap, partition_id),
-            2,
-            "Only root nodes should remain"
-        );
-
-        let remaining_nodes = get_all_nodes_in_partition(&heap, partition_id);
+        let remaining = get_all_nodes_in_partition(&heap, pid);
         let info = &GC_TYPE_REGISTRY.type_info_list[MyI32::GC_TYPE_ID as usize];
-        for node in remaining_nodes {
+        for node in remaining {
             unsafe {
-                let payload_ptr = info.payload_ptr(node);
-                let value = *(payload_ptr.as_ptr() as *const i32);
+                let value = *(info.payload_ptr(node).as_ptr() as *const i32);
                 assert_eq!(value % 2, 1, "Remaining nodes should have odd values");
             }
         }
     }
 
-    /// Test removing chain head nodes (n个节点被剔除后)
     #[test]
-    fn test_sweep_with_chain_head_removal() {
+    fn test_two_phase_sweep_chain_head_removal() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = create_default_partition(&mut heap);
+        let pid = create_default_partition(&mut heap);
 
-        let objects: Vec<GcRef<MyI32>> = (0..5)
-            .map(|i| unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap())
+        let _objects: Vec<GcRef<MyI32>> = (0..5)
+            .map(|i| unsafe { heap.alloc_raw(pid, MyI32(i)) }.unwrap())
             .collect();
 
-        let _ = unsafe { heap.alloc_root_raw(partition_id, MyI32(3)) }.unwrap();
-        let _ = unsafe { heap.alloc_root_raw(partition_id, MyI32(4)) }.unwrap();
+        let _ = unsafe { heap.alloc_root_raw(pid, MyI32(3)) }.unwrap();
+        let _ = unsafe { heap.alloc_root_raw(pid, MyI32(4)) }.unwrap();
 
-        while !heap.mark(partition_id, 64) {}
+        while !heap.mark(pid, 64) {}
+        let freed = two_phase_sweep(&mut heap, pid);
 
-        let removed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert!(freed > 0);
+        assert_eq!(count_nodes_in_partition(&heap, pid), 2);
 
-        assert!(removed > 0, "Should have freed some bytes");
-
-        // Should have 2 nodes left (3 and 4)
-        assert_eq!(count_nodes_in_partition(&heap, partition_id), 2);
-
-        // Verify chain head is now the node with value 4
-        let head = heap.partitions[partition_id.0 as usize].nodes.head();
-        assert!(head.is_some(), "Chain head should exist");
+        let head = heap.partitions[pid.0 as usize].nodes.head();
+        assert!(head.is_some());
 
         unsafe {
             let info = &GC_TYPE_REGISTRY.type_info_list[MyI32::GC_TYPE_ID as usize];
-            let payload_ptr = info.payload_ptr(head.unwrap());
-            let value = (*(payload_ptr.as_ptr() as *const MyI32)).0;
-            assert_eq!(
-                value, 4,
-                "Chain head should be value 4 (last allocated, first in chain)"
-            );
+            let value = (*(info.payload_ptr(head.unwrap()).as_ptr() as *const MyI32)).0;
+            assert_eq!(value, 4, "Chain head should be value 4");
         }
 
-        // Verify the chain is properly linked
-        let nodes = get_all_nodes_in_partition(&heap, partition_id);
+        let nodes = get_all_nodes_in_partition(&heap, pid);
         assert_eq!(nodes.len(), 2);
 
         unsafe {
             let info = &GC_TYPE_REGISTRY.type_info_list[MyI32::GC_TYPE_ID as usize];
-            let payload_ptr1 = info.payload_ptr(nodes[0]).cast::<MyI32>();
-            let value1 = (*payload_ptr1.as_ptr()).0;
-            assert_eq!(value1, 4);
-
-            let payload_ptr2 = info.payload_ptr(nodes[1]).cast::<MyI32>();
-            let value2 = (*payload_ptr2.as_ptr()).0;
-            assert_eq!(value2, 3);
+            assert_eq!((*(info.payload_ptr(nodes[0]).as_ptr() as *const MyI32)).0, 4);
+            assert_eq!((*(info.payload_ptr(nodes[1]).as_ptr() as *const MyI32)).0, 3);
         }
     }
 
-    /// Test removing all chain head nodes (连续剔除所有链头节点)
     #[test]
-    fn test_sweep_with_all_chain_head_removal() {
+    fn test_two_phase_sweep_all_removed() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = create_default_partition(&mut heap);
+        let pid = create_default_partition(&mut heap);
 
         let _objects: Vec<GcRef<MyI32>> = (0..3)
-            .map(|i| unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap())
+            .map(|i| unsafe { heap.alloc_raw(pid, MyI32(i)) }.unwrap())
             .collect();
 
-        while !heap.mark(partition_id, 64) {}
+        while !heap.mark(pid, 64) {}
+        let freed = two_phase_sweep(&mut heap, pid);
 
-        let removed = heap.sweep(partition_id, |_, n| {
-            println!("dispose {n:?}");
-        });
-
-        assert!(removed > 0, "Should have freed some bytes");
-
-        // Should have 0 nodes left
-        assert_eq!(count_nodes_in_partition(&heap, partition_id), 0);
-
-        // Chain head should be None
-        let head = heap.partitions[partition_id.0 as usize].nodes.head();
-        assert!(
-            head.is_none(),
-            "Chain head should be None after removing all nodes"
-        );
+        assert!(freed > 0);
+        assert_eq!(count_nodes_in_partition(&heap, pid), 0);
+        assert!(heap.partitions[pid.0 as usize].nodes.head().is_none());
     }
 
-    /// Test removing middle nodes
     #[test]
-    fn test_sweep_with_middle_node_removal() {
+    fn test_two_phase_sweep_middle_node_removal() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = create_default_partition(&mut heap);
+        let pid = create_default_partition(&mut heap);
 
         let _objects: Vec<GcRef<MyI32>> = (0..5)
             .map(|i| {
                 if i != 2 {
-                    unsafe { heap.alloc_root_raw(partition_id, MyI32(i)) }.unwrap()
+                    unsafe { heap.alloc_root_raw(pid, MyI32(i)) }.unwrap()
                 } else {
-                    unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap()
+                    unsafe { heap.alloc_raw(pid, MyI32(i)) }.unwrap()
                 }
             })
             .collect();
 
-        while !heap.mark(partition_id, 64) {}
+        while !heap.mark(pid, 64) {}
+        let freed = two_phase_sweep(&mut heap, pid);
 
-        let removed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        assert!(freed > 0);
+        assert_eq!(count_nodes_in_partition(&heap, pid), 4);
 
-        assert!(removed > 0, "Should have freed some bytes");
-
-        // Should have 4 nodes left
-        assert_eq!(count_nodes_in_partition(&heap, partition_id), 4);
-
-        // Verify chain is still properly linked
-        let nodes = get_all_nodes_in_partition(&heap, partition_id);
-        assert_eq!(nodes.len(), 4);
-
+        let nodes = get_all_nodes_in_partition(&heap, pid);
         let expected_values = [4, 3, 1, 0];
         let info = &GC_TYPE_REGISTRY.type_info_list[MyI32::GC_TYPE_ID as usize];
         for (i, node) in nodes.iter().enumerate() {
             unsafe {
-                let payload_ptr = info.payload_ptr(*node);
-                let value = (*(payload_ptr.as_ptr() as *const MyI32)).0;
-                assert_eq!(
-                    value, expected_values[i],
-                    "Node at position {} should have value {}",
-                    i, expected_values[i]
-                );
+                let value = (*(info.payload_ptr(*node).as_ptr() as *const MyI32)).0;
+                assert_eq!(value, expected_values[i]);
             }
         }
     }
 
-    /// Test removing root nodes
     #[test]
-    fn test_sweep_with_root_node_removal() {
+    fn test_two_phase_sweep_root_removal() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = create_default_partition(&mut heap);
+        let pid = create_default_partition(&mut heap);
 
-        let root_obj = unsafe { heap.alloc_raw(partition_id, MyI32(0)) }.unwrap();
+        let root_obj = unsafe { heap.alloc_raw(pid, MyI32(0)) }.unwrap();
         let _objects: Vec<GcRef<MyI32>> = (1..3)
-            .map(|i| unsafe { heap.alloc_raw(partition_id, MyI32(i)) }.unwrap())
+            .map(|i| unsafe { heap.alloc_raw(pid, MyI32(i)) }.unwrap())
             .collect();
+        let _ = unsafe { heap.alloc_root_raw(pid, MyI32(1)) }.unwrap();
+        let _ = unsafe { heap.alloc_root_raw(pid, MyI32(1)) }.unwrap();
 
-        let _ = unsafe { heap.alloc_root_raw(partition_id, MyI32(1)) }.unwrap();
+        while !heap.mark(pid, 64) {}
+        let freed = two_phase_sweep(&mut heap, pid);
 
-        let _ = unsafe { heap.alloc_root_raw(partition_id, MyI32(1)) }.unwrap();
+        assert!(freed > 0);
+        assert_eq!(count_nodes_in_partition(&heap, pid), 2);
 
-        while !heap.mark(partition_id, 64) {}
-
-        let removed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
-
-        assert!(removed > 0, "Should have freed some bytes");
-
-        // Should have 2 nodes left
-        assert_eq!(count_nodes_in_partition(&heap, partition_id), 2);
-
-        let remaining = get_all_nodes_in_partition(&heap, partition_id);
+        let remaining = get_all_nodes_in_partition(&heap, pid);
         assert!(!remaining.contains(&root_obj.head_ptr));
     }
 
-    /// Test empty partition
     #[test]
-    fn test_sweep_with_empty_partition() {
+    fn test_two_phase_sweep_empty_partition() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = create_default_partition(&mut heap);
+        let pid = create_default_partition(&mut heap);
 
-        while !heap.mark(partition_id, 64) {}
-
-        let removed = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
-        assert_eq!(removed, 0, "Should return 0 for empty partition");
+        while !heap.mark(pid, 64) {}
+        let freed = two_phase_sweep(&mut heap, pid);
+        assert_eq!(freed, 0);
     }
 
-    /// Test non-existent partition
     #[test]
-    fn test_sweep_with_nonexistent_partition() {
+    fn test_two_phase_sweep_nonexistent_partition() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let non_existent_partition = GcPartitionId(9999);
-
-        let removed = heap.sweep(non_existent_partition, GcHeap::DUMMY_DISPOSE_CALLBACK);
-        assert_eq!(removed, 0, "Should return 0 for non-existent partition");
+        let freed = two_phase_sweep(&mut heap, GcPartitionId(9999));
+        assert_eq!(freed, 0);
     }
 }

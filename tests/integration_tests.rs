@@ -392,7 +392,7 @@ fn test_memory_usage_increases_with_allocation() {
         )
     }
     .unwrap();
-    let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    let freed = heap.garbage_collect(id);
     assert!(freed > 0);
 
     let after_gc_memory = heap.partition(id).unwrap().memory_used();
@@ -528,7 +528,7 @@ fn test_root_objects_preserve_during_gc() {
     .unwrap();
 
     // Trigger GC
-    let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    let freed = heap.garbage_collect(id);
     assert_eq!(freed, 0);
 
     // Object should still be valid
@@ -564,7 +564,7 @@ fn test_non_root_objects_collected() {
     .unwrap();
 
     // Trigger GC
-    let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    let freed = heap.garbage_collect(id);
     assert!(freed > 0);
 
     // Root object should still be valid
@@ -609,7 +609,7 @@ fn test_manual_garbage_collection() {
     let before = heap.partition(id).unwrap().memory_used();
 
     // Trigger GC
-    let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    let freed = heap.garbage_collect(id);
 
     // Should have freed some memory
     assert!(freed > 0);
@@ -647,11 +647,11 @@ fn test_circular_reference_handling() {
     }
 
     // GC should now collect the cycle
-    let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    let freed = heap.garbage_collect(id);
     assert!(freed > 0);
 
     // GC should not collect anything yet
-    let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    let freed = heap.garbage_collect(id);
     assert_eq!(freed, 0);
 }
 
@@ -704,7 +704,7 @@ fn test_weak_reference_after_collection() {
     let weak_ref = heap.downgrade(&obj);
 
     // Collect garbage. Since obj is not a root, it should be collected.
-    heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    heap.garbage_collect(id);
 
     // Upgrade should fail after object is collected
     let upgraded = weak_ref.upgrade(&heap);

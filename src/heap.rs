@@ -288,14 +288,46 @@ impl GcHeap {
     pub const fn memory_used(&self) -> usize {
         self.total_memory_used
     }
+
+    /// Access the static type registry for this heap.
+    ///
+    /// The returned reference is `'static` (the registry lives for the
+    /// program's lifetime) and can be held across `&mut self` borrows.
+    /// Callers use it to invoke `drop_fn` on node payloads *outside* of
+    /// any `&mut GcHeap` scope, avoiding aliasing UB.
+    #[inline(always)]
+    pub const fn type_registry(&self) -> &'static GcTypeRegistry {
+        self.node_dtypes
+    }
 }
 
 #[cfg(test)]
 mod heap_tests {
     use crate::arena::{ARENA_CAPACITY, MAX_ARENA_ALLOC};
-    use crate::{GcRef, GcTraceCtx, node::GcNode, trace::GcTrace};
+    use crate::{GcRef, GcTraceCtx, node::{GcNode, GcTriColor}, trace::GcTrace};
 
     use super::*;
+
+    /// Two-phase sweep helper: unlink → drop payloads → dispose.
+    fn two_phase_sweep(heap: &mut GcHeap, pid: GcPartitionId) -> usize {
+        if let Some(white) = heap.sweep_unlink(pid) {
+            let registry = heap.type_registry();
+            for node in white.iter() {
+                let hd = unsafe { node.as_ref() };
+                if hd.color() != GcTriColor::White || hd.is_root_or_local() {
+                    continue;
+                }
+                let dtype = hd.dtype() as usize;
+                let info = &registry.type_info_list[dtype];
+                if let Some(f) = info.drop_fn {
+                    unsafe { f(info.payload_ptr(node).as_ptr()); }
+                }
+            }
+            heap.sweep_dispose(pid, white)
+        } else {
+            0
+        }
+    }
 
     #[derive(Debug)]
     struct Node {
@@ -334,7 +366,7 @@ mod heap_tests {
         });
 
         while !heap.mark(partition_id, 64) {}
-        let removed_after = heap.sweep(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        let removed_after = two_phase_sweep(&mut heap, partition_id);
         assert!(removed_after > 0);
     }
 
@@ -414,7 +446,7 @@ mod heap_tests {
         assert!(par_mem_after_alloc > par_mem_before);
 
         // GC should collect the 3 non-root nodes
-        let freed = heap.garbage_collect(id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+        let freed = heap.garbage_collect(id);
         assert!(freed > 0);
 
         let mem_after_gc = heap.memory_used();
