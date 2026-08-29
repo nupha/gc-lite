@@ -163,16 +163,20 @@ impl GcHeap {
     //  remove_partition remains for backward compatibility and calls both
     //    phases in sequence.
 
-    /// Phase 1: Finalize — call `Drop` on all node payloads without freeing memory.
+    /// Phase 1a: Prepare partition for teardown — clear scope caches and
+    /// weak slots, then return the node link WITHOUT dropping payloads.
     ///
-    /// Only takes `&self`, so `Drop` implementations can safely access `GcHeap`
-    /// via a shared reference. Returns the node link containing all finalized
-    /// nodes, which must be passed to [`dealloc_partition`] to reclaim memory.
+    /// Split from [`finalize_partition`] so runtime hosts can run their own
+    /// pre-drop cleanup (which needs `&mut` host state) between weak-slot
+    /// clearing and payload drops. Host payload `Drop` impls must not
+    /// re-enter the host runtime at all (LTO noalias aliasing), so host
+    /// side-effects move into the host's pre-drop pass, and payload drops
+    /// become trivial.
     ///
-    /// Scope caches associated with this partition are cleared before any drops
-    /// are called, so that `GcScopeState::clear()` (which only touches node flags)
-    /// runs before payload drops.
-    pub fn finalize_partition(&self, partition_id: GcPartitionId) -> Option<GcNodeLink> {
+    /// Scope caches associated with this partition are cleared before any
+    /// drops are called, so that `GcScopeState::clear()` (which only touches
+    /// node flags) runs before payload drops.
+    pub fn finalize_partition_prepare(&self, partition_id: GcPartitionId) -> Option<GcNodeLink> {
         // Check that the partition exists
         self.partitions.get(partition_id.0 as usize)?;
 
@@ -203,6 +207,21 @@ impl GcHeap {
                 self.weak_slots[hd.weak_id.index() as usize].1.set(None);
             }
         }
+
+        Some(link)
+    }
+
+    /// Phase 1: Finalize — call `Drop` on all node payloads without freeing memory.
+    ///
+    /// Only takes `&self`, so `Drop` implementations can safely access `GcHeap`
+    /// via a shared reference. Returns the node link containing all finalized
+    /// nodes, which must be passed to [`dealloc_partition`] to reclaim memory.
+    ///
+    /// Scope caches associated with this partition are cleared before any drops
+    /// are called, so that `GcScopeState::clear()` (which only touches node flags)
+    /// runs before payload drops.
+    pub fn finalize_partition(&self, partition_id: GcPartitionId) -> Option<GcNodeLink> {
+        let link = self.finalize_partition_prepare(partition_id)?;
 
         // Process nodes by drop pass order.
         // We iterate all nodes for each pass to respect inter-pass dependencies.

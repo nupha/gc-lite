@@ -5,6 +5,7 @@ use std::ptr::NonNull;
 
 use crate::{
     GcHeap,
+    gctype::GcTypeRegistry,
     node::{GcHead, GcNode, GcRef, GcTriColor},
     node_link::{GcNodeLink, NodeLinkIter},
     partition::GcPartitionId,
@@ -207,15 +208,18 @@ impl GcHeap {
     /// `RuntimePtr` through raw pointers create aliasing `&mut` references
     /// (UB exposed by LTO + `panic=abort` as SEGV).
     ///
-    /// **Use the two-phase API instead:**
+    /// **Use the three-step API instead:**
     ///
     /// ```ignore
     /// if let Some(white) = gc_heap.sweep_unlink(pid) {
-    ///     // drop payloads here — no &mut GcHeap alive
+    ///     // Step 2: drop payloads — MUST run with no &mut GcHeap alive,
+    ///     // so the LTO optimizer never sees aliased &mut references.
+    ///     GcHeap::sweep_drop_payloads(&white, registry);
+    ///     // Step 3: free memory & accounting (re-acquires &mut GcHeap)
     ///     gc_heap.sweep_dispose(pid, white);
     /// }
     /// ```
-    #[deprecated(note = "unsound — use sweep_unlink() + sweep_dispose() instead")]
+    #[deprecated(note = "unsound — use sweep_unlink() + sweep_drop_payloads() + sweep_dispose() instead")]
     pub fn sweep(
         &mut self,
         partition_id: GcPartitionId,
@@ -361,10 +365,19 @@ impl GcHeap {
     /// Returns the linked list of unlinked white nodes, or `None` if the
     /// mark cycle is not complete or the partition doesn't exist.
     ///
-    /// After calling this, the caller MUST drop each node's payload
-    /// (via [`GcTypeRegistry::type_info_list`] `drop_fn`) while holding
-    /// **no** `&mut GcHeap` reference, then call [`sweep_dispose`] to
-    /// free memory and update accounting.
+    /// Phase 1 of two-phase sweep: extract white, non-root, non-local nodes
+    /// from the partition's node chain.
+    ///
+    /// After a completed mark phase the chain contains only Black (root/
+    /// reachable) and White (unreachable) nodes. This method walks the chain,
+    /// **unlinks** white non-root nodes into a returned `GcNodeLink`, and
+    /// leaves the black/root nodes properly linked in the partition.
+    ///
+    /// The caller must then drop each returned node's payload (via the type
+    /// registry's `drop_fn`) **without** holding `&mut GcHeap`, and finally
+    /// call [`sweep_dispose`] to free memory and update accounting.
+    ///
+    /// Returns `None` if the partition is not in a post-mark state.
     pub fn sweep_unlink(
         &mut self,
         partition_id: GcPartitionId,
@@ -374,28 +387,110 @@ impl GcHeap {
         }
 
         let par = &mut self.partitions[partition_id.0 as usize];
-        if par.is_marking() && par.gray_list.is_empty() {
-            par.set_marking(false);
-            std::mem::take(&mut par.nodes).into_inner().map(|h| GcNodeLink::new(Some(h)))
-        } else {
-            None
+        if !(par.is_marking() && par.gray_list.is_empty()) {
+            return None;
+        }
+        par.set_marking(false);
+
+        let link0 = std::mem::take(&mut par.nodes).into_inner()?;
+
+        let registry = self.node_dtypes;
+
+        // Walk the chain, split white non-root nodes out, keep the rest.
+        let mut current = Some(link0);
+        let mut white_head: Option<NonNull<GcHead>> = None;
+        let mut white_tail: Option<NonNull<GcHead>> = None;
+        let mut survivor_head: Option<NonNull<GcHead>> = None;
+        let mut survivor_tail: Option<NonNull<GcHead>> = None;
+
+        while let Some(mut this) = current {
+            unsafe {
+                let next = this.as_mut().next;
+
+                let is_white_non_root =
+                    this.as_ref().color() == GcTriColor::White
+                        && !this.as_ref().is_root_or_local();
+
+                // Detach from old chain.
+                this.as_mut().next = None;
+
+                if is_white_non_root {
+                    match white_tail {
+                        Some(mut tail) => tail.as_mut().next = Some(this),
+                        None => white_head = Some(this),
+                    }
+                    white_tail = Some(this);
+                } else {
+                    match survivor_tail {
+                        Some(mut tail) => tail.as_mut().next = Some(this),
+                        None => survivor_head = Some(this),
+                    }
+                    survivor_tail = Some(this);
+                }
+
+                current = next;
+            }
+        }
+
+        // Put survivors back — partition node chain is intact.
+        par.nodes = GcNodeLink::new(survivor_head);
+
+        debug_assert!(
+            par.gray_list.is_empty()
+        );
+
+        #[cfg(debug_assertions)]
+        for n in NodeLinkIter::new(white_head) {
+            unsafe {
+                let hd = n.as_ref();
+                debug_assert_eq!(
+                    hd.color(),
+                    GcTriColor::White,
+                    "sweep_unlink: white list contains non-white node: {:?}",
+                    hd
+                );
+                debug_assert!(
+                    !hd.is_root_or_local(),
+                    "sweep_unlink: white list contains root/local node: {:?}",
+                    hd
+                );
+            }
+        }
+
+        Some(GcNodeLink::new(white_head))
+    }
+
+    /// Drop payloads of every node in the white list.
+    ///
+    /// This is the safe part of two-phase sweep: it runs **without**
+    /// `&mut GcHeap`, so `Drop` impls that access `RuntimePtr` are safe.
+    ///
+    /// Every node in the list is guaranteed to be white, non-root, and
+    /// non-local (filtered by [`sweep_unlink`]).
+    pub fn sweep_drop_payloads(white: &GcNodeLink, registry: &'static GcTypeRegistry) {
+        for node in white.iter() {
+            let dtype = unsafe { node.as_ref().dtype() } as usize;
+            let info = &registry.type_info_list[dtype];
+            if let Some(f) = info.drop_fn {
+                unsafe { f(info.payload_ptr(node).as_ptr()); }
+            }
         }
     }
 
-    /// Phase 2 of two-phase sweep: dispose a list of unlinked white nodes.
+    /// Phase 3 of two-phase sweep: dispose a list of white non-root nodes.
     ///
     /// Does **NOT** call `drop_fn` — the caller must have already dropped
-    /// each node's payload (e.g. via the type registry's `drop_fn` pointer)
-    /// before calling this method.
+    /// each node's payload via [`sweep_drop_payloads`].
     ///
     /// Handles: weak slot clearing, debug poisoning, memory accounting,
-    /// arena hole collection, and deallocation.
+    /// arena hole collection, and deallocation. Processes nodes by
+    /// `drop_pass` to respect destruction ordering.
     ///
     /// Returns the total bytes freed.
     pub fn sweep_dispose(
         &mut self,
         partition_id: GcPartitionId,
-        mut white: GcNodeLink,
+        white: GcNodeLink,
     ) -> usize {
         let registry = self.node_dtypes;
         let mut freed_bytes = 0;
@@ -403,10 +498,13 @@ impl GcHeap {
         #[cfg(feature = "gc_arena")]
         let mut holes: Vec<crate::arena::Hole> = Vec::new();
 
+        // Every node in `white` is already white & non-root — no color/root
+        // filter needed. Just iterate by drop_pass for destruction ordering.
+        let mut remaining = white;
         for &pass in registry.drop_passes {
-            let mut current = white.into_inner();
-            let mut prev: Option<NonNull<GcHead>> = None;
-            let mut head: Option<NonNull<GcHead>> = None;
+            let mut current = remaining.into_inner();
+            let mut kept_head: Option<NonNull<GcHead>> = None;
+            let mut kept_tail: Option<NonNull<GcHead>> = None;
 
             while let Some(mut this) = current {
                 unsafe {
@@ -416,29 +514,35 @@ impl GcHeap {
                         [this.as_ref().dtype() as usize]
                         .drop_pass;
 
-                    if drop_pass == pass
-                        && this.as_ref().color() == GcTriColor::White
-                        && !this.as_ref().is_root_or_local()
-                    {
-                        if let Some(mut p) = prev {
-                            p.as_mut().next = current;
-                        } else {
-                            head = current;
+                    if drop_pass == pass {
+                        // Correct pass — dispose this node.
+                        #[cfg(debug_assertions)]
+                        {
+                            let hd = this.as_ref();
+                            debug_assert_eq!(
+                                hd.color(),
+                                GcTriColor::White,
+                                "sweep_dispose: non-white node in white list: {:?}",
+                                hd
+                            );
+                            debug_assert!(
+                                !hd.is_root_or_local(),
+                                "sweep_dispose: root/local node in white list: {:?}",
+                                hd
+                            );
                         }
 
-                        // Cache arena info before dispose poisons GcHead
                         #[cfg(feature = "gc_arena")]
                         let arena_info = {
                             let hd = this.as_ref();
                             let is_arena = hd.contains_flag(GcNodeFlag::ARENA_ALLOC);
                             let dtype = hd.dtype() as usize;
-                            let info = &self.node_dtypes.type_info_list[dtype];
+                            let info = &registry.type_info_list[dtype];
                             (is_arena, info.layout().size())
                         };
 
                         freed_bytes += self.dispose_no_drop(this);
 
-                        // Arena hole collection (after dispose, which skips mem_dealloc)
                         #[cfg(feature = "gc_arena")]
                         if arena_info.0 {
                             self.partitions[partition_id.0 as usize]
@@ -452,16 +556,19 @@ impl GcHeap {
                                 );
                         }
                     } else {
-                        if head.is_none() {
-                            head = Some(this);
+                        // Wrong pass — keep for next iteration.
+                        this.as_mut().next = None;
+                        match kept_tail {
+                            Some(mut tail) => tail.as_mut().next = Some(this),
+                            None => kept_head = Some(this),
                         }
-                        prev = Some(this);
+                        kept_tail = Some(this);
                     }
                 }
             }
 
-            white = GcNodeLink::new(head);
-            if white.head().is_none() {
+            remaining = GcNodeLink::new(kept_head);
+            if remaining.head().is_none() {
                 break;
             }
         }
@@ -477,16 +584,24 @@ impl GcHeap {
                 .is_empty()
         );
 
-        // update remainder node link of partition
-        if white.head().is_some() {
-            self.partitions[partition_id.0 as usize].nodes = white;
-        }
-
         freed_bytes
     }
 
     /// Collect garbage on given partition: mark all reachable nodes, then
-    /// sweep unmarked (white) nodes using the safe two-phase approach.
+    /// sweep unmarked (white) nodes.
+    ///
+    /// ⚠️ **SAFETY CONTRACT** — this method holds `&mut GcHeap` across the
+    /// payload-drop phase (unavoidable for any `&mut self` entry point), so
+    /// it is only sound if no registered type's `drop_fn` re-enters the
+    /// heap/runtime (i.e. no `Drop` impl derefs `RuntimePtr`). Payloads
+    /// holding plain values (`Box<i32>`, `Vec<T>` without heap callbacks)
+    /// are fine.
+    ///
+    /// Runtimes whose GC-node `Drop` impls access `RuntimePtr` (e.g.
+    /// `StringImpl::drop` → atom removal) MUST use the three-step API
+    /// instead — [`sweep_unlink`] + [`sweep_drop_payloads`] +
+    /// [`sweep_dispose`] — so the drop phase runs with no `&mut GcHeap`
+    /// alive on the stack (invisible to the borrow checker, visible to LTO).
     #[inline]
     pub fn garbage_collect(
         &mut self,
@@ -496,24 +611,10 @@ impl GcHeap {
             return 0;
         }
 
-        // Mark phase: incrementally process gray list until all reachable nodes are marked
         while !self.mark(partition_id, 64) {}
 
-        // Sweep phase: two-phase (unlink → dispose) so Drop impls run
-        // without &mut GcHeap alive.
         if let Some(white) = self.sweep_unlink(partition_id) {
-            let registry = self.node_dtypes;
-            for node in white.iter() {
-                let hd = unsafe { node.as_ref() };
-                if hd.color() != GcTriColor::White || hd.is_root_or_local() {
-                    continue;
-                }
-                let dtype = hd.dtype() as usize;
-                let info = &registry.type_info_list[dtype];
-                if let Some(f) = info.drop_fn {
-                    unsafe { f(info.payload_ptr(node).as_ptr()); }
-                }
-            }
+            Self::sweep_drop_payloads(&white, self.node_dtypes);
             self.sweep_dispose(partition_id, white)
         } else {
             0
@@ -613,17 +714,7 @@ mod sweep_test {
     fn two_phase_sweep(heap: &mut GcHeap, pid: GcPartitionId) -> usize {
         if let Some(white) = heap.sweep_unlink(pid) {
             let registry = heap.type_registry();
-            for node in white.iter() {
-                let hd = unsafe { node.as_ref() };
-                if hd.color() != GcTriColor::White || hd.is_root_or_local() {
-                    continue;
-                }
-                let dtype = hd.dtype() as usize;
-                let info = &registry.type_info_list[dtype];
-                if let Some(f) = info.drop_fn {
-                    unsafe { f(info.payload_ptr(node).as_ptr()); }
-                }
-            }
+            GcHeap::sweep_drop_payloads(&white, registry);
             heap.sweep_dispose(pid, white)
         } else {
             0

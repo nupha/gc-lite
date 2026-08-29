@@ -304,7 +304,7 @@ impl GcHeap {
 #[cfg(test)]
 mod heap_tests {
     use crate::arena::{ARENA_CAPACITY, MAX_ARENA_ALLOC};
-    use crate::{GcRef, GcTraceCtx, node::{GcNode, GcTriColor}, trace::GcTrace};
+    use crate::{GcRef, GcTraceCtx, node::GcNode, trace::GcTrace};
 
     use super::*;
 
@@ -312,17 +312,7 @@ mod heap_tests {
     fn two_phase_sweep(heap: &mut GcHeap, pid: GcPartitionId) -> usize {
         if let Some(white) = heap.sweep_unlink(pid) {
             let registry = heap.type_registry();
-            for node in white.iter() {
-                let hd = unsafe { node.as_ref() };
-                if hd.color() != GcTriColor::White || hd.is_root_or_local() {
-                    continue;
-                }
-                let dtype = hd.dtype() as usize;
-                let info = &registry.type_info_list[dtype];
-                if let Some(f) = info.drop_fn {
-                    unsafe { f(info.payload_ptr(node).as_ptr()); }
-                }
-            }
+            GcHeap::sweep_drop_payloads(&white, registry);
             heap.sweep_dispose(pid, white)
         } else {
             0
