@@ -7,8 +7,11 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::gctype::{GcTypeRegistry, payload_offset_of};
-use crate::{GcHeap, GcPartitionId, GcTrace, GcWeak, weak::GcWeakRawId};
+use crate::{
+    GcHeap, GcPartitionId, GcTrace, GcTraceCtx, GcWeak,
+    gctype::{GcTypeRegistry, payload_offset_of},
+    weak::GcWeakRawId,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -320,6 +323,13 @@ impl<T: GcNode> From<&GcRef<T>> for NonNull<GcHead> {
 impl<T: GcNode> std::fmt::Debug for GcRef<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "GcRef<{:p}>", self.head_ptr)
+    }
+}
+
+impl<T: GcNode> GcTrace for GcRef<T> {
+    #[inline(always)]
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        gcx.add(*self);
     }
 }
 

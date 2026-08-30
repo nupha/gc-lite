@@ -145,21 +145,6 @@ macro_rules! impl_dummy_trace_for_primitive {
                 #[inline(always)]
                 fn trace(&self, _: &mut GcTraceCtx) { }
             }
-
-            impl GcTrace for [$ty] {
-                #[inline(always)]
-                fn trace(&self, _: &mut GcTraceCtx) { }
-            }
-
-            impl GcTrace for Vec<$ty> {
-                #[inline(always)]
-                fn trace(&self, _: &mut GcTraceCtx) { }
-            }
-
-            impl GcTrace for Box<[$ty]> {
-                #[inline(always)]
-                fn trace(&self, _: &mut GcTraceCtx) { }
-            }
         )*
     };
 }
@@ -188,6 +173,163 @@ impl GcTrace for &'static String {
     #[inline(always)]
     fn trace(&self, _: &mut GcTraceCtx) {}
 }
+
+// ── Generic container impls ─────────────────────────────────────────────
+//
+// These compose with `#[derive(GcTrace)]` (and manual impls): a field of type
+// `Vec<JSValue>`, `Option<GcRef<T>>`, `[T; N]`, `RefCell<T>`, ... traces every
+// element whose type is itself `GcTrace`. Coherence requires these impls to
+// live here (trait owner), which also subsumes the previous primitive-only
+// `Vec<u8>` / `[u8]` / `Box<[u8]>` impls.
+
+impl<T: GcTrace + ?Sized> GcTrace for Box<T> {
+    #[inline(always)]
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        (**self).trace(gcx);
+    }
+}
+
+impl<T: GcTrace> GcTrace for [T] {
+    #[inline(always)]
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        for item in self {
+            item.trace(gcx);
+        }
+    }
+}
+
+impl<T: GcTrace, const N: usize> GcTrace for [T; N] {
+    #[inline(always)]
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.as_slice().trace(gcx);
+    }
+}
+
+impl<T: GcTrace> GcTrace for Vec<T> {
+    #[inline(always)]
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.as_slice().trace(gcx);
+    }
+}
+
+impl<T: GcTrace> GcTrace for std::collections::VecDeque<T> {
+    #[inline(always)]
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        for item in self {
+            item.trace(gcx);
+        }
+    }
+}
+
+impl<T: GcTrace> GcTrace for Option<T> {
+    #[inline(always)]
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        if let Some(item) = self {
+            item.trace(gcx);
+        }
+    }
+}
+
+impl<T: GcTrace, E: GcTrace> GcTrace for Result<T, E> {
+    #[inline(always)]
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        match self {
+            Ok(item) => item.trace(gcx),
+            Err(item) => item.trace(gcx),
+        }
+    }
+}
+
+impl<T: ?Sized + 'static> GcTrace for PhantomData<T> {
+    #[inline(always)]
+    fn trace(&self, _: &mut GcTraceCtx) {}
+}
+
+impl<T: GcTrace + Copy> GcTrace for std::cell::Cell<T> {
+    #[inline(always)]
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.get().trace(gcx);
+    }
+}
+
+impl<T: GcTrace + ?Sized> GcTrace for std::cell::RefCell<T> {
+    #[inline(always)]
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        self.borrow().trace(gcx);
+    }
+}
+
+impl<T: GcTrace + ?Sized> GcTrace for std::rc::Rc<T> {
+    #[inline(always)]
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        (**self).trace(gcx);
+    }
+}
+
+impl<T: GcTrace + ?Sized> GcTrace for std::sync::Arc<T> {
+    #[inline(always)]
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        (**self).trace(gcx);
+    }
+}
+
+impl<K: GcTrace, V: GcTrace> GcTrace for std::collections::HashMap<K, V> {
+    #[inline(always)]
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        for (k, v) in self {
+            k.trace(gcx);
+            v.trace(gcx);
+        }
+    }
+}
+
+impl<K: GcTrace, V: GcTrace> GcTrace for std::collections::BTreeMap<K, V> {
+    #[inline(always)]
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        for (k, v) in self {
+            k.trace(gcx);
+            v.trace(gcx);
+        }
+    }
+}
+
+impl<T: GcTrace> GcTrace for std::collections::HashSet<T> {
+    #[inline(always)]
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        for item in self {
+            item.trace(gcx);
+        }
+    }
+}
+
+impl<T: GcTrace> GcTrace for std::collections::BTreeSet<T> {
+    #[inline(always)]
+    fn trace(&self, gcx: &mut GcTraceCtx) {
+        for item in self {
+            item.trace(gcx);
+        }
+    }
+}
+
+macro_rules! impl_trace_for_tuple {
+    ($($name:ident : $idx:tt),+) => {
+        impl<$($name: GcTrace),+> GcTrace for ($($name,)+) {
+            #[inline(always)]
+            fn trace(&self, gcx: &mut GcTraceCtx) {
+                $( self.$idx.trace(gcx); )+
+            }
+        }
+    };
+}
+
+impl_trace_for_tuple!(A: 0);
+impl_trace_for_tuple!(A: 0, B: 1);
+impl_trace_for_tuple!(A: 0, B: 1, C: 2);
+impl_trace_for_tuple!(A: 0, B: 1, C: 2, D: 3);
+impl_trace_for_tuple!(A: 0, B: 1, C: 2, D: 3, E: 4);
+impl_trace_for_tuple!(A: 0, B: 1, C: 2, D: 3, E: 4, F: 5);
+impl_trace_for_tuple!(A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6);
+impl_trace_for_tuple!(A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6, H: 7);
 
 #[cfg(test)]
 mod tests {

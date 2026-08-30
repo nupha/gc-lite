@@ -14,7 +14,10 @@ gc_arena = []
 default = ["gc_arena"]
 
 [dependencies]
-gc-lite-macros = { version = "0.2.0", path = "gc-lite-macros" }
+gc-lite-macros = { version = "0.2.1", path = "gc-lite-macros" }
 bitflags = "2.0"
 smallvec = "1.15"
 log = "0.4"
+
+[dev-dependencies]
+smallvec = "1.15"
