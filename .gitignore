@@ -1,0 +1,5 @@
+# Rust build artifacts (root crate and gc-lite-macros subcrate)
+target/
+
+# Lockfile: not tracked in this repo (no lockfile is committed anywhere)
+Cargo.lock

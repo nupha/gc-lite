@@ -219,7 +219,9 @@ impl GcHeap {
     ///     gc_heap.sweep_dispose(pid, white);
     /// }
     /// ```
-    #[deprecated(note = "unsound — use sweep_unlink() + sweep_drop_payloads() + sweep_dispose() instead")]
+    #[deprecated(
+        note = "unsound — use sweep_unlink() + sweep_drop_payloads() + sweep_dispose() instead"
+    )]
     pub fn sweep(
         &mut self,
         partition_id: GcPartitionId,
@@ -305,11 +307,7 @@ impl GcHeap {
                                     .arena
                                     .as_ref()
                                     .unwrap()
-                                    .collect_hole(
-                                        &mut holes,
-                                        this.cast::<u8>(),
-                                        arena_info.1,
-                                    );
+                                    .collect_hole(&mut holes, this.cast::<u8>(), arena_info.1);
                             }
                         } else {
                             prev = Some(this);
@@ -378,10 +376,7 @@ impl GcHeap {
     /// call [`sweep_dispose`] to free memory and update accounting.
     ///
     /// Returns `None` if the partition is not in a post-mark state.
-    pub fn sweep_unlink(
-        &mut self,
-        partition_id: GcPartitionId,
-    ) -> Option<GcNodeLink> {
+    pub fn sweep_unlink(&mut self, partition_id: GcPartitionId) -> Option<GcNodeLink> {
         if (partition_id.0 as usize) >= self.partitions.len() {
             return None;
         }
@@ -393,8 +388,6 @@ impl GcHeap {
         par.set_marking(false);
 
         let link0 = std::mem::take(&mut par.nodes).into_inner()?;
-
-        let registry = self.node_dtypes;
 
         // Walk the chain, split white non-root nodes out, keep the rest.
         let mut current = Some(link0);
@@ -408,8 +401,7 @@ impl GcHeap {
                 let next = this.as_mut().next;
 
                 let is_white_non_root =
-                    this.as_ref().color() == GcTriColor::White
-                        && !this.as_ref().is_root_or_local();
+                    this.as_ref().color() == GcTriColor::White && !this.as_ref().is_root_or_local();
 
                 // Detach from old chain.
                 this.as_mut().next = None;
@@ -435,9 +427,7 @@ impl GcHeap {
         // Put survivors back — partition node chain is intact.
         par.nodes = GcNodeLink::new(survivor_head);
 
-        debug_assert!(
-            par.gray_list.is_empty()
-        );
+        debug_assert!(par.gray_list.is_empty());
 
         #[cfg(debug_assertions)]
         for n in NodeLinkIter::new(white_head) {
@@ -472,7 +462,9 @@ impl GcHeap {
             let dtype = unsafe { node.as_ref().dtype() } as usize;
             let info = &registry.type_info_list[dtype];
             if let Some(f) = info.drop_fn {
-                unsafe { f(info.payload_ptr(node).as_ptr()); }
+                unsafe {
+                    f(info.payload_ptr(node).as_ptr());
+                }
             }
         }
     }
@@ -487,11 +479,7 @@ impl GcHeap {
     /// `drop_pass` to respect destruction ordering.
     ///
     /// Returns the total bytes freed.
-    pub fn sweep_dispose(
-        &mut self,
-        partition_id: GcPartitionId,
-        white: GcNodeLink,
-    ) -> usize {
+    pub fn sweep_dispose(&mut self, partition_id: GcPartitionId, white: GcNodeLink) -> usize {
         let registry = self.node_dtypes;
         let mut freed_bytes = 0;
 
@@ -510,9 +498,8 @@ impl GcHeap {
                 unsafe {
                     current = this.as_mut().next;
 
-                    let drop_pass = registry.type_info_list
-                        [this.as_ref().dtype() as usize]
-                        .drop_pass;
+                    let drop_pass =
+                        registry.type_info_list[this.as_ref().dtype() as usize].drop_pass;
 
                     if drop_pass == pass {
                         // Correct pass — dispose this node.
@@ -549,11 +536,7 @@ impl GcHeap {
                                 .arena
                                 .as_ref()
                                 .unwrap()
-                                .collect_hole(
-                                    &mut holes,
-                                    this.cast::<u8>(),
-                                    arena_info.1,
-                                );
+                                .collect_hole(&mut holes, this.cast::<u8>(), arena_info.1);
                         }
                     } else {
                         // Wrong pass — keep for next iteration.
@@ -603,10 +586,7 @@ impl GcHeap {
     /// [`sweep_dispose`] — so the drop phase runs with no `&mut GcHeap`
     /// alive on the stack (invisible to the borrow checker, visible to LTO).
     #[inline]
-    pub fn garbage_collect(
-        &mut self,
-        partition_id: GcPartitionId,
-    ) -> usize {
+    pub fn garbage_collect(&mut self, partition_id: GcPartitionId) -> usize {
         if self.partition(partition_id).is_none() {
             return 0;
         }
@@ -680,10 +660,7 @@ mod sweep_test {
 
     /// Shorthand for creating a partition with default arena config.
     fn create_default_partition(heap: &mut crate::GcHeap) -> GcPartitionId {
-        heap.create_partition(
-            crate::arena::ARENA_CAPACITY,
-            crate::arena::MAX_ARENA_ALLOC,
-        )
+        heap.create_partition(crate::arena::ARENA_CAPACITY, crate::arena::MAX_ARENA_ALLOC)
     }
 
     #[derive(Debug)]
@@ -764,7 +741,11 @@ mod sweep_test {
         let freed = two_phase_sweep(&mut heap, pid);
 
         assert!(freed > 0);
-        assert_eq!(count_nodes_in_partition(&heap, pid), 2, "Only root nodes remain");
+        assert_eq!(
+            count_nodes_in_partition(&heap, pid),
+            2,
+            "Only root nodes remain"
+        );
 
         let remaining = get_all_nodes_in_partition(&heap, pid);
         let info = &GC_TYPE_REGISTRY.type_info_list[MyI32::GC_TYPE_ID as usize];
@@ -808,8 +789,14 @@ mod sweep_test {
 
         unsafe {
             let info = &GC_TYPE_REGISTRY.type_info_list[MyI32::GC_TYPE_ID as usize];
-            assert_eq!((*(info.payload_ptr(nodes[0]).as_ptr() as *const MyI32)).0, 4);
-            assert_eq!((*(info.payload_ptr(nodes[1]).as_ptr() as *const MyI32)).0, 3);
+            assert_eq!(
+                (*(info.payload_ptr(nodes[0]).as_ptr() as *const MyI32)).0,
+                4
+            );
+            assert_eq!(
+                (*(info.payload_ptr(nodes[1]).as_ptr() as *const MyI32)).0,
+                3
+            );
         }
     }
 
