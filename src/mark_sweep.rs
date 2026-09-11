@@ -7,7 +7,7 @@ use crate::{
     GcHeap,
     gctype::GcTypeRegistry,
     node::{GcHead, GcNode, GcRef, GcTriColor},
-    node_link::{GcNodeLink, NodeLinkIter},
+    node_link::GcNodeLink,
     partition::GcPartitionId,
     trace::GcTraceCtx,
 };
@@ -240,7 +240,7 @@ impl GcHeap {
             }
         } {
             #[cfg(debug_assertions)]
-            for n in NodeLinkIter::new(Some(link0)) {
+            for n in crate::node_link::NodeLinkIter::new(Some(link0)) {
                 unsafe {
                     debug_assert!(
                         matches!(n.as_ref().color(), GcTriColor::Black | GcTriColor::White),
@@ -334,7 +334,7 @@ impl GcHeap {
             // update remainder node link of partition
             if link1.is_some() {
                 #[cfg(debug_assertions)]
-                for n in NodeLinkIter::new(link1) {
+                for n in crate::node_link::NodeLinkIter::new(link1) {
                     unsafe {
                         debug_assert!(
                             n.as_ref().color() == GcTriColor::Black
@@ -430,7 +430,7 @@ impl GcHeap {
         debug_assert!(par.gray_list.is_empty());
 
         #[cfg(debug_assertions)]
-        for n in NodeLinkIter::new(white_head) {
+        for n in crate::node_link::NodeLinkIter::new(white_head) {
             unsafe {
                 let hd = n.as_ref();
                 debug_assert_eq!(

@@ -116,7 +116,4 @@ pub(crate) use helpers::unlikely;
 /// }
 /// ```
 #[doc(inline)]
-pub use gc_lite_macros::GcTrace;
-
-#[doc(hidden)]
-pub use gc_lite_macros::gc_type_table_internal;
+pub use gc_lite_macros::{GcTrace, gc_type_table_internal};
