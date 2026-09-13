@@ -78,9 +78,6 @@ pub struct GcHead {
 
     /// Pointer to next object (for list traversal)
     pub(super) next: Option<NonNull<GcHead>>,
-
-    #[cfg(debug_assertions)]
-    pub(crate) dbg_string: std::borrow::Cow<'static, str>,
 }
 
 impl std::fmt::Debug for GcHead {
@@ -97,11 +94,6 @@ impl std::fmt::Debug for GcHead {
         if !self.weak_id.is_null() {
             let w = self.weak_id;
             s.field("weakref", &format!("{}#{}", w.index(), w.version()));
-        }
-
-        #[cfg(debug_assertions)]
-        {
-            s.field("dbg_string", &self.dbg_string);
         }
 
         s.finish()
@@ -679,14 +671,6 @@ impl GcHeap {
 
 #[cfg(debug_assertions)]
 impl GcHead {
-    pub fn debug_set_dbg_string(&mut self, str: std::borrow::Cow<'static, str>) {
-        self.dbg_string = str;
-    }
-
-    pub fn debug_dbg_string(&self) -> &std::borrow::Cow<'static, str> {
-        &self.dbg_string
-    }
-
     pub fn debug_assert_node_valid_simple(&self) {
         if !std::thread::panicking() {
             debug_assert!(

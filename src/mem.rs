@@ -118,9 +118,6 @@ impl GcHeap {
                     partition: partition_id.0 as u32,
                     weak_id: GcWeakRawId::NULL,
                     next: None,
-
-                    #[cfg(debug_assertions)]
-                    dbg_string: std::any::type_name::<T>().into(),
                 };
 
                 unsafe {
@@ -168,9 +165,6 @@ impl GcHeap {
             partition: partition_id.0 as u32,
             weak_id: GcWeakRawId::NULL,
             next: None,
-
-            #[cfg(debug_assertions)]
-            dbg_string: std::any::type_name::<T>().into(),
         };
 
         unsafe {
