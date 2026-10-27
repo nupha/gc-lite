@@ -13,12 +13,8 @@ pub trait GcTrace: 'static {
     /// Collect directly referenced children gc nodes
     fn trace(&self, gcx: &mut GcTraceCtx);
 
-    /// Get direct referencing children nodes
-    fn gc_children(&self, heap: &GcHeap) -> Vec<NonNull<GcHead>> {
-        let mut gcx = heap.create_trace_ctx(64);
-        self.trace(&mut gcx);
-        gcx.traced_nodes
-    }
+    // `gc_children` was removed: nothing used it, and it allocated and sorted on
+    // every call.
 }
 
 pub struct GcTraceCtx<'a> {
@@ -33,16 +29,16 @@ impl<'a> GcTraceCtx<'a> {
         self.opaque
     }
 
-    /// Submit a node to collected list regardless its color state.
+    /// Submit a node to the collected list, regardless its color. Duplicates
+    /// are allowed; no `Vec::contains` check, which made wide containers very
+    /// slow (cost grew with the square of their width).
     pub fn add_node(&mut self, node: NonNull<GcHead>) {
         #[cfg(debug_assertions)]
         unsafe {
             node.as_ref().debug_assert_node_valid_simple();
         }
 
-        if !self.traced_nodes.contains(&node) {
-            self.traced_nodes.push(node);
-        }
+        self.traced_nodes.push(node);
     }
 
     /// Submit a GcRef to collected list
