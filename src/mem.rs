@@ -117,6 +117,7 @@ impl GcHeap {
                     attrs,
                     partition: partition_id.0 as u32,
                     weak_id: GcWeakRawId::NULL,
+                    cache_slot: crate::node::SlotHint::NONE,
                     next: None,
                 };
 
@@ -164,6 +165,7 @@ impl GcHeap {
             attrs: { 0xFF00_0000 | ((gc_type as u32) << 8) },
             partition: partition_id.0 as u32,
             weak_id: GcWeakRawId::NULL,
+            cache_slot: crate::node::SlotHint::NONE,
             next: None,
         };
 

@@ -163,6 +163,7 @@ mod tests {
             attrs: 0,
             partition: 0,
             weak_id: crate::weak::GcWeakRawId::NULL,
+            cache_slot: crate::node::SlotHint::NONE,
             next: None,
         };
         let node_ptr = NonNull::from(&mut node);
@@ -178,6 +179,7 @@ mod tests {
             attrs: 0,
             partition: 0,
             weak_id: crate::weak::GcWeakRawId::NULL,
+            cache_slot: crate::node::SlotHint::NONE,
             next: None,
         };
         let node3_ptr = NonNull::from(&mut node3);
@@ -186,6 +188,7 @@ mod tests {
             attrs: 0,
             partition: 0,
             weak_id: crate::weak::GcWeakRawId::NULL,
+            cache_slot: crate::node::SlotHint::NONE,
             next: Some(node3_ptr),
         };
         let node2_ptr = NonNull::from(&mut node2);
@@ -194,6 +197,7 @@ mod tests {
             attrs: 0,
             partition: 0,
             weak_id: crate::weak::GcWeakRawId::NULL,
+            cache_slot: crate::node::SlotHint::NONE,
             next: Some(node2_ptr),
         };
         let node1_ptr = NonNull::from(&mut node1);
@@ -213,6 +217,7 @@ mod tests {
                 attrs: i as u32,
                 partition: 0,
                 weak_id: crate::weak::GcWeakRawId::NULL,
+                cache_slot: crate::node::SlotHint::NONE,
                 next: None,
             })
             .collect();

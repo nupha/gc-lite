@@ -76,8 +76,91 @@ pub struct GcHead {
 
     pub(super) weak_id: GcWeakRawId,
 
+    /// Hint: this node's index in the LOCAL scope's cache, or
+    /// [`SlotHint::NONE`].
+    ///
+    /// On 64-bit targets it fills the padding that already sat before `next`,
+    /// so it costs no extra byte; it lets a scope remove a node without
+    /// scanning its cache. It is only a hint: every use verifies that it still
+    /// names the node and falls back to a scan when it does not.
+    ///
+    /// On 32-bit targets the header is exactly packed (no padding), so the
+    /// hint is a zero-sized no-op there and removals keep the scan — see
+    /// [`SlotHint`].
+    pub(super) cache_slot: SlotHint,
+
     /// Pointer to next object (for list traversal)
     pub(super) next: Option<NonNull<GcHead>>,
+}
+
+/// The scope-cache slot hint stored in [`GcHead::cache_slot`].
+///
+/// With 8-byte pointers the field before `next` leaves a 4-byte hole in the
+/// header, so the hint is a `u32`. With 4-byte pointers there is no hole and
+/// the header is fully packed: the hint becomes `()` (a zero-sized field, which
+/// a `repr(C)` struct places without moving anything), so a node keeps its size
+/// and `GcScopeState::remove_node` falls back to the scan it always did.
+#[cfg(target_pointer_width = "64")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct SlotHint(u32);
+
+/// See the 64-bit variant: on a packed header the hint would cost 4 bytes per
+/// node, so it degrades to a no-op and lookups scan.
+#[cfg(not(target_pointer_width = "64"))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct SlotHint(());
+
+#[cfg(target_pointer_width = "64")]
+impl SlotHint {
+    /// No hint recorded.
+    pub(super) const NONE: Self = Self(u32::MAX);
+
+    /// The hint for `index`.
+    #[inline(always)]
+    pub(super) fn of(index: usize) -> Self {
+        if index < u32::MAX as usize {
+            Self(index as u32)
+        } else {
+            Self::NONE
+        }
+    }
+
+    /// `index` when this hint still names `node`'s slot in `cache`.
+    #[inline(always)]
+    pub(super) fn names(
+        self,
+        cache: &[NonNull<GcHead>],
+        node: NonNull<GcHead>,
+    ) -> Option<usize> {
+        let slot = self.0 as usize;
+        if slot < cache.len() && cache[slot] == node {
+            Some(slot)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(not(target_pointer_width = "64"))]
+impl SlotHint {
+    /// No hint recorded (the hint does not exist on this target).
+    pub(super) const NONE: Self = Self(());
+
+    /// The hint for `index` — never recorded on this target.
+    #[inline(always)]
+    pub(super) fn of(_index: usize) -> Self {
+        Self::NONE
+    }
+
+    /// Always `None`: without a hint every lookup scans.
+    #[inline(always)]
+    pub(super) fn names(
+        self,
+        _cache: &[NonNull<GcHead>],
+        _node: NonNull<GcHead>,
+    ) -> Option<usize> {
+        None
+    }
 }
 
 impl std::fmt::Debug for GcHead {
@@ -688,5 +771,92 @@ impl GcHead {
             );
             self.debug_assert_node_valid_simple();
         }
+    }
+}
+
+/// The header layout is load-bearing: the slot hint must never grow a node.
+/// 64-bit: `attrs`/`partition`/`weak_id` (12B), the 4-byte hole before `next`
+/// holds the hint, `next` at 16 → 24B, the same as before the hint existed.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(core::mem::size_of::<GcHead>() == 24);
+    assert!(core::mem::offset_of!(GcHead, cache_slot) == 12);
+    assert!(core::mem::offset_of!(GcHead, next) == 16);
+};
+
+/// 32-bit: the header is exactly packed, so the hint must be zero-sized and
+/// `next` must still follow `weak_id` directly → 16B, unchanged.
+#[cfg(not(target_pointer_width = "64"))]
+const _: () = {
+    assert!(core::mem::size_of::<GcHead>() == 16);
+    assert!(core::mem::offset_of!(GcHead, next) == 12);
+    assert!(core::mem::size_of::<SlotHint>() == 0);
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fresh_slot_hint_is_none() {
+        let info = GcHead {
+            attrs: 0xFF00_0000,
+            partition: 0,
+            weak_id: GcWeakRawId::NULL,
+            cache_slot: SlotHint::NONE,
+            next: None,
+        };
+        assert_eq!(info.cache_slot, SlotHint::NONE);
+        assert!(!info.is_root_or_local());
+    }
+
+    #[test]
+    fn the_hint_names_only_its_own_slot() {
+        let mut a = GcHead {
+            attrs: 0xFF00_0000,
+            partition: 0,
+            weak_id: GcWeakRawId::NULL,
+            cache_slot: SlotHint::of(1),
+            next: None,
+        };
+        let a_ptr = NonNull::from(&mut a);
+        let mut b = GcHead {
+            attrs: 0xFF00_0000,
+            partition: 0,
+            weak_id: GcWeakRawId::NULL,
+            cache_slot: SlotHint::NONE,
+            next: None,
+        };
+        let b_ptr = NonNull::from(&mut b);
+        let cache = [b_ptr, a_ptr];
+        if cfg!(target_pointer_width = "64") {
+            assert_eq!(a.cache_slot.names(&cache, a_ptr), Some(1));
+        } else {
+            // No hint room on this target: every lookup scans.
+            assert_eq!(a.cache_slot.names(&cache, a_ptr), None);
+        }
+        // The same slot does not name another node.
+        assert_eq!(a.cache_slot.names(&cache, b_ptr), None);
+        // An out-of-range hint is ignored rather than trusted.
+        assert_eq!(SlotHint::of(7).names(&cache, a_ptr), None);
+        assert_eq!(SlotHint::NONE.names(&cache, a_ptr), None);
+    }
+
+    /// The 32-bit header relies on a zero-sized field adding no bytes to a
+    /// `repr(C)` struct; assert that rule on whatever target runs the tests by
+    /// mirroring the 32-bit field widths with `u32` in place of the pointers.
+    #[test]
+    fn a_zero_sized_field_adds_no_bytes() {
+        #[repr(C)]
+        struct NarrowHead {
+            attrs: u32,
+            partition: u32,
+            weak_id: u32,
+            cache_slot: (),
+            next: u32,
+        }
+        assert_eq!(std::mem::size_of::<NarrowHead>(), 16);
+        assert_eq!(std::mem::offset_of!(NarrowHead, next), 12);
+        assert_eq!(std::mem::size_of::<SlotHint>(), if cfg!(target_pointer_width = "64") { 4 } else { 0 });
     }
 }

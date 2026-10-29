@@ -9,7 +9,7 @@ use std::cell::Cell;
 use crate::{
     heap::GcHeap,
     helpers::GcError,
-    node::{Gc, GcHead, GcNode, GcNodeFlag},
+    node::{Gc, GcHead, GcNode, GcNodeFlag, SlotHint},
     partition::GcPartitionId,
 };
 
@@ -156,16 +156,16 @@ impl<'s> GcScopeState<'s> {
         }
 
         #[cfg(debug_assertions)]
-        debug_assert!(!self.borrow_flag.get(), "GcScopeState: reentrant borrow");
-        #[cfg(debug_assertions)]
-        self.borrow_flag.set(true);
+        {
+            debug_assert!(!self.borrow_flag.get(), "GcScopeState: reentrant borrow");
+            self.borrow_flag.set(true);
+        }
 
         unsafe {
             let cache = &mut *self.cache.get();
-            if cache.is_none() {
-                *cache = Some(Vec::with_capacity(1));
-            }
-            cache.as_mut().unwrap().push(node);
+            let cache = cache.get_or_insert_with(|| Vec::with_capacity(1));
+            node.as_mut().cache_slot = SlotHint::of(cache.len());
+            cache.push(node);
         }
 
         #[cfg(debug_assertions)]
@@ -193,29 +193,35 @@ impl<'s> GcScopeState<'s> {
     /// Returns `false` if the node was not in this scope's cache (e.g., it was
     /// already promoted, or belongs to a different scope).
     ///
+    /// O(1) on the recorded slot hint; a cache that lost it (see [`clear`])
+    /// falls back to a scan.
+    ///
     /// # Safety
     ///
     /// The caller must ensure the node is still alive and valid.
     /// This method does NOT check whether the node is the current promote node;
     /// the caller (e.g., `ScopedContext::throw`) is responsible for ensuring
     /// the node is not the promote target.
+    ///
+    /// [`clear`]: GcScopeState::clear
     pub fn remove_node(&self, mut node: NonNull<GcHead>) -> bool {
         #[cfg(debug_assertions)]
         unsafe {
             node.as_ref().debug_assert_node_valid_simple();
         }
         let cache_opt = unsafe { &mut *self.cache.get() };
-        if let Some(cache) = cache_opt.as_mut()
-            && let Some(pos) = cache.iter().position(|&n| n == node)
-        {
-            cache.swap_remove(pos);
-            unsafe {
-                node.as_mut().remove_flag(GcNodeFlag::LOCAL);
-            }
-            true
-        } else {
-            false
+        let Some(cache) = cache_opt.as_mut() else {
+            return false;
+        };
+        let Some(pos) = locate(cache, node) else {
+            return false;
+        };
+        swap_remove_at(cache, pos);
+        unsafe {
+            node.as_mut().cache_slot = SlotHint::NONE;
+            node.as_mut().remove_flag(GcNodeFlag::LOCAL);
         }
+        true
     }
 
     pub fn contains(&self, node: NonNull<GcHead>) -> bool {
@@ -236,22 +242,27 @@ impl<'s> GcScopeState<'s> {
     /// Returns `true` if the node was found in this scope and moved.
     /// Returns `false` if the node was not in this scope's cache (e.g., it
     /// is a root node, or already belongs to another scope).
+    ///
+    /// O(1) on the recorded slot hint, like [`remove_node`].
+    ///
+    /// [`remove_node`]: GcScopeState::remove_node
     pub fn promote_node_to(&self, node: NonNull<GcHead>, target: &GcScopeState<'_>) -> bool {
         let cache_opt = unsafe { &mut *self.cache.get() };
 
         if let Some(cache) = cache_opt.as_mut()
-            && let Some(pos) = cache.iter().position(|&n| n == node)
+            && let Some(pos) = locate(cache, node)
         {
             debug_assert!(
                 unsafe { node.as_ref().is_local() },
                 "promote_node_to: node is not LOCAL",
             );
-            cache.swap_remove(pos);
+            swap_remove_at(cache, pos);
             let target_cache = unsafe { &mut *target.cache.get() };
-            if target_cache.is_none() {
-                *target_cache = Some(Vec::with_capacity(1));
+            let target_cache = target_cache.get_or_insert_with(|| Vec::with_capacity(1));
+            unsafe {
+                node.as_ptr().as_mut().unwrap().cache_slot = SlotHint::of(target_cache.len());
             }
-            target_cache.as_mut().unwrap().push(node);
+            target_cache.push(node);
             true
         } else {
             // Node not found in this scope's cache. This is safe — the node
@@ -276,9 +287,48 @@ impl<'s> GcScopeState<'s> {
             for mut n in lst {
                 unsafe {
                     n.as_mut().remove_flag(crate::node::GcNodeFlag::LOCAL);
+                    // The cache is gone: drop the hint so a later removal does
+                    // not trust an index into a cache that no longer exists.
+                    n.as_mut().cache_slot = SlotHint::NONE;
                 }
             }
         }
+    }
+}
+
+/// Index of `node` in `cache`: the node's slot hint when it still names it,
+/// otherwise a linear scan. The hint makes the common case O(1); the scan keeps
+/// the answer right whenever the hint is stale, and the identity check inside
+/// [`SlotHint::names`] is what makes a stale hint harmless instead of a wrong
+/// removal.
+#[inline]
+fn locate(cache: &[NonNull<GcHead>], node: NonNull<GcHead>) -> Option<usize> {
+    if let Some(pos) = unsafe { node.as_ref().cache_slot }.names(cache, node) {
+        return Some(pos);
+    }
+    #[cfg(test)]
+    SCANS.with(|s| s.set(s.get() + 1));
+    cache.iter().position(|&n| n == node)
+}
+
+/// Test witness for "the hint answered": the number of cache scans `locate`
+/// had to do on this thread. O(1) removal must leave it unchanged.
+#[cfg(test)]
+thread_local! {
+    static SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_scans() -> usize {
+    SCANS.with(|s| s.replace(0))
+}
+
+/// `Vec::swap_remove`, keeping the slot hint of the node it moves into `pos`.
+#[inline]
+fn swap_remove_at(cache: &mut Vec<NonNull<GcHead>>, pos: usize) {
+    cache.swap_remove(pos);
+    if let Some(moved) = cache.get(pos).copied() {
+        unsafe { moved.as_ptr().as_mut().unwrap().cache_slot = SlotHint::of(pos) };
     }
 }
 
@@ -945,5 +995,254 @@ mod tests {
 
         assert_eq!(heap.scope_max_depth(stack1), 0);
         assert_eq!(heap.scope_max_depth(stack2), 0);
+    }
+
+    // ── slot hints: removal without scanning the cache ──
+
+    /// Whether this target has room for the hint (an 8-byte pointer leaves a
+    /// hole before `next`). Without it the hint is a no-op and every removal
+    /// falls through to the scan, so the tests below expect one scan per call.
+    const HINT: bool = cfg!(target_pointer_width = "64");
+
+    /// Remove `node` and mirror the cache's `swap_remove` locally, so the hint
+    /// of every surviving node can be checked against its new index.
+    fn remove_and_mirror(
+        ctx: &GcScope<'_>,
+        mirror: &mut Vec<NonNull<GcHead>>,
+        node: NonNull<GcHead>,
+    ) {
+        let slot = mirror
+            .iter()
+            .position(|&n| n == node)
+            .expect("node is in the mirror");
+        assert_eq!(
+            unsafe { node.as_ref().cache_slot },
+            SlotHint::of(slot),
+            "hint does not name the node's slot",
+        );
+        assert!(ctx.remove_node(node));
+        mirror.swap_remove(slot);
+        for (i, n) in mirror.iter().enumerate() {
+            assert_eq!(
+                unsafe { n.as_ref().cache_slot },
+                SlotHint::of(i),
+                "node {i} lost its hint after a swap_remove",
+            );
+        }
+    }
+
+    #[test]
+    fn removal_uses_the_slot_hint_instead_of_scanning() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let pid = heap.create_partition(64 * 1024, 16 * 1024);
+        let sid = heap.acquire_scope_stack(pid);
+        let ctx = heap.new_scope(sid);
+
+        let mut mirror: Vec<NonNull<GcHead>> = (0..64)
+            .map(|i| {
+                ctx.alloc_local(Node {
+                    next: None,
+                    value: i,
+                })
+                .unwrap()
+                .as_raw()
+                .node_ptr()
+            })
+            .collect();
+
+        // Middle-heavy order: every removal moves some other node into the
+        // freed slot, which is exactly the case a scan used to pay for.
+        let mut order = mirror.clone();
+        order.rotate_left(7);
+        take_scans();
+        for node in order {
+            remove_and_mirror(&ctx, &mut mirror, node);
+            assert!(!ctx.contains(node));
+        }
+        assert_eq!(
+            take_scans(),
+            if HINT { 0 } else { 64 },
+            "a hinted removal still scanned the cache",
+        );
+        assert_eq!(ctx.count(), 0);
+    }
+
+    #[test]
+    fn a_stale_hint_never_removes_another_node() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let pid = heap.create_partition(64 * 1024, 16 * 1024);
+        let sid = heap.acquire_scope_stack(pid);
+        let ctx = heap.new_scope(sid);
+
+        let a = ctx
+            .alloc_local(Node {
+                next: None,
+                value: 1,
+            })
+            .unwrap()
+            .as_raw()
+            .node_ptr();
+        let b = ctx
+            .alloc_local(Node {
+                next: None,
+                value: 2,
+            })
+            .unwrap()
+            .as_raw()
+            .node_ptr();
+
+        // Forge the hint a node would carry after a cache that no longer
+        // exists: it points at another node's slot.
+        unsafe { b.as_ptr().as_mut().unwrap().cache_slot = SlotHint::of(0) };
+        assert_eq!(take_scans(), 0);
+        assert!(ctx.remove_node(b), "the scan fallback must still find b");
+        assert_eq!(take_scans(), 1, "a wrong hint must fall back to the scan");
+        assert!(ctx.contains(a), "a wrong hint removed the wrong node");
+
+        // A node that is not in the cache at all: still a clean `false`.
+        assert!(!ctx.remove_node(b));
+        assert!(ctx.contains(a));
+    }
+
+    #[test]
+    fn clear_invalidates_the_hints() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let pid = heap.create_partition(64 * 1024, 16 * 1024);
+        let sid = heap.acquire_scope_stack(pid);
+        let ctx = heap.new_scope(sid);
+
+        let heads: Vec<NonNull<GcHead>> = (0..8)
+            .map(|i| {
+                ctx.alloc_local(Node {
+                    next: None,
+                    value: i,
+                })
+                .unwrap()
+                .as_raw()
+                .node_ptr()
+            })
+            .collect();
+
+        ctx.clear();
+        for h in &heads {
+            assert_eq!(
+                unsafe { h.as_ref().cache_slot },
+                SlotHint::NONE,
+                "clear left a hint pointing into the dropped cache",
+            );
+            assert!(!ctx.remove_node(*h));
+        }
+    }
+
+    #[test]
+    fn promotion_carries_the_hint_to_the_target_scope() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let pid = heap.create_partition(64 * 1024, 16 * 1024);
+        let sid = heap.acquire_scope_stack(pid);
+        // Two live handles need two `&mut` borrows; the scope stack is LIFO and
+        // the heap outlives both (the other multi-scope tests do the same).
+        let heap_ptr = &mut heap as *mut GcHeap;
+        let outer = unsafe { (&mut *heap_ptr).new_scope(sid) };
+        let kept = outer
+            .alloc_local(Node {
+                next: None,
+                value: 0,
+            })
+            .unwrap()
+            .as_raw()
+            .node_ptr();
+
+        let inner = unsafe { (&mut *heap_ptr).new_scope(sid) };
+        let heads: Vec<NonNull<GcHead>> = (0..4)
+            .map(|i| {
+                inner
+                    .alloc_local(Node {
+                        next: None,
+                        value: i,
+                    })
+                    .unwrap()
+                    .as_raw()
+                    .node_ptr()
+            })
+            .collect();
+
+        // Promote the middle node: the source cache swaps its last node in and
+        // the target cache gains it at the tail.
+        take_scans();
+        assert!(inner.promote_node_to(heads[1], &outer));
+        assert_eq!(
+            take_scans(),
+            if HINT { 0 } else { 1 },
+            "promotion scanned the source cache",
+        );
+        assert_eq!(
+            unsafe { heads[1].as_ref().cache_slot },
+            SlotHint::of(1),
+            "the promoted node did not get the target's tail slot",
+        );
+        assert_eq!(
+            unsafe { heads[3].as_ref().cache_slot },
+            SlotHint::of(1),
+            "the node swapped into the freed slot kept a stale hint",
+        );
+        assert_eq!(
+            unsafe { kept.as_ref().cache_slot },
+            SlotHint::of(0),
+            "the first local of the target scope moved",
+        );
+
+        // And the promoted node is now removable from the target (a scan only
+        // where the target has no room for a hint).
+        take_scans();
+        assert!(outer.remove_node(heads[1]));
+        assert_eq!(take_scans(), if HINT { 0 } else { 1 });
+    }
+
+    /// Not a correctness gate: the per-removal cost with the slot hint versus
+    /// with the hint destroyed (the linear scan this replaced). Run with
+    /// `cargo test --lib hint_vs_scan_removal_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "micro-benchmark; run with --ignored --nocapture"]
+    fn hint_vs_scan_removal_cost() {
+        use std::time::Instant;
+
+        let n = 20_000;
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let pid = heap.create_partition(64 * 1024, 16 * 1024);
+        let sid = heap.acquire_scope_stack(pid);
+        let ctx = heap.new_scope(sid);
+
+        let alloc = |ctx: &GcScope<'_>, i: usize| {
+            ctx.alloc_local(Node {
+                next: None,
+                value: i as i32,
+            })
+            .unwrap()
+            .as_raw()
+            .node_ptr()
+        };
+
+        let nodes: Vec<NonNull<GcHead>> = (0..n).map(|i| alloc(&ctx, i)).collect();
+        let t = Instant::now();
+        for &node in nodes.iter().rev() {
+            assert!(ctx.remove_node(node));
+        }
+        let hinted = t.elapsed();
+
+        // Same work, hint destroyed first: what `remove_node` used to do.
+        let nodes: Vec<NonNull<GcHead>> = (0..n).map(|i| alloc(&ctx, i)).collect();
+        let t = Instant::now();
+        for &node in nodes.iter().rev() {
+            unsafe { node.as_ptr().as_mut().unwrap().cache_slot = SlotHint::NONE };
+            assert!(ctx.remove_node(node));
+        }
+        let scanned = t.elapsed();
+
+        println!(
+            "n={n}: hinted {:.1}ns/op, scanned {:.1}ns/op ({:.0}x)",
+            hinted.as_nanos() as f64 / n as f64,
+            scanned.as_nanos() as f64 / n as f64,
+            scanned.as_secs_f64() / hinted.as_secs_f64(),
+        );
     }
 }
