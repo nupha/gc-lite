@@ -51,9 +51,14 @@ const GEN_YOUNG: u32 = 1 << 16;
 /// Node is in the remembered set: an old node with a possibly-young child.
 #[cfg(feature = "gc_generations")]
 const REMEMBERED: u32 = 1 << 17;
-/// Node survived its first minor and is promoted on the next one (X=2).
+/// Survival counter (5 bits, 0..=31) used for X-generation promotion.
 #[cfg(feature = "gc_generations")]
-const AGE1: u32 = 1 << 18;
+const AGE_SHIFT: u32 = 18;
+#[cfg(feature = "gc_generations")]
+const AGE_MASK: u32 = 0b1_1111 << AGE_SHIFT;
+/// Largest survival count that fits in the age bits.
+#[cfg(feature = "gc_generations")]
+pub const MAX_AGE: u32 = 0b1_1111;
 
 bitflags::bitflags! {
     #[repr(transparent)]
@@ -77,8 +82,9 @@ bitflags::bitflags! {
 pub struct GcHead {
     /// Attributes of node:
     /// * bit 24-31: debug sentinel (debug build)
-    /// * bit 16-23: generational bits (bit16 young, bit17 remembered, bit18
-    ///   age=1) when the `gc_generations` feature is on; reserved otherwise
+    /// * bit 16-23: generational bits (bit16 young, bit17 remembered, bits
+    ///   18-22 survival age) when the `gc_generations` feature is on; reserved
+    ///   otherwise
     /// * bit 8-15:  gc datatype id
     /// * bit 5-7:   flags
     /// * bit 2-4:   reserved
@@ -141,11 +147,7 @@ impl SlotHint {
 
     /// `index` when this hint still names `node`'s slot in `cache`.
     #[inline(always)]
-    pub(super) fn names(
-        self,
-        cache: &[NonNull<GcHead>],
-        node: NonNull<GcHead>,
-    ) -> Option<usize> {
+    pub(super) fn names(self, cache: &[NonNull<GcHead>], node: NonNull<GcHead>) -> Option<usize> {
         let slot = self.0 as usize;
         if slot < cache.len() && cache[slot] == node {
             Some(slot)
@@ -168,11 +170,7 @@ impl SlotHint {
 
     /// Always `None`: without a hint every lookup scans.
     #[inline(always)]
-    pub(super) fn names(
-        self,
-        _cache: &[NonNull<GcHead>],
-        _node: NonNull<GcHead>,
-    ) -> Option<usize> {
+    pub(super) fn names(self, _cache: &[NonNull<GcHead>], _node: NonNull<GcHead>) -> Option<usize> {
         None
     }
 }
@@ -328,22 +326,18 @@ impl GcHead {
         (self.attrs & REMEMBERED) != 0
     }
 
-    /// Whether the node survived its first minor and is promoted on the next
-    /// one (`gc_generations`, X=2).
+    /// How many minors the node has survived while still young
+    /// (`gc_generations`, 0 = allocated since the last minor).
     #[cfg(feature = "gc_generations")]
     #[inline(always)]
-    pub fn is_age1(&self) -> bool {
-        (self.attrs & AGE1) != 0
+    pub fn age(&self) -> u32 {
+        (self.attrs & AGE_MASK) >> AGE_SHIFT
     }
 
     #[cfg(feature = "gc_generations")]
     #[inline(always)]
-    pub(crate) fn set_age1(&mut self, b: bool) {
-        if b {
-            self.attrs |= AGE1;
-        } else {
-            self.attrs &= !AGE1;
-        }
+    pub(crate) fn set_age(&mut self, age: u32) {
+        self.attrs = (self.attrs & !AGE_MASK) | (age.min(MAX_AGE) << AGE_SHIFT);
     }
 
     #[cfg(feature = "gc_generations")]
@@ -951,6 +945,13 @@ mod tests {
         }
         assert_eq!(std::mem::size_of::<NarrowHead>(), 16);
         assert_eq!(std::mem::offset_of!(NarrowHead, next), 12);
-        assert_eq!(std::mem::size_of::<SlotHint>(), if cfg!(target_pointer_width = "64") { 4 } else { 0 });
+        assert_eq!(
+            std::mem::size_of::<SlotHint>(),
+            if cfg!(target_pointer_width = "64") {
+                4
+            } else {
+                0
+            }
+        );
     }
 }

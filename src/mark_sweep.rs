@@ -271,7 +271,7 @@ impl GcHeap {
             loop {
                 unsafe {
                     tail.as_mut().set_young(false);
-                    tail.as_mut().set_age1(false);
+                    tail.as_mut().set_age(0);
                     match tail.as_ref().next {
                         Some(next) => tail = next,
                         None => break,
@@ -350,7 +350,7 @@ impl GcHeap {
         for mut n in par.young.iter() {
             unsafe {
                 let node = n.as_mut();
-                if node.is_root_or_local() || node.is_age1() {
+                if node.is_root_or_local() || node.age() > 0 {
                     node.set_color(GcTriColor::Gray);
                     if !node.is_gray_listed() {
                         node.set_gray_listed(true);
@@ -392,18 +392,22 @@ impl GcHeap {
 
     /// Finish a completed minor cycle by splitting the young chain: white
     /// non-root nodes are returned for the usual drop/dispose pass. Survivors
-    /// get one more young cycle (age=1) before being promoted to the old chain
-    /// on the following minor (X=2).
+    /// stay young until they have survived `promote_after` minors, then are
+    /// promoted to the old chain.
     ///
     /// Returns `None` when the minor mark cycle is not complete. On success the
-    /// young chain contains only age-1 survivors and the remembered set is
-    /// cleared (age-1 survivors are rooted by the next minor; old→age-0 edges
+    /// young chain contains only age>0 survivors and the remembered set is
+    /// cleared (aged survivors are rooted by the next minor; old→age-0 edges
     /// are recorded by `bind`).
     ///
     /// No allocation may happen between `minor_prepare` and this call: a node
     /// allocated mid-minor would still be White and be swept as garbage.
     #[cfg(feature = "gc_generations")]
-    pub fn minor_sweep_unlink(&mut self, partition_id: GcPartitionId) -> Option<GcNodeLink> {
+    pub fn minor_sweep_unlink(
+        &mut self,
+        partition_id: GcPartitionId,
+        promote_after: u32,
+    ) -> Option<GcNodeLink> {
         if (partition_id.0 as usize) >= self.partitions.len() {
             return None;
         }
@@ -437,23 +441,26 @@ impl GcHeap {
                         None => white_head = Some(this),
                     }
                     white_tail = Some(this);
-                } else if hd.is_age1() {
-                    // Survived one minor: promote (X=2).
-                    hd.set_age1(false);
-                    hd.set_young(false);
-                    match promote_tail {
-                        Some(mut tail) => tail.as_mut().next = Some(this),
-                        None => promote_head = Some(this),
-                    }
-                    promote_tail = Some(this);
                 } else {
-                    // First survival: stay young with age=1.
-                    hd.set_age1(true);
-                    match stay_tail {
-                        Some(mut tail) => tail.as_mut().next = Some(this),
-                        None => stay_head = Some(this),
+                    let survived = hd.age() + 1;
+                    if survived >= promote_after.max(1) {
+                        // Survived the full generation count: promote.
+                        hd.set_age(0);
+                        hd.set_young(false);
+                        match promote_tail {
+                            Some(mut tail) => tail.as_mut().next = Some(this),
+                            None => promote_head = Some(this),
+                        }
+                        promote_tail = Some(this);
+                    } else {
+                        // Still young: remember how many minors it survived.
+                        hd.set_age(survived);
+                        match stay_tail {
+                            Some(mut tail) => tail.as_mut().next = Some(this),
+                            None => stay_head = Some(this),
+                        }
+                        stay_tail = Some(this);
                     }
-                    stay_tail = Some(this);
                 }
 
                 current = next;
@@ -474,8 +481,8 @@ impl GcHeap {
         #[cfg(debug_assertions)]
         for n in par.young.iter() {
             debug_assert!(
-                unsafe { n.as_ref().is_age1() },
-                "every node left in the young chain must carry age=1"
+                unsafe { n.as_ref().age() } > 0,
+                "every node left in the young chain must carry a survival age"
             );
         }
 
@@ -1218,13 +1225,13 @@ mod generations_tests {
 
     /// Drain the gray list and run the first two white-list steps, leaving the
     /// caller with the freed-bytes count.
-    fn finish_minor(heap: &mut GcHeap, pid: GcPartitionId) -> usize {
+    fn finish_minor(heap: &mut GcHeap, pid: GcPartitionId, promote_after: u32) -> usize {
         assert!(
             heap.mark_grays(pid, usize::MAX),
             "minor mark did not finish"
         );
         let white = heap
-            .minor_sweep_unlink(pid)
+            .minor_sweep_unlink(pid, promote_after)
             .expect("minor mark cycle is not complete");
         let registry = heap.type_registry();
         GcHeap::sweep_drop_payloads(&white, registry);
@@ -1273,23 +1280,23 @@ mod generations_tests {
         assert_eq!(heap.remembered.len(), 1);
 
         heap.minor_prepare(pid);
-        finish_minor(&mut heap, pid);
+        finish_minor(&mut heap, pid, 2);
 
         // The remembered young child survived; it stays young for one more
         // cycle (X=2) and the set is clear.
         assert!(heap.remembered.is_empty());
         assert!(!unsafe { old_root.node_info().is_remembered() });
         assert!(unsafe { y1.node_info().is_young() });
-        assert!(unsafe { y1.node_info().is_age1() });
+        assert!(unsafe { y1.node_info().age() } == 1);
         assert!(heap.nodes(pid).any(|n| n == y1.node_ptr()));
         // y2 was only held by a metadata-only bind: no payload edge, collected.
         assert!(!heap.nodes(pid).any(|n| n == y2.node_ptr()));
 
         // Second minor: age-1 survivor is promoted.
         heap.minor_prepare(pid);
-        finish_minor(&mut heap, pid);
+        finish_minor(&mut heap, pid, 2);
         assert!(!unsafe { y1.node_info().is_young() });
-        assert!(!unsafe { y1.node_info().is_age1() });
+        assert!(unsafe { y1.node_info().age() } == 0);
         assert!(heap.nodes(pid).any(|n| n == y1.node_ptr()));
     }
 
@@ -1301,22 +1308,48 @@ mod generations_tests {
         let root = unsafe { heap.alloc_root_raw(pid, GenNode { child: Some(child) }) }.unwrap();
 
         heap.minor_prepare(pid);
-        let freed = finish_minor(&mut heap, pid);
+        let freed = finish_minor(&mut heap, pid, 2);
 
         assert!(freed > 0);
         // Survivors stay young with age=1 after the first minor.
         assert_eq!(heap.partitions[0].young.len(), 2);
         assert!(unsafe { root.node_info().is_young() });
-        assert!(unsafe { root.node_info().is_age1() });
-        assert!(unsafe { child.node_info().is_age1() });
+        assert!(unsafe { root.node_info().age() } == 1);
+        assert!(unsafe { child.node_info().age() } == 1);
         assert_eq!(heap.nodes(pid).count(), 2);
 
         heap.minor_prepare(pid);
-        finish_minor(&mut heap, pid);
+        finish_minor(&mut heap, pid, 2);
         assert!(heap.partitions[0].young.head().is_none());
         assert!(!unsafe { root.node_info().is_young() });
         assert!(!unsafe { child.node_info().is_young() });
         assert_eq!(heap.partitions[0].nodes.len(), 2);
+    }
+
+    #[test]
+    fn promotion_waits_for_the_requested_number_of_minors() {
+        let (mut heap, pid) = new_heap();
+        let root = unsafe { heap.alloc_root_raw(pid, GenNode { child: None }) }.unwrap();
+
+        // X = 4: survive three minors (ages 1..3) and promote on the fourth.
+        for expected_age in 1..4 {
+            heap.minor_prepare(pid);
+            finish_minor(&mut heap, pid, 4);
+            assert!(unsafe { root.node_info().is_young() });
+            assert_eq!(unsafe { root.node_info().age() }, expected_age);
+        }
+        heap.minor_prepare(pid);
+        finish_minor(&mut heap, pid, 4);
+        assert!(!unsafe { root.node_info().is_young() });
+        assert_eq!(unsafe { root.node_info().age() }, 0);
+        assert!(heap.partitions[0].young.head().is_none());
+
+        // X = 1 is the original promote-once behaviour.
+        let (mut heap, pid) = new_heap();
+        let mail = unsafe { heap.alloc_root_raw(pid, GenNode { child: None }) }.unwrap();
+        heap.minor_prepare(pid);
+        finish_minor(&mut heap, pid, 1);
+        assert!(!unsafe { mail.node_info().is_young() });
     }
 
     #[test]
@@ -1364,7 +1397,7 @@ mod generations_tests {
         unsafe { old_root.as_mut() }.child = Some(young);
 
         heap.minor_prepare(pid);
-        finish_minor(&mut heap, pid); // the young child is unreachable => freed
+        finish_minor(&mut heap, pid, 2); // the young child is unreachable => freed
 
         // The host's verification mark runs right after the minor, before any
         // allocation can recycle the address.
