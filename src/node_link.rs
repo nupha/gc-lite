@@ -105,8 +105,18 @@ impl<'a> Iterator for NodeLinkIter<'a> {
 }
 
 impl GcHeap {
+    /// Iterate every live node of `partition_id`.
+    ///
+    /// With `gc_generations` on this covers the old chain and then the young
+    /// chain; feature-off keeps returning the plain old-chain iterator.
     #[inline]
-    pub fn nodes(&self, partition_id: GcPartitionId) -> NodeLinkIter<'_> {
+    pub fn nodes(&self, partition_id: GcPartitionId) -> impl Iterator<Item = NonNull<GcHead>> + '_ {
+        #[cfg(feature = "gc_generations")]
+        {
+            let par = &self.partitions[partition_id.0 as usize];
+            par.nodes.iter().chain(par.young.iter())
+        }
+        #[cfg(not(feature = "gc_generations"))]
         NodeLinkIter::new(self.partitions[partition_id.0 as usize].nodes.head())
     }
 }

@@ -11,6 +11,8 @@ keywords = ["gc", "memory"]
 
 [features]
 gc_arena = []
+gc_generations = [] # Generational GC
+
 default = ["gc_arena"]
 
 [dependencies]

@@ -43,6 +43,12 @@ pub struct GcHeap {
     /// gc scope stack list
     pub(crate) scope_stacks: Vec<ScopeStack>, // DON'T use SmallVec here
 
+    /// Remembered set (`gc_generations`): old nodes that may reference young
+    /// nodes. Each source carries the `REMEMBERED` bit, so this list is deduped
+    /// by construction. Cleared (capacity kept) at every minor/major end.
+    #[cfg(feature = "gc_generations")]
+    pub(super) remembered: Vec<NonNull<GcHead>>,
+
     /// User provided opaque raw pointer
     opaque: *mut u8,
 
@@ -50,9 +56,32 @@ pub struct GcHeap {
     pub(crate) dbg_dropping_root_partition: Option<GcPartitionId>,
     #[cfg(debug_assertions)]
     pub(crate) dbg_living_nodes: std::collections::HashSet<NonNull<GcHead>>,
+    /// Nodes freed by the last minor collection (`gc_generations` debug
+    /// validator): pointer → dtype. Cleared when the next minor starts; any
+    /// root or traced child that still points at one of these addresses is a
+    /// missing write barrier.
+    #[cfg(all(debug_assertions, feature = "gc_generations"))]
+    pub(crate) dbg_minor_freed: std::collections::HashMap<NonNull<GcHead>, u8>,
 }
 
 impl GcHeap {
+    /// Debug helper: clear the last minor's freed-node set after the host has
+    /// run its verification mark (before any allocation can recycle those
+    /// addresses).
+    #[cfg(all(debug_assertions, feature = "gc_generations"))]
+    #[inline]
+    pub fn dbg_clear_minor_freed(&mut self) {
+        self.dbg_minor_freed.clear();
+    }
+
+    /// Debug helper: whether the node was freed by the last minor collection
+    /// (`gc_generations` validator). Used by the host's own trace hooks.
+    #[cfg(all(debug_assertions, feature = "gc_generations"))]
+    #[inline]
+    pub fn dbg_is_minor_freed(&self, node: NonNull<GcHead>) -> bool {
+        self.dbg_minor_freed.contains_key(&node)
+    }
+
     /// Debug helper: whether the node is currently tracked as a living (never
     /// freed) node. Exposed so embedders can diagnose use-after-free.
     #[cfg(debug_assertions)]
@@ -83,8 +112,18 @@ impl Drop for GcHeap {
             .iter_mut()
             .map(|par| std::mem::take(&mut par.nodes))
             .collect();
+        #[cfg(feature = "gc_generations")]
+        let all_young: Vec<_> = self
+            .partitions
+            .iter_mut()
+            .map(|par| std::mem::take(&mut par.young))
+            .collect();
 
         for nodes in all_nodes {
+            self.dispose_all_nodes(nodes, Self::DUMMY_DISPOSE_CALLBACK);
+        }
+        #[cfg(feature = "gc_generations")]
+        for nodes in all_young {
             self.dispose_all_nodes(nodes, Self::DUMMY_DISPOSE_CALLBACK);
         }
 
@@ -114,11 +153,15 @@ impl GcHeap {
             opaque: std::ptr::null_mut(),
             node_dtypes: registry,
             scope_stacks: vec![ScopeStack::new(None)],
+            #[cfg(feature = "gc_generations")]
+            remembered: Vec::new(),
 
             #[cfg(debug_assertions)]
             dbg_dropping_root_partition: None,
             #[cfg(debug_assertions)]
             dbg_living_nodes: std::collections::HashSet::with_capacity(128),
+            #[cfg(all(debug_assertions, feature = "gc_generations"))]
+            dbg_minor_freed: std::collections::HashMap::new(),
         }
     }
 
@@ -191,13 +234,31 @@ impl GcHeap {
             "attach_node: node partition_id doesn't match"
         );
 
-        let par = &mut self.partitions[partition_id.0 as usize];
-        let mem_before = par.memory_used;
-        par.nodes.prepend(node);
-        debug_assert_eq!(
-            par.memory_used, mem_before,
-            "attach_node must not change memory accounting"
-        );
+        // Generational builds attach every fresh node (root/local included) to
+        // the young chain; feature-off keeps the original single-chain path.
+        #[cfg(feature = "gc_generations")]
+        {
+            n.set_young(true);
+            let par = &mut self.partitions[partition_id.0 as usize];
+            let mem_before = par.memory_used;
+            par.young.prepend(node);
+            debug_assert_eq!(
+                par.memory_used, mem_before,
+                "attach_node must not change memory accounting"
+            );
+            return;
+        }
+
+        #[cfg(not(feature = "gc_generations"))]
+        {
+            let par = &mut self.partitions[partition_id.0 as usize];
+            let mem_before = par.memory_used;
+            par.nodes.prepend(node);
+            debug_assert_eq!(
+                par.memory_used, mem_before,
+                "attach_node must not change memory accounting"
+            );
+        }
     }
 
     pub fn set_root_node(&mut self, mut node: NonNull<GcHead>) {
@@ -215,9 +276,20 @@ impl GcHeap {
     /// Check if `node` was allocated in this heap
     pub fn contains(&self, node: NonNull<GcHead>) -> bool {
         let pid = unsafe { node.as_ref().partition_id() };
-        self.partitions
-            .get(pid.0 as usize)
-            .is_some_and(|par| par.nodes.iter().any(|p| p == node))
+        let Some(par) = self.partitions.get(pid.0 as usize) else {
+            return false;
+        };
+        if par.nodes.iter().any(|p| p == node) {
+            return true;
+        }
+        #[cfg(feature = "gc_generations")]
+        {
+            par.young.iter().any(|p| p == node)
+        }
+        #[cfg(not(feature = "gc_generations"))]
+        {
+            false
+        }
     }
 
     /// Protect node from being gc collected.

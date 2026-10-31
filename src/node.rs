@@ -42,6 +42,19 @@ impl TryFrom<u32> for GcTriColor {
 
 const COLOR_MASK: u32 = 0b11;
 
+/// Generational bits, stored in the otherwise unused `attrs` bits 16-17.
+///
+/// They deliberately live outside [`GcNodeFlag`] (a `u8`, bits 2-7) so the
+/// existing flag layout is untouched.
+#[cfg(feature = "gc_generations")]
+const GEN_YOUNG: u32 = 1 << 16;
+/// Node is in the remembered set: an old node with a possibly-young child.
+#[cfg(feature = "gc_generations")]
+const REMEMBERED: u32 = 1 << 17;
+/// Node survived its first minor and is promoted on the next one (X=2).
+#[cfg(feature = "gc_generations")]
+const AGE1: u32 = 1 << 18;
+
 bitflags::bitflags! {
     #[repr(transparent)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,7 +77,8 @@ bitflags::bitflags! {
 pub struct GcHead {
     /// Attributes of node:
     /// * bit 24-31: debug sentinel (debug build)
-    /// * bit 16-23: reserved
+    /// * bit 16-23: generational bits (bit16 young, bit17 remembered, bit18
+    ///   age=1) when the `gc_generations` feature is on; reserved otherwise
     /// * bit 8-15:  gc datatype id
     /// * bit 5-7:   flags
     /// * bit 2-4:   reserved
@@ -287,6 +301,58 @@ impl GcHead {
             self.attrs |= GcNodeFlag::GRAY_LISTED.bits() as u32;
         } else {
             self.attrs &= !(GcNodeFlag::GRAY_LISTED.bits() as u32);
+        }
+    }
+
+    /// Whether the node is in the young generation (`gc_generations`).
+    #[cfg(feature = "gc_generations")]
+    #[inline(always)]
+    pub fn is_young(&self) -> bool {
+        (self.attrs & GEN_YOUNG) != 0
+    }
+
+    #[cfg(feature = "gc_generations")]
+    #[inline(always)]
+    pub(super) fn set_young(&mut self, b: bool) {
+        if b {
+            self.attrs |= GEN_YOUNG;
+        } else {
+            self.attrs &= !GEN_YOUNG;
+        }
+    }
+
+    /// Whether the node is a remembered-set source (`gc_generations`).
+    #[cfg(feature = "gc_generations")]
+    #[inline(always)]
+    pub fn is_remembered(&self) -> bool {
+        (self.attrs & REMEMBERED) != 0
+    }
+
+    /// Whether the node survived its first minor and is promoted on the next
+    /// one (`gc_generations`, X=2).
+    #[cfg(feature = "gc_generations")]
+    #[inline(always)]
+    pub fn is_age1(&self) -> bool {
+        (self.attrs & AGE1) != 0
+    }
+
+    #[cfg(feature = "gc_generations")]
+    #[inline(always)]
+    pub(crate) fn set_age1(&mut self, b: bool) {
+        if b {
+            self.attrs |= AGE1;
+        } else {
+            self.attrs &= !AGE1;
+        }
+    }
+
+    #[cfg(feature = "gc_generations")]
+    #[inline(always)]
+    pub(super) fn set_remembered(&mut self, b: bool) {
+        if b {
+            self.attrs |= REMEMBERED;
+        } else {
+            self.attrs &= !REMEMBERED;
         }
     }
 
@@ -529,6 +595,18 @@ impl<T: GcNode> GcRef<T> {
             }
         }
 
+        // Generational fallback when the written value is unknown: remember the
+        // source so the next minor re-traces its outgoing edges. This over-
+        // records (it cannot tell whether the value is young), which is safe.
+        #[cfg(feature = "gc_generations")]
+        unsafe {
+            let node = self.head_ptr.as_ref();
+            if !node.is_young() && !node.is_remembered() {
+                self.head_ptr.as_mut().set_remembered(true);
+                heap.remembered.push(self.head_ptr);
+            }
+        }
+
         // SAFETY: self is alive (caller guarantees it via the unsafe fn contract).
         let value = unsafe {
             self.head_ptr
@@ -705,11 +783,27 @@ impl GcHeap {
     /// # Safety
     ///
     /// Both pointers must point to valid, live GC nodes managed by this heap.
-    pub fn bind(&mut self, master: NonNull<GcHead>, mut slave: NonNull<GcHead>) {
+    pub fn bind(&mut self, mut master: NonNull<GcHead>, mut slave: NonNull<GcHead>) {
         #[cfg(debug_assertions)]
         unsafe {
             master.as_ref().debug_assert_node_valid(self);
             slave.as_ref().debug_assert_node_valid(self);
+        }
+
+        // Generational remembered set: an old master gaining a young slave is
+        // the one edge kind a minor cannot see by scanning the young chain.
+        // The source bit dedupes the Vec; it is cleared at minor/major end.
+        #[cfg(feature = "gc_generations")]
+        unsafe {
+            let (master_young, slave_young, master_remembered) = (
+                master.as_ref().is_young(),
+                slave.as_ref().is_young(),
+                master.as_ref().is_remembered(),
+            );
+            if !master_young && slave_young && !master_remembered {
+                master.as_mut().set_remembered(true);
+                self.remembered.push(master);
+            }
         }
 
         // tri-color write barrier

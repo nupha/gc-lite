@@ -26,6 +26,11 @@ impl std::fmt::Debug for GcPartitionId {
 pub struct GcPartition {
     /// link of nodes in this partition
     pub(crate) nodes: GcNodeLink,
+    /// young-generation link (`gc_generations`): new allocations live here until
+    /// they survive a minor and are promoted onto `nodes`.
+    #[cfg(feature = "gc_generations")]
+    pub(crate) young: GcNodeLink,
+
     /// gray nodes to be traced in this partition
     pub(crate) gray_list: Vec<NonNull<GcHead>>,
     /// Is in a marking cycle
@@ -68,6 +73,9 @@ impl GcPartition {
         Self {
             memory_used: 0,
             nodes: GcNodeLink::default(),
+            #[cfg(feature = "gc_generations")]
+            young: GcNodeLink::default(),
+
             gray_list: Vec::new(),
             marking: false,
 
@@ -194,7 +202,28 @@ impl GcHeap {
         log::trace!("[finalize_partition] {partition_id:?}");
 
         // Clone the partition's node link so we can iterate without borrowing &self.
+        #[cfg(not(feature = "gc_generations"))]
         let link = self.partitions[partition_id.0 as usize].nodes.clone();
+
+        // Generational: teardown must also cover not-yet-promoted young nodes,
+        // otherwise their payloads are never dropped and their memory leaks.
+        // Splicing the young chain onto the old one only mutates `next` of the
+        // old tail (which is `None`), and `dealloc_partition` resets both chains.
+        #[cfg(feature = "gc_generations")]
+        let link = {
+            let par = &self.partitions[partition_id.0 as usize];
+            match (par.nodes.head(), par.young.head()) {
+                (Some(old_head), Some(young_head)) => {
+                    let mut tail = old_head;
+                    while let Some(n) = unsafe { tail.as_ref().next } {
+                        tail = n;
+                    }
+                    unsafe { tail.as_mut().next = Some(young_head) };
+                    GcNodeLink::new(Some(old_head))
+                }
+                (old_head, young_head) => GcNodeLink::new(old_head.or(young_head)),
+            }
+        };
 
         // Pre-clear all weak_slots BEFORE dropping any payloads.
         // This prevents use-after-free when a Drop callback in a later node
@@ -312,6 +341,13 @@ impl GcHeap {
         self.partitions[partition_id.0 as usize].reset_arena();
         self.partitions[partition_id.0 as usize].memory_used = 0;
         self.partitions[partition_id.0 as usize].nodes = GcNodeLink::default();
+        #[cfg(feature = "gc_generations")]
+        {
+            self.partitions[partition_id.0 as usize].young = GcNodeLink::default();
+            // shortcut: v1 is single-partition, so every remembered source is
+            // in this partition; a multi-partition dealloc must filter by pid.
+            self.remembered.clear();
+        }
         self.partitions[partition_id.0 as usize].gray_list.clear();
         self.partitions[partition_id.0 as usize].marking = false;
 
@@ -382,6 +418,15 @@ impl GcHeap {
         (0..self.partitions.len())
             .map(|i| GcPartitionId(i as u16))
             .collect()
+    }
+
+    /// Number of partitions in this heap.
+    ///
+    /// Used by generational hosts to enforce the v1 single-partition rule.
+    #[cfg(feature = "gc_generations")]
+    #[inline(always)]
+    pub fn partition_count(&self) -> usize {
+        self.partitions.len()
     }
 }
 

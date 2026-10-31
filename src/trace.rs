@@ -21,6 +21,10 @@ pub struct GcTraceCtx<'a> {
     pub(crate) traced_nodes: Vec<NonNull<GcHead>>,
     pub(crate) opaque: *mut u8,
     pub(crate) _mark: PhantomData<&'a ()>,
+    /// Debug validator (`gc_generations`): nodes freed by the last minor.
+    /// Checked before the first dereference of a submitted child.
+    #[cfg(all(debug_assertions, feature = "gc_generations"))]
+    pub(crate) dbg_freed: Option<*const std::collections::HashMap<NonNull<GcHead>, u8>>,
 }
 
 impl<'a> GcTraceCtx<'a> {
@@ -33,6 +37,16 @@ impl<'a> GcTraceCtx<'a> {
     /// are allowed; no `Vec::contains` check, which made wide containers very
     /// slow (cost grew with the square of their width).
     pub fn add_node(&mut self, node: NonNull<GcHead>) {
+        #[cfg(all(debug_assertions, feature = "gc_generations"))]
+        if let Some(freed) = self.dbg_freed {
+            // Before any dereference: a freed address may already be poisoned.
+            debug_assert!(
+                !unsafe { &*freed }.contains_key(&node),
+                "a live object still points at a node freed by the last minor: {:?}",
+                node
+            );
+        }
+
         #[cfg(debug_assertions)]
         unsafe {
             node.as_ref().debug_assert_node_valid_simple();
@@ -59,6 +73,8 @@ impl GcHeap {
             traced_nodes: Vec::with_capacity(cap),
             opaque: self.opaque(),
             _mark: PhantomData,
+            #[cfg(all(debug_assertions, feature = "gc_generations"))]
+            dbg_freed: Some(&self.dbg_minor_freed),
         }
     }
 
