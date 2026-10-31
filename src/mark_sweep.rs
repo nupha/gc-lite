@@ -242,6 +242,29 @@ impl GcHeap {
         true
     }
 
+    /// Drain every partition's gray list to a fixed point (`gc_generations`).
+    ///
+    /// A minor marks the whole young generation, so children pushed into another
+    /// partition's gray list must be processed too. Loops because draining one
+    /// partition can push new grays into partitions already visited.
+    #[cfg(feature = "gc_generations")]
+    pub fn mark_grays_all(&mut self) {
+        let count = self.partitions.len();
+        loop {
+            let mut pending = false;
+            for i in 0..count {
+                if self.partitions[i].gray_list.is_empty() {
+                    continue;
+                }
+                pending = true;
+                self.mark_grays(GcPartitionId(i as u16), usize::MAX);
+            }
+            if !pending {
+                return;
+            }
+        }
+    }
+
     pub fn mark(&mut self, partition_id: GcPartitionId, max_steps: usize) -> bool {
         self.mark_prepare(partition_id);
         if max_steps > 0 {
@@ -287,7 +310,7 @@ impl GcHeap {
         self.clear_remembered();
     }
 
-    /// Clear the remembered set (capacity kept) and the `REMEMBERED` bit on
+    /// Clear the remembered set (capacity capped) and the `REMEMBERED` bit on
     /// every source.
     ///
     /// Callers guarantee the sources are still alive: a minor never sweeps old
@@ -299,65 +322,106 @@ impl GcHeap {
                 src.as_mut().set_remembered(false);
             }
         }
+        // The remembered set is invisible to `memory_limit`. Cap the buffer a
+        // spike leaves behind so it cannot pin memory between collections.
+        if self.remembered.capacity() > 256 {
+            self.remembered.shrink_to(256);
+        }
     }
 
-    /// Prepare a minor collection (`gc_generations`).
+    /// Drop remembered sources that would dangle once `partition_id` is freed:
+    /// sources living in it and sources (in other partitions) with a child in
+    /// it. Must run before the partition's nodes are deallocated so child
+    /// partition ids are still readable; sources inside the partition are not
+    /// traced because their payloads were already dropped by the finalize pass.
     ///
-    /// Seeds the young chain (ROOT/LOCAL → Gray, the rest → White) and traces
-    /// the remembered old→young edges. The old chain is **not** recolored: the
-    /// generational invariant is "every old node is Black", so old children
-    /// reached from a remembered source are skipped by `add_gray_node`.
-    ///
-    /// Afterwards the caller traces its runtime roots with `add_gray_node`,
-    /// drains the gray list with [`mark_grays`](Self::mark_grays)(`usize::MAX`),
-    /// and finishes with [`minor_sweep_unlink`](Self::minor_sweep_unlink).
+    /// Detaching all live references to a partition before freeing it is the
+    /// host's job: this is a best-effort cleanup of the GC's own bookkeeping.
+    /// Dropping an incoming source also loses its other (dangling-free) edges.
     #[cfg(feature = "gc_generations")]
-    pub fn minor_prepare(&mut self, partition_id: GcPartitionId) {
-        // v1 single-partition: mark_grays only drains one partition's grays.
-        debug_assert_eq!(
-            self.partitions.len(),
-            1,
-            "gc_generations v1 supports a single partition"
-        );
+    pub(super) fn purge_remembered_for_partition(&mut self, partition_id: GcPartitionId) {
+        let sources = std::mem::take(&mut self.remembered);
+        let mut kept = Vec::with_capacity(sources.len());
+        let mut gcx = GcTraceCtx {
+            traced_nodes: Vec::with_capacity(8),
+            opaque: self.opaque(),
+            _mark: std::marker::PhantomData,
+            #[cfg(all(debug_assertions, feature = "gc_generations"))]
+            dbg_freed: None,
+        };
+        for mut src in sources {
+            let dead = unsafe { src.as_ref().partition_id() } == partition_id;
+            let dangling = dead || {
+                gcx.traced_nodes.clear();
+                self.trace_node(src, &mut gcx);
+                gcx.traced_nodes
+                    .iter()
+                    .any(|child| unsafe { child.as_ref().partition_id() == partition_id })
+            };
+            if dangling {
+                unsafe { src.as_mut().set_remembered(false) };
+            } else {
+                kept.push(src);
+            }
+        }
+        self.remembered = kept;
+    }
 
-        if (partition_id.0 as usize) >= self.partitions.len() {
-            return;
+    /// Prepare a minor collection of the **whole heap** (`gc_generations`).
+    ///
+    /// Every partition's young chain is colored (ROOT/LOCAL/age>0 → Gray, the
+    /// rest → White) and the remembered old→young edges are traced, so a minor
+    /// never depends on a node living in a specific partition. The old chains
+    /// are **not** recolored: the generational invariant is "every old node is
+    /// Black", so old children reached from a remembered source are skipped by
+    /// `add_gray_node`.
+    ///
+    /// Returns `false` when a partition is still mid-mark (a partial major must
+    /// finish first: its old chain is not Black yet).
+    ///
+    /// Afterwards the caller traces its runtime roots, drains every partition's
+    /// gray list with [`mark_grays_all`](Self::mark_grays_all), and finishes
+    /// with [`minor_sweep_unlink`](Self::minor_sweep_unlink).
+    #[cfg(feature = "gc_generations")]
+    pub fn minor_prepare(&mut self) -> bool {
+        if self.partitions.iter().any(|par| par.is_marking()) {
+            return false;
         }
-        if self.partitions[partition_id.0 as usize].is_marking() {
-            return;
+        for par in &mut self.partitions {
+            par.set_marking(true);
         }
-        self.partitions[partition_id.0 as usize].set_marking(true);
 
         // The previous minor's freed set has been verified; start a new round.
         #[cfg(all(debug_assertions, feature = "gc_generations"))]
         self.dbg_minor_freed.clear();
 
-        // Safety invariant for "old nodes never enter the gray list".
-        #[cfg(debug_assertions)]
-        for n in self.partitions[partition_id.0 as usize].nodes.iter() {
-            debug_assert_eq!(
-                unsafe { n.as_ref().color() },
-                GcTriColor::Black,
-                "minor_prepare: old node is not black: {:?}",
-                unsafe { n.as_ref() }
-            );
-        }
+        for par in &mut self.partitions {
+            // Safety invariant for "old nodes never enter the gray list".
+            #[cfg(debug_assertions)]
+            for n in par.nodes.iter() {
+                debug_assert_eq!(
+                    unsafe { n.as_ref().color() },
+                    GcTriColor::Black,
+                    "minor_prepare: old node is not black: {:?}",
+                    unsafe { n.as_ref() }
+                );
+            }
 
-        // Color the young chain and seed its roots. Age-1 survivors are roots
-        // for this cycle: the remembered set only has to cover old→age-0 edges,
-        // so it can still be cleared at the end of the minor.
-        let par = &mut self.partitions[partition_id.0 as usize];
-        for mut n in par.young.iter() {
-            unsafe {
-                let node = n.as_mut();
-                if node.is_root_or_local() || node.age() > 0 {
-                    node.set_color(GcTriColor::Gray);
-                    if !node.is_gray_listed() {
-                        node.set_gray_listed(true);
-                        par.gray_list.push(n);
+            // Color the young chain and seed its roots. Age-1 survivors are roots
+            // for this cycle: the remembered set only has to cover old→age-0
+            // edges, so it can still be cleared at the end of the minor.
+            for mut n in par.young.iter() {
+                unsafe {
+                    let node = n.as_mut();
+                    if node.is_root_or_local() || node.age() > 0 {
+                        node.set_color(GcTriColor::Gray);
+                        if !node.is_gray_listed() {
+                            node.set_gray_listed(true);
+                            par.gray_list.push(n);
+                        }
+                    } else {
+                        node.set_color(GcTriColor::White);
                     }
-                } else {
-                    node.set_color(GcTriColor::White);
                 }
             }
         }
@@ -388,102 +452,111 @@ impl GcHeap {
         }
         // Keep the Vec (and its capacity) until the minor finishes.
         self.remembered = sources;
+        true
     }
 
-    /// Finish a completed minor cycle by splitting the young chain: white
-    /// non-root nodes are returned for the usual drop/dispose pass. Survivors
-    /// stay young until they have survived `promote_after` minors, then are
-    /// promoted to the old chain.
+    /// Finish a completed minor cycle for the whole heap by splitting each
+    /// partition's young chain: white non-root nodes are returned (per
+    /// partition) for the usual drop/dispose pass. Survivors stay young until
+    /// they have survived `promote_after` minors, then are promoted to that
+    /// partition's old chain.
     ///
-    /// Returns `None` when the minor mark cycle is not complete. On success the
-    /// young chain contains only age>0 survivors and the remembered set is
-    /// cleared (aged survivors are rooted by the next minor; old→age-0 edges
-    /// are recorded by `bind`).
+    /// Returns `None` when some partition's minor mark cycle is not complete.
+    /// On success every young chain contains only age>0 survivors and the
+    /// remembered set is cleared (aged survivors are rooted by the next minor;
+    /// old→age-0 edges are recorded by `bind`).
     ///
     /// No allocation may happen between `minor_prepare` and this call: a node
     /// allocated mid-minor would still be White and be swept as garbage.
     #[cfg(feature = "gc_generations")]
     pub fn minor_sweep_unlink(
         &mut self,
-        partition_id: GcPartitionId,
         promote_after: u32,
-    ) -> Option<GcNodeLink> {
-        if (partition_id.0 as usize) >= self.partitions.len() {
+    ) -> Option<Vec<(GcPartitionId, GcNodeLink)>> {
+        if self
+            .partitions
+            .iter()
+            .any(|par| !(par.is_marking() && par.gray_list.is_empty()))
+        {
             return None;
         }
 
-        let par = &mut self.partitions[partition_id.0 as usize];
-        if !(par.is_marking() && par.gray_list.is_empty()) {
-            return None;
-        }
-        par.set_marking(false);
+        let mut whites = Vec::new();
+        for i in 0..self.partitions.len() {
+            let par = &mut self.partitions[i];
+            par.set_marking(false);
 
-        let mut current = std::mem::take(&mut par.young).into_inner();
-        let mut white_head: Option<NonNull<GcHead>> = None;
-        let mut white_tail: Option<NonNull<GcHead>> = None;
-        let mut promote_head: Option<NonNull<GcHead>> = None;
-        let mut promote_tail: Option<NonNull<GcHead>> = None;
-        let mut stay_head: Option<NonNull<GcHead>> = None;
-        let mut stay_tail: Option<NonNull<GcHead>> = None;
+            let mut current = std::mem::take(&mut par.young).into_inner();
+            let mut white_head: Option<NonNull<GcHead>> = None;
+            let mut white_tail: Option<NonNull<GcHead>> = None;
+            let mut promote_head: Option<NonNull<GcHead>> = None;
+            let mut promote_tail: Option<NonNull<GcHead>> = None;
+            let mut stay_head: Option<NonNull<GcHead>> = None;
+            let mut stay_tail: Option<NonNull<GcHead>> = None;
 
-        while let Some(mut this) = current {
-            unsafe {
-                let next = this.as_mut().next;
-                let hd = this.as_mut();
-                hd.next = None;
+            while let Some(mut this) = current {
+                unsafe {
+                    let next = this.as_mut().next;
+                    let hd = this.as_mut();
+                    hd.next = None;
 
-                let is_white = hd.color() == GcTriColor::White && !hd.is_root_or_local();
-                if is_white {
-                    #[cfg(all(debug_assertions, feature = "gc_generations"))]
-                    self.dbg_minor_freed.insert(this, hd.dtype());
-                    match white_tail {
-                        Some(mut tail) => tail.as_mut().next = Some(this),
-                        None => white_head = Some(this),
-                    }
-                    white_tail = Some(this);
-                } else {
-                    let survived = hd.age() + 1;
-                    if survived >= promote_after.max(1) {
-                        // Survived the full generation count: promote.
-                        hd.set_age(0);
-                        hd.set_young(false);
-                        match promote_tail {
+                    let is_white = hd.color() == GcTriColor::White && !hd.is_root_or_local();
+                    if is_white {
+                        #[cfg(all(debug_assertions, feature = "gc_generations"))]
+                        self.dbg_minor_freed.insert(this, hd.dtype());
+                        match white_tail {
                             Some(mut tail) => tail.as_mut().next = Some(this),
-                            None => promote_head = Some(this),
+                            None => white_head = Some(this),
                         }
-                        promote_tail = Some(this);
+                        white_tail = Some(this);
                     } else {
-                        // Still young: remember how many minors it survived.
-                        hd.set_age(survived);
-                        match stay_tail {
-                            Some(mut tail) => tail.as_mut().next = Some(this),
-                            None => stay_head = Some(this),
+                        let survived = hd.age() + 1;
+                        if survived >= promote_after.max(1) {
+                            // Survived the full generation count: promote.
+                            hd.set_age(0);
+                            hd.set_young(false);
+                            match promote_tail {
+                                Some(mut tail) => tail.as_mut().next = Some(this),
+                                None => promote_head = Some(this),
+                            }
+                            promote_tail = Some(this);
+                        } else {
+                            // Still young: remember how many minors it survived.
+                            hd.set_age(survived);
+                            match stay_tail {
+                                Some(mut tail) => tail.as_mut().next = Some(this),
+                                None => stay_head = Some(this),
+                            }
+                            stay_tail = Some(this);
                         }
-                        stay_tail = Some(this);
                     }
+
+                    current = next;
                 }
-
-                current = next;
             }
-        }
 
-        // O(1) promotion: splice the age-1 survivors onto the old chain.
-        if let (Some(head), Some(mut tail)) = (promote_head, promote_tail) {
-            unsafe {
-                tail.as_mut().next = par.nodes.head();
+            // O(1) promotion: splice the age-1 survivors onto the old chain.
+            if let (Some(head), Some(mut tail)) = (promote_head, promote_tail) {
+                unsafe {
+                    tail.as_mut().next = par.nodes.head();
+                }
+                par.nodes = GcNodeLink::new(Some(head));
             }
-            par.nodes = GcNodeLink::new(Some(head));
-        }
-        // Age-0 survivors stay in the young chain until the next minor.
-        par.young = GcNodeLink::new(stay_head);
+            // Age-0 survivors stay in the young chain until the next minor.
+            par.young = GcNodeLink::new(stay_head);
 
-        debug_assert!(par.gray_list.is_empty());
-        #[cfg(debug_assertions)]
-        for n in par.young.iter() {
-            debug_assert!(
-                unsafe { n.as_ref().age() } > 0,
-                "every node left in the young chain must carry a survival age"
-            );
+            debug_assert!(par.gray_list.is_empty());
+            #[cfg(debug_assertions)]
+            for n in par.young.iter() {
+                debug_assert!(
+                    unsafe { n.as_ref().age() } > 0,
+                    "every node left in the young chain must carry a survival age"
+                );
+            }
+
+            if white_head.is_some() {
+                whites.push((GcPartitionId(i as u16), GcNodeLink::new(white_head)));
+            }
         }
 
         // promote-once per age: old→age-0 edges are recorded again by `bind`,
@@ -491,7 +564,7 @@ impl GcHeap {
         // remembered set can be cleared here.
         self.clear_remembered();
 
-        Some(GcNodeLink::new(white_head))
+        Some(whites)
     }
 
     /// dispose white nodes in the partition.
@@ -1223,19 +1296,20 @@ mod generations_tests {
         GenNode::alloc_node(heap, pid, GenNode { child }).unwrap()
     }
 
-    /// Drain the gray list and run the first two white-list steps, leaving the
-    /// caller with the freed-bytes count.
-    fn finish_minor(heap: &mut GcHeap, pid: GcPartitionId, promote_after: u32) -> usize {
-        assert!(
-            heap.mark_grays(pid, usize::MAX),
-            "minor mark did not finish"
-        );
-        let white = heap
-            .minor_sweep_unlink(pid, promote_after)
+    /// Prepare and finish a whole-heap minor, returning the freed bytes.
+    fn finish_minor(heap: &mut GcHeap, promote_after: u32) -> usize {
+        assert!(heap.minor_prepare(), "another partition is mid-mark");
+        heap.mark_grays_all();
+        let whites = heap
+            .minor_sweep_unlink(promote_after)
             .expect("minor mark cycle is not complete");
-        let registry = heap.type_registry();
-        GcHeap::sweep_drop_payloads(&white, registry);
-        heap.sweep_dispose(pid, white)
+        let mut freed = 0;
+        for (pid, white) in whites {
+            let registry = heap.type_registry();
+            GcHeap::sweep_drop_payloads(&white, registry);
+            freed += heap.sweep_dispose(pid, white);
+        }
+        freed
     }
 
     #[test]
@@ -1279,8 +1353,7 @@ mod generations_tests {
         heap.bind(old_root.node_ptr(), old_root2.node_ptr());
         assert_eq!(heap.remembered.len(), 1);
 
-        heap.minor_prepare(pid);
-        finish_minor(&mut heap, pid, 2);
+        finish_minor(&mut heap, 2);
 
         // The remembered young child survived; it stays young for one more
         // cycle (X=2) and the set is clear.
@@ -1293,8 +1366,7 @@ mod generations_tests {
         assert!(!heap.nodes(pid).any(|n| n == y2.node_ptr()));
 
         // Second minor: age-1 survivor is promoted.
-        heap.minor_prepare(pid);
-        finish_minor(&mut heap, pid, 2);
+        finish_minor(&mut heap, 2);
         assert!(!unsafe { y1.node_info().is_young() });
         assert!(unsafe { y1.node_info().age() } == 0);
         assert!(heap.nodes(pid).any(|n| n == y1.node_ptr()));
@@ -1307,8 +1379,7 @@ mod generations_tests {
         let child = alloc(&mut heap, pid, None);
         let root = unsafe { heap.alloc_root_raw(pid, GenNode { child: Some(child) }) }.unwrap();
 
-        heap.minor_prepare(pid);
-        let freed = finish_minor(&mut heap, pid, 2);
+        let freed = finish_minor(&mut heap, 2);
 
         assert!(freed > 0);
         // Survivors stay young with age=1 after the first minor.
@@ -1318,8 +1389,7 @@ mod generations_tests {
         assert!(unsafe { child.node_info().age() } == 1);
         assert_eq!(heap.nodes(pid).count(), 2);
 
-        heap.minor_prepare(pid);
-        finish_minor(&mut heap, pid, 2);
+        finish_minor(&mut heap, 2);
         assert!(heap.partitions[0].young.head().is_none());
         assert!(!unsafe { root.node_info().is_young() });
         assert!(!unsafe { child.node_info().is_young() });
@@ -1333,13 +1403,11 @@ mod generations_tests {
 
         // X = 4: survive three minors (ages 1..3) and promote on the fourth.
         for expected_age in 1..4 {
-            heap.minor_prepare(pid);
-            finish_minor(&mut heap, pid, 4);
+            finish_minor(&mut heap, 4);
             assert!(unsafe { root.node_info().is_young() });
             assert_eq!(unsafe { root.node_info().age() }, expected_age);
         }
-        heap.minor_prepare(pid);
-        finish_minor(&mut heap, pid, 4);
+        finish_minor(&mut heap, 4);
         assert!(!unsafe { root.node_info().is_young() });
         assert_eq!(unsafe { root.node_info().age() }, 0);
         assert!(heap.partitions[0].young.head().is_none());
@@ -1347,8 +1415,7 @@ mod generations_tests {
         // X = 1 is the original promote-once behaviour.
         let (mut heap, pid) = new_heap();
         let mail = unsafe { heap.alloc_root_raw(pid, GenNode { child: None }) }.unwrap();
-        heap.minor_prepare(pid);
-        finish_minor(&mut heap, pid, 1);
+        finish_minor(&mut heap, 1);
         assert!(!unsafe { mail.node_info().is_young() });
     }
 
@@ -1384,6 +1451,216 @@ mod generations_tests {
         assert_eq!(heap.memory_used(), 0);
     }
 
+    /// Finish every partition's in-progress mark cycle so a whole-heap minor
+    /// can start from the "old nodes are Black" invariant.
+    fn collect_all(heap: &mut GcHeap) {
+        for pid in heap.partition_ids() {
+            heap.garbage_collect(pid);
+        }
+    }
+
+    #[test]
+    fn minor_across_partitions_keeps_a_remembered_edge() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let p0 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let p1 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+
+        let mut old_root = unsafe { heap.alloc_root_raw(p0, GenNode { child: None }) }.unwrap();
+        collect_all(&mut heap);
+        assert!(!unsafe { old_root.node_info().is_young() });
+
+        // old in p0 -> young in p1: only the remembered set covers this edge.
+        let young = alloc(&mut heap, p1, None);
+        heap.bind(old_root.node_ptr(), young.node_ptr());
+        unsafe { old_root.as_mut() }.child = Some(young);
+
+        let freed = finish_minor(&mut heap, 2);
+        assert_eq!(freed, 0, "the young child is reachable from the old source");
+        assert!(heap.nodes(p1).any(|n| n == young.node_ptr()));
+        assert!(heap.remembered.is_empty());
+
+        // The second minor promotes it onto p1's old chain.
+        finish_minor(&mut heap, 2);
+        assert!(!unsafe { young.node_info().is_young() });
+        assert!(
+            heap.partitions[1]
+                .nodes
+                .iter()
+                .any(|n| n == young.node_ptr())
+        );
+    }
+
+    #[test]
+    fn minor_across_partitions_keeps_a_young_to_young_edge() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let p0 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let p1 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+
+        let garbage = alloc(&mut heap, p0, None);
+        let inner = alloc(&mut heap, p0, None);
+        // A young root in p1 holds a young node in p0. Young→young edges are
+        // not remembered, so only walking every partition's young chain finds it.
+        let _outer = unsafe { heap.alloc_root_raw(p1, GenNode { child: Some(inner) }) }.unwrap();
+
+        let freed = finish_minor(&mut heap, 2);
+        assert!(freed > 0);
+        assert!(!heap.nodes(p0).any(|n| n == garbage.node_ptr()));
+        assert!(heap.nodes(p0).any(|n| n == inner.node_ptr()));
+    }
+
+    #[test]
+    fn dealloc_partition_purges_only_dangling_remembered_sources() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let p0 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let p1 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+
+        let mut old0 = unsafe { heap.alloc_root_raw(p0, GenNode { child: None }) }.unwrap();
+        let mut old1 = unsafe { heap.alloc_root_raw(p1, GenNode { child: None }) }.unwrap();
+        let mut old2 = unsafe { heap.alloc_root_raw(p0, GenNode { child: None }) }.unwrap();
+        collect_all(&mut heap);
+
+        // old0 (p0) -> y1 (p1) and old1 (p1) -> y0 (p0): two sources, one of
+        // them outside the partition that is about to be torn down. old2 (p0)
+        // -> y2 (p0) is unrelated and must stay remembered.
+        let y1 = alloc(&mut heap, p1, None);
+        heap.bind(old0.node_ptr(), y1.node_ptr());
+        unsafe { old0.as_mut() }.child = Some(y1);
+        let y0 = alloc(&mut heap, p0, None);
+        heap.bind(old1.node_ptr(), y0.node_ptr());
+        unsafe { old1.as_mut() }.child = Some(y0);
+        let y2 = alloc(&mut heap, p0, None);
+        heap.bind(old2.node_ptr(), y2.node_ptr());
+        unsafe { old2.as_mut() }.child = Some(y2);
+        assert_eq!(heap.remembered.len(), 3);
+
+        let link = heap.finalize_partition(p1).unwrap();
+        heap.dealloc_partition(p1, link);
+
+        // old1 would dangle; old0's child y1 was freed with p1. old2 survives.
+        assert_eq!(heap.remembered.len(), 1);
+        assert!(!unsafe { old0.node_info().is_remembered() });
+        assert!(unsafe { old2.node_info().is_remembered() });
+
+        // The surviving partition still minors; y2 is kept by old2, y0 lost its
+        // only (removed) source and is collected.
+        let freed = finish_minor(&mut heap, 2);
+        assert!(freed > 0, "y0 lost its only (removed) source");
+        assert!(heap.nodes(p0).any(|n| n == y2.node_ptr()));
+        assert!(!heap.nodes(p0).any(|n| n == y0.node_ptr()));
+    }
+
+    #[test]
+    fn minor_prepare_refuses_a_partition_mid_mark() {
+        let (mut heap, pid) = new_heap();
+        let _other = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let _n = alloc(&mut heap, pid, None);
+
+        // A partial major leaves every partition marking.
+        while !heap.mark(pid, 64) {}
+        assert!(!heap.minor_prepare());
+
+        // Once every partition's cycle is finished, a minor is accepted again.
+        collect_all(&mut heap);
+        assert!(heap.minor_prepare());
+    }
+
+    #[test]
+    fn minor_follows_an_old_to_young_to_young_chain_across_partitions() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let p0 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let p1 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+
+        let mut old = unsafe { heap.alloc_root_raw(p0, GenNode { child: None }) }.unwrap();
+        collect_all(&mut heap);
+
+        // old (p0) -> mid (p1) -> deep (p0), with mid->deep a young→young edge
+        // that only the cross-partition gray fixed point can follow.
+        let deep = alloc(&mut heap, p0, None);
+        let mid = alloc(&mut heap, p1, Some(deep));
+        heap.bind(old.node_ptr(), mid.node_ptr());
+        unsafe { old.as_mut() }.child = Some(mid);
+
+        let freed = finish_minor(&mut heap, 2);
+        assert_eq!(freed, 0, "the whole chain is reachable");
+        assert!(heap.nodes(p1).any(|n| n == mid.node_ptr()));
+        assert!(heap.nodes(p0).any(|n| n == deep.node_ptr()));
+    }
+
+    #[test]
+    fn minor_across_three_partitions_terminates_on_a_cycle() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let p0 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let p1 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let p2 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+
+        // p0 root -> y1 (p1) <-> y2 (p2), plus garbage in every partition. The
+        // backwards edge into p1 makes the fixed-point loop revisit an earlier
+        // partition; one minor must return a white list for each partition.
+        let garbage0 = alloc(&mut heap, p0, None);
+        let mut y1 = alloc(&mut heap, p1, None);
+        let y2 = alloc(&mut heap, p2, Some(y1));
+        let garbage1 = alloc(&mut heap, p1, None);
+        unsafe { y1.as_mut() }.child = Some(y2);
+        let garbage = alloc(&mut heap, p2, None);
+        let _root = unsafe { heap.alloc_root_raw(p0, GenNode { child: Some(y1) }) }.unwrap();
+
+        let freed = finish_minor(&mut heap, 2);
+        assert!(freed > 0);
+        assert!(!heap.nodes(p0).any(|n| n == garbage0.node_ptr()));
+        assert!(!heap.nodes(p1).any(|n| n == garbage1.node_ptr()));
+        assert!(heap.nodes(p1).any(|n| n == y1.node_ptr()));
+        assert!(heap.nodes(p2).any(|n| n == y2.node_ptr()));
+        assert!(!heap.nodes(p2).any(|n| n == garbage.node_ptr()));
+    }
+
+    #[test]
+    fn finishing_a_minor_caps_the_remembered_buffer() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let p0 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let p1 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+
+        let mut olds = Vec::new();
+        for _ in 0..300 {
+            olds.push(unsafe { heap.alloc_root_raw(p0, GenNode { child: None }) }.unwrap());
+        }
+        collect_all(&mut heap);
+        for old in &olds {
+            let young = alloc(&mut heap, p1, None);
+            heap.bind(old.node_ptr(), young.node_ptr());
+        }
+        assert!(heap.remembered.capacity() > 256);
+
+        finish_minor(&mut heap, 2);
+        assert!(heap.remembered.is_empty());
+        assert!(
+            heap.remembered.capacity() <= 256,
+            "remembered buffer must not pin a spike: capacity {}",
+            heap.remembered.capacity()
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "freed by the last minor")]
+    fn validator_catches_a_missing_barrier_across_partitions() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let p0 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let p1 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+
+        let mut old_root = unsafe { heap.alloc_root_raw(p1, GenNode { child: None }) }.unwrap();
+        collect_all(&mut heap);
+
+        let young = alloc(&mut heap, p0, None);
+        // Deliberate missing barrier across partitions.
+        unsafe { old_root.as_mut() }.child = Some(young);
+
+        finish_minor(&mut heap, 2); // the young child is unreachable => freed
+
+        // The host's verification mark (all partitions) catches the stale edge.
+        heap.mark(p0, 0);
+        heap.mark_grays_all();
+    }
+
     #[test]
     #[cfg(debug_assertions)]
     #[should_panic(expected = "freed by the last minor")]
@@ -1396,8 +1673,7 @@ mod generations_tests {
         // Deliberate missing barrier: the payload edge exists, but no `bind`.
         unsafe { old_root.as_mut() }.child = Some(young);
 
-        heap.minor_prepare(pid);
-        finish_minor(&mut heap, pid, 2); // the young child is unreachable => freed
+        finish_minor(&mut heap, 2); // the young child is unreachable => freed
 
         // The host's verification mark runs right after the minor, before any
         // allocation can recycle the address.

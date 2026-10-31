@@ -278,6 +278,17 @@ impl GcHeap {
         let partition_mem = self.partitions[partition_id.0 as usize].memory_used;
         let mut freed_bytes = 0;
 
+        // Drop remembered sources that would dangle once this partition is
+        // freed. Must happen while the nodes are still readable.
+        #[cfg(feature = "gc_generations")]
+        {
+            self.purge_remembered_for_partition(partition_id);
+            // Debug freed addresses may belong to this partition; a recycled
+            // address elsewhere must not be mistaken for a dangling one.
+            #[cfg(all(debug_assertions, feature = "gc_generations"))]
+            self.dbg_minor_freed.clear();
+        }
+
         // Deallocate all finalized nodes in the link.
         for node in link.iter() {
             // Handle weak reference cleanup.
@@ -344,9 +355,6 @@ impl GcHeap {
         #[cfg(feature = "gc_generations")]
         {
             self.partitions[partition_id.0 as usize].young = GcNodeLink::default();
-            // shortcut: v1 is single-partition, so every remembered source is
-            // in this partition; a multi-partition dealloc must filter by pid.
-            self.remembered.clear();
         }
         self.partitions[partition_id.0 as usize].gray_list.clear();
         self.partitions[partition_id.0 as usize].marking = false;
