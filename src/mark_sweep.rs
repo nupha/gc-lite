@@ -158,6 +158,8 @@ impl GcHeap {
                 _mark: std::marker::PhantomData,
                 #[cfg(all(debug_assertions, feature = "gc_generations"))]
                 dbg_freed: Some(std::ptr::from_ref(&self.dbg_minor_freed)),
+                #[cfg(all(debug_assertions, feature = "gc_generations"))]
+                dbg_owner: None,
             };
 
             // Buffer for children that need to be pushed to a different
@@ -168,6 +170,10 @@ impl GcHeap {
 
             while let Some(mut node_ptr) = self.partitions[partition_id.0 as usize].gray_list.pop()
             {
+                #[cfg(all(debug_assertions, feature = "gc_generations"))]
+                {
+                    gcx.dbg_owner = Some(node_ptr);
+                }
                 let node = unsafe { node_ptr.as_mut() };
                 // Clear gray_listed flag when popping (O(1) instead of O(n) contains)
                 node.set_gray_listed(false);
@@ -348,6 +354,8 @@ impl GcHeap {
             _mark: std::marker::PhantomData,
             #[cfg(all(debug_assertions, feature = "gc_generations"))]
             dbg_freed: None,
+            #[cfg(all(debug_assertions, feature = "gc_generations"))]
+            dbg_owner: None,
         };
         for mut src in sources {
             let dead = unsafe { src.as_ref().partition_id() } == partition_id;
@@ -435,9 +443,15 @@ impl GcHeap {
             _mark: std::marker::PhantomData,
             #[cfg(all(debug_assertions, feature = "gc_generations"))]
             dbg_freed: Some(std::ptr::from_ref(&self.dbg_minor_freed)),
+            #[cfg(all(debug_assertions, feature = "gc_generations"))]
+            dbg_owner: None,
         };
         for src in sources.iter().copied() {
             gcx.traced_nodes.clear();
+            #[cfg(all(debug_assertions, feature = "gc_generations"))]
+            {
+                gcx.dbg_owner = Some(src);
+            }
             self.trace_node(src, &mut gcx);
             while let Some(child) = gcx.traced_nodes.pop() {
                 unsafe {
@@ -1678,6 +1692,50 @@ mod generations_tests {
         // The host's verification mark runs right after the minor, before any
         // allocation can recycle the address.
         while !heap.mark(pid, 64) {}
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "freed by the last minor")]
+    fn validator_walks_unreachable_old_nodes() {
+        let (mut heap, pid) = new_heap();
+        let mut holder = alloc(&mut heap, pid, None);
+        let mut root = unsafe { heap.alloc_root_raw(pid, GenNode { child: Some(holder) }) }.unwrap();
+        collect_all(&mut heap);
+        assert!(!unsafe { holder.node_info().is_young() });
+
+        // Drop the only root edge: `holder` is old but no longer reachable.
+        unsafe { root.as_mut() }.child = None;
+
+        let young = alloc(&mut heap, pid, None);
+        // Deliberate missing barrier.
+        unsafe { holder.as_mut() }.child = Some(young);
+
+        finish_minor(&mut heap, 2); // young is unreachable => freed
+
+        // The root-only mark cannot see `holder`; the old-chain walk must.
+        heap.dbg_assert_no_stale_old_edges();
+    }
+
+    #[test]
+    fn validator_accepts_a_bound_old_to_young_edge() {
+        let (mut heap, pid) = new_heap();
+        let mut holder = alloc(&mut heap, pid, None);
+        let mut root = unsafe { heap.alloc_root_raw(pid, GenNode { child: Some(holder) }) }.unwrap();
+        collect_all(&mut heap);
+        unsafe { root.as_mut() }.child = None;
+
+        let young = alloc(&mut heap, pid, None);
+        heap.bind(holder.node_ptr(), young.node_ptr());
+        unsafe { holder.as_mut() }.child = Some(young);
+
+        // Keep the freed set non-empty so the walk actually runs.
+        let _garbage = alloc(&mut heap, pid, None);
+
+        finish_minor(&mut heap, 2);
+        // The remembered edge kept `young` alive; the validator stays quiet.
+        heap.dbg_assert_no_stale_old_edges();
+        assert!(heap.nodes(pid).any(|n| n == young.node_ptr()));
     }
 
     #[test]

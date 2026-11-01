@@ -13,8 +13,6 @@ keywords = ["gc", "memory"]
 gc_arena = []
 gc_generations = [] # Generational GC
 
-default = ["gc_arena"]
-
 [dependencies]
 gc-lite-macros = { version = "0.2.1", path = "gc-lite-macros" }
 bitflags = "2.0"

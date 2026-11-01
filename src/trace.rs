@@ -21,10 +21,15 @@ pub struct GcTraceCtx<'a> {
     pub(crate) traced_nodes: Vec<NonNull<GcHead>>,
     pub(crate) opaque: *mut u8,
     pub(crate) _mark: PhantomData<&'a ()>,
+
     /// Debug validator (`gc_generations`): nodes freed by the last minor.
     /// Checked before the first dereference of a submitted child.
     #[cfg(all(debug_assertions, feature = "gc_generations"))]
     pub(crate) dbg_freed: Option<*const std::collections::HashMap<NonNull<GcHead>, u8>>,
+    /// Debug validator (`gc_generations`): the owner currently being traced,
+    /// named in the missing-barrier panic.
+    #[cfg(all(debug_assertions, feature = "gc_generations"))]
+    pub(crate) dbg_owner: Option<NonNull<GcHead>>,
 }
 
 impl<'a> GcTraceCtx<'a> {
@@ -42,8 +47,12 @@ impl<'a> GcTraceCtx<'a> {
             // Before any dereference: a freed address may already be poisoned.
             debug_assert!(
                 !unsafe { &*freed }.contains_key(&node),
-                "a live object still points at a node freed by the last minor: {:?}",
-                node
+                "a live object still points at a node freed by the last minor: \
+                 child {:?} (freed dtype {:?}), owner {:?} (dtype {:?}) — missing write barrier",
+                node,
+                unsafe { &*freed }.get(&node),
+                self.dbg_owner,
+                self.dbg_owner.map(|o| unsafe { o.as_ref().dtype() }),
             );
         }
 
@@ -75,6 +84,8 @@ impl GcHeap {
             _mark: PhantomData,
             #[cfg(all(debug_assertions, feature = "gc_generations"))]
             dbg_freed: Some(&self.dbg_minor_freed),
+            #[cfg(all(debug_assertions, feature = "gc_generations"))]
+            dbg_owner: None,
         }
     }
 
@@ -99,6 +110,34 @@ impl GcHeap {
         let info = unsafe { self.node_dtypes.type_info_list.get_unchecked(dtype) };
 
         (info.trace_fn)(node, gcx);
+    }
+
+    /// Debug validator for the generational write barrier: every **old** node's
+    /// current payload edges must be free of nodes the last minor collected.
+    ///
+    /// The host's post-minor verification mark only follows roots. This walks
+    /// every old node instead, so a missing `bind` is caught even while the
+    /// owner is not reachable from the roots — before a later mark can promote
+    /// or free it and hide the stale edge. Old→young is the only edge a minor
+    /// cannot see, which is why only the old chain is walked.
+    ///
+    /// O(old heap), debug + `gc_generations` only, and a no-op once the freed
+    /// set has been cleared.
+    #[cfg(all(debug_assertions, feature = "gc_generations"))]
+    pub fn dbg_assert_no_stale_old_edges(&self) {
+        if self.dbg_minor_freed.is_empty() {
+            return;
+        }
+        // `create_trace_ctx` installs `dbg_minor_freed`; `add_node` then
+        // asserts before dereferencing any child.
+        let mut gcx = self.create_trace_ctx(64);
+        for pid in self.partition_ids() {
+            for node in self.partitions[pid.0 as usize].nodes.iter() {
+                gcx.traced_nodes.clear();
+                gcx.dbg_owner = Some(node);
+                self.trace_node(node, &mut gcx);
+            }
+        }
     }
 
     pub fn traverse_start(&mut self, partition_id: GcPartitionId) {
