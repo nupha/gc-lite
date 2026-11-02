@@ -9,8 +9,19 @@
 //! - Memory usage efficiency analysis
 //! - Automatic GC threshold performance
 
-use gc_lite::{GcHeap, GcRef, GcTrace, GcTraceCtx, gc_type_register};
+use gc_lite::{GcHeap, GcPartitionId, GcRef, GcTrace, GcTraceCtx, gc_type_register};
 use std::time::{Duration, Instant};
+
+// `create_partition` takes no parameters when `gc_arena` is disabled.
+#[cfg(feature = "gc_arena")]
+fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+    heap.create_partition(64 * 1024, 16 * 1024)
+}
+
+#[cfg(not(feature = "gc_arena"))]
+fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+    heap.create_partition()
+}
 
 fn main() {
     println!("=== Performance benchmark of partitioned garbage collection system ===");
@@ -42,7 +53,7 @@ fn benchmark_object_sizes() {
         println!("\nTest object count: {}", size);
 
         let mut context = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition = context.create_partition(64 * 1024, 16 * 1024);
+        let partition = new_partition(&mut context);
 
         // Measure allocation performance
         let alloc_start = Instant::now();
@@ -92,7 +103,7 @@ fn benchmark_complex_graphs() {
         println!("\nTest complex object graph size: {} nodes", size);
 
         let mut context = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition = context.create_partition(64 * 1024, 16 * 1024);
+        let partition = new_partition(&mut context);
 
         // Create complex object graph
         let graph_start = Instant::now();
@@ -158,7 +169,7 @@ fn benchmark_memory_efficiency() {
 
     let mut context = GcHeap::new(&GC_TYPE_REGISTRY);
     context.set_memory_limit(1024 * 1024); // 1MB global limit
-    let partition = context.create_partition(64 * 1024, 16 * 1024);
+    let partition = new_partition(&mut context);
 
     // Allocate many small objects
     let small_objects_count = 1000;
@@ -218,7 +229,7 @@ fn benchmark_auto_gc_threshold() {
 
     let mut context = GcHeap::new(&GC_TYPE_REGISTRY);
     context.set_memory_limit(2048); // 2KB global limit
-    let partition = context.create_partition(64 * 1024, 16 * 1024);
+    let partition = new_partition(&mut context);
 
     // Set automatic GC threshold to 1.5KB
     context.set_gc_threshold(1500);

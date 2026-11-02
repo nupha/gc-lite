@@ -53,8 +53,6 @@ pub struct GcHeap {
     opaque: *mut u8,
 
     #[cfg(debug_assertions)]
-    pub(crate) dbg_dropping_root_partition: Option<GcPartitionId>,
-    #[cfg(debug_assertions)]
     pub(crate) dbg_living_nodes: std::collections::HashSet<NonNull<GcHead>>,
     /// Nodes freed by the last minor collection (`gc_generations` debug
     /// validator): pointer → dtype. Cleared when the next minor starts; any
@@ -156,8 +154,6 @@ impl GcHeap {
             #[cfg(feature = "gc_generations")]
             remembered: Vec::new(),
 
-            #[cfg(debug_assertions)]
-            dbg_dropping_root_partition: None,
             #[cfg(debug_assertions)]
             dbg_living_nodes: std::collections::HashSet::with_capacity(128),
             #[cfg(all(debug_assertions, feature = "gc_generations"))]
@@ -375,10 +371,20 @@ impl GcHeap {
 
 #[cfg(test)]
 mod heap_tests {
-    use crate::arena::{ARENA_CAPACITY, MAX_ARENA_ALLOC};
     use crate::{GcRef, GcTraceCtx, node::GcNode, trace::GcTrace};
 
     use super::*;
+
+    // `create_partition` takes no parameters when `gc_arena` is disabled.
+    #[cfg(feature = "gc_arena")]
+    fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+        heap.create_partition(64 * 1024, 16 * 1024)
+    }
+
+    #[cfg(not(feature = "gc_arena"))]
+    fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+        heap.create_partition()
+    }
 
     /// Two-phase sweep helper: unlink → drop payloads → dispose.
     fn two_phase_sweep(heap: &mut GcHeap, pid: GcPartitionId) -> usize {
@@ -413,7 +419,7 @@ mod heap_tests {
     #[test]
     fn test_heap_with_context_alloc_and_cleanup() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let partition_id = new_partition(&mut heap);
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         let _head = heap.with_new_scope(stack_id, |ctx| {
@@ -435,7 +441,7 @@ mod heap_tests {
     #[test]
     fn test_memory_used_symmetry_alloc_dispose() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let id = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let id = new_partition(&mut heap);
 
         let mem_before = heap.memory_used();
         let par_mem_before = heap.partition(id).unwrap().memory_used();
@@ -473,7 +479,7 @@ mod heap_tests {
     #[test]
     fn test_memory_used_symmetry_sweep() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let id = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let id = new_partition(&mut heap);
 
         // Allocate 3 non-root nodes and 1 root node
         let mem_before = heap.memory_used();
@@ -529,7 +535,7 @@ mod heap_tests {
     #[test]
     fn test_memory_used_update_mem_use_edge_cases() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let id = heap.create_partition(0, 0);
+        let id = new_partition(&mut heap);
 
         // Normal add
         assert_eq!(heap.update_mem_use(id, 50), 50);

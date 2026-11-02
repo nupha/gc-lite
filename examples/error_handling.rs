@@ -9,7 +9,20 @@
 //! - Partition management errors
 //! - Invalid reference handling
 
-use gc_lite::{GcError, GcHeap, GcRef, GcResult, GcTrace, GcTraceCtx, gc_type_register};
+use gc_lite::{
+    GcError, GcHeap, GcPartitionId, GcRef, GcResult, GcTrace, GcTraceCtx, gc_type_register,
+};
+
+// `create_partition` takes no parameters when `gc_arena` is disabled.
+#[cfg(feature = "gc_arena")]
+fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+    heap.create_partition(64 * 1024, 16 * 1024)
+}
+
+#[cfg(not(feature = "gc_arena"))]
+fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+    heap.create_partition()
+}
 
 fn main() -> GcResult<()> {
     println!("=== Error handling example of partitioned garbage collection system ===");
@@ -36,7 +49,7 @@ fn demonstrate_out_of_memory() -> GcResult<()> {
 
     let mut context = GcHeap::new(&GC_TYPE_REGISTRY);
     context.set_memory_limit(2048); // 2KB global limit
-    let partition_id = context.create_partition(64 * 1024, 16 * 1024);
+    let partition_id = new_partition(&mut context);
 
     // Allocate first large object (1KB + header)
     println!("2. Allocate first large object...");
@@ -117,12 +130,14 @@ fn demonstrate_partition_management_errors() -> GcResult<()> {
     );
     println!("  ✓ Getting non-existent partition info returns None");
 
-    // Test removing non-existent partition (remove_partition doesn't return error, just silently fails)
-    context.remove_partition(invalid_partition, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    // Test removing non-existent partition (two-phase removal silently does nothing)
+    if let Some(link) = context.finalize_partition(invalid_partition) {
+        context.dealloc_partition(invalid_partition, link);
+    }
     println!("  ✓ Removing non-existent partition silently fails");
 
     println!("\n2. Test non-empty partition deletion...");
-    let partition_id = context.create_partition(64 * 1024, 16 * 1024);
+    let partition_id = new_partition(&mut context);
 
     // Allocate objects in partition
     let obj = unsafe {
@@ -137,8 +152,10 @@ fn demonstrate_partition_management_errors() -> GcResult<()> {
     .unwrap();
     let _ = obj;
 
-    // Try to delete non-empty partition (remove_partition will force cleanup)
-    context.remove_partition(partition_id, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    // Delete non-empty partition (finalize drops payloads, then dealloc frees memory)
+    if let Some(link) = context.finalize_partition(partition_id) {
+        context.dealloc_partition(partition_id, link);
+    }
     println!("  ✓ Successfully deleted non-empty partition (root objects were force cleaned)");
 
     Ok(())
@@ -150,7 +167,7 @@ fn demonstrate_gc_threshold_errors() -> GcResult<()> {
 
     let mut context = GcHeap::new(&GC_TYPE_REGISTRY);
     context.set_memory_limit(1024);
-    let _partition_id = context.create_partition(64 * 1024, 16 * 1024);
+    let _partition_id = new_partition(&mut context);
 
     // Test default values
     println!("2. Test default threshold...");

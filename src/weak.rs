@@ -3,7 +3,7 @@
 
 use std::{cell::Cell, marker::PhantomData};
 
-use crate::{Gc, GcNode, GcRef, heap::GcHeap};
+use crate::{Gc, GcNode, GcNodeLink, GcRef, heap::GcHeap};
 
 /// bit 8-31: slot index in weak_list (24-bit)
 /// bit 0-7:  version (8-bit)
@@ -170,6 +170,44 @@ impl GcHeap {
                 })
         } else {
             None
+        }
+    }
+
+    /// Clear the slot `weak_id` points at — but only while the slot still
+    /// belongs to that id.
+    ///
+    /// Version-checked because a slot can be cleared early (before the owner's
+    /// payload is dropped) and then reused by [`downgrade`], which bumps the
+    /// version: a blind clear would drop the new occupant's pointer and make
+    /// its weak ref die silently.
+    pub(crate) fn clear_weak_slot(&self, weak_id: GcWeakRawId) {
+        if weak_id.is_null() {
+            return;
+        }
+        let idx = weak_id.index() as usize;
+        debug_assert!(
+            idx < self.weak_slots.len(),
+            "clear_weak_slot: weak slot index {idx} out of bounds (len {})",
+            self.weak_slots.len(),
+        );
+        let slot = &self.weak_slots[idx];
+        if slot.0 == weak_id.version() {
+            slot.1.set(None);
+        }
+    }
+
+    /// Pre-clear the weak slots of every node in `white`, before any of their
+    /// payloads are dropped.
+    ///
+    /// A payload drop/finalize in one white node may `upgrade` a weak ref to
+    /// another white node of the same list; without this, that upgrade hands
+    /// back a node whose payload (or whole memory) is already gone. Same
+    /// rationale as `finalize_partition_prepare`, which does this for the
+    /// partition-teardown path.
+    pub fn clear_weak_slots(&self, white: &GcNodeLink) {
+        for node in white.iter() {
+            let weak_id = unsafe { node.as_ref() }.weak_id;
+            self.clear_weak_slot(weak_id);
         }
     }
 }

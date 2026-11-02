@@ -578,164 +578,12 @@ impl GcHeap {
         // remembered set can be cleared here.
         self.clear_remembered();
 
+        // Weak slots go before any payload drop/finalize (see `sweep_unlink`).
+        for (_, white) in &whites {
+            self.clear_weak_slots(white);
+        }
+
         Some(whites)
-    }
-
-    /// dispose white nodes in the partition.
-    /// `on_dispose` is called BEFORE a node will be disposed.
-    ///
-    /// ⚠️ **DEPRECATED** — This method is unsound: it calls `drop_fn` while
-    /// `&mut GcHeap` is live, and GC-node `Drop` impls that access
-    /// `RuntimePtr` through raw pointers create aliasing `&mut` references
-    /// (UB exposed by LTO + `panic=abort` as SEGV).
-    ///
-    /// **Use the three-step API instead:**
-    ///
-    /// ```ignore
-    /// if let Some(white) = gc_heap.sweep_unlink(pid) {
-    ///     // Step 2: drop payloads — MUST run with no &mut GcHeap alive,
-    ///     // so the LTO optimizer never sees aliased &mut references.
-    ///     GcHeap::sweep_drop_payloads(&white, registry);
-    ///     // Step 3: free memory & accounting (re-acquires &mut GcHeap)
-    ///     gc_heap.sweep_dispose(pid, white);
-    /// }
-    /// ```
-    #[deprecated(
-        note = "unsound — use sweep_unlink() + sweep_drop_payloads() + sweep_dispose() instead"
-    )]
-    pub fn sweep(
-        &mut self,
-        partition_id: GcPartitionId,
-        on_dispose: impl Fn(&GcHeap, &GcHead),
-    ) -> usize {
-        if (partition_id.0 as usize) >= self.partitions.len() {
-            return 0;
-        }
-        if let Some(link0) = {
-            let par = &mut self.partitions[partition_id.0 as usize];
-            if par.is_marking() && par.gray_list.is_empty() {
-                par.set_marking(false);
-                std::mem::take(&mut par.nodes).into_inner()
-            } else {
-                None // mark cycle not done
-            }
-        } {
-            #[cfg(debug_assertions)]
-            for n in crate::node_link::NodeLinkIter::new(Some(link0)) {
-                unsafe {
-                    debug_assert!(
-                        matches!(n.as_ref().color(), GcTriColor::Black | GcTriColor::White),
-                        "sweep node must be either black or white: {:?}",
-                        n.as_ref()
-                    );
-                }
-            }
-
-            let call_on_dispose = !std::ptr::addr_eq(&on_dispose, &Self::DUMMY_DISPOSE_CALLBACK);
-            let mut link1 = Some(link0);
-            let mut freed_bytes = 0;
-
-            #[cfg(feature = "gc_arena")]
-            let mut holes: Vec<crate::arena::Hole> = Vec::new();
-
-            for &pass in self.node_dtypes.drop_passes {
-                let mut current = link1;
-                let mut prev: Option<NonNull<GcHead>> = None;
-
-                while let Some(mut this) = current {
-                    unsafe {
-                        #[cfg(debug_assertions)]
-                        this.as_ref().debug_assert_node_valid(self);
-
-                        current = this.as_mut().next;
-
-                        let drop_pass = self.node_dtypes.type_info_list
-                            [this.as_ref().dtype() as usize]
-                            .drop_pass;
-
-                        if drop_pass == pass
-                            && this.as_ref().color() == GcTriColor::White
-                            && !this.as_ref().is_root_or_local()
-                        {
-                            if let Some(mut p) = prev {
-                                p.as_mut().next = current;
-                            } else {
-                                link1 = current;
-                            }
-
-                            if call_on_dispose {
-                                on_dispose(self, this.as_ref());
-                            }
-
-                            // Cache arena info before dispose poisons GcHead
-                            #[cfg(feature = "gc_arena")]
-                            let arena_info = {
-                                let hd = this.as_ref();
-                                let is_arena = hd.contains_flag(GcNodeFlag::ARENA_ALLOC);
-                                let dtype = hd.dtype() as usize;
-                                let info = &self.node_dtypes.type_info_list[dtype];
-                                (is_arena, info.layout().size())
-                            };
-
-                            freed_bytes += self.dispose(this);
-
-                            // Arena hole collection (after dispose, which skips mem_dealloc)
-                            #[cfg(feature = "gc_arena")]
-                            if arena_info.0 {
-                                // SAFETY: an arena-allocated node exists only if the
-                                // partition has an arena — this is an invariant.
-                                self.partitions[partition_id.0 as usize]
-                                    .arena
-                                    .as_ref()
-                                    .unwrap()
-                                    .collect_hole(&mut holes, this.cast::<u8>(), arena_info.1);
-                            }
-                        } else {
-                            prev = Some(this);
-                        }
-                    }
-                }
-
-                if link1.is_none() {
-                    break;
-                }
-            }
-
-            #[cfg(feature = "gc_arena")]
-            if let Some(ref arena) = self.partitions[partition_id.0 as usize].arena {
-                arena.finish_sweep(&mut holes);
-            }
-
-            debug_assert!(
-                self.partitions[partition_id.0 as usize]
-                    .gray_list
-                    .is_empty()
-            );
-
-            // update remainder node link of partition
-            if link1.is_some() {
-                #[cfg(debug_assertions)]
-                for n in crate::node_link::NodeLinkIter::new(link1) {
-                    unsafe {
-                        debug_assert!(
-                            n.as_ref().color() == GcTriColor::Black
-                                || n.as_ref().is_root_or_local(),
-                            "live nodes should be black, root or protected"
-                        );
-                    }
-                }
-
-                self.partitions[partition_id.0 as usize].nodes =
-                    crate::node_link::GcNodeLink::new(link1);
-            }
-
-            // Memory accounting is already handled by dispose() which calls
-            // update_mem_use() for each individual node. No need to subtract
-            // freed_bytes again here.
-            freed_bytes
-        } else {
-            0
-        }
     }
 
     /// Phase 1 of two-phase sweep: unlink white (dead) nodes from the
@@ -828,7 +676,11 @@ impl GcHeap {
             }
         }
 
-        Some(GcNodeLink::new(white_head))
+        let white = GcNodeLink::new(white_head);
+        // Weak slots go before any payload drop/finalize: those callbacks may
+        // upgrade a weak ref to another white node in this very list.
+        self.clear_weak_slots(&white);
+        Some(white)
     }
 
     /// Drop payloads of every node in the white list.
@@ -1040,8 +892,15 @@ mod sweep_test {
     use crate::trace::{GcTrace, GcTraceCtx};
 
     /// Shorthand for creating a partition with default arena config.
+    /// (`create_partition` takes no parameters when `gc_arena` is disabled.)
+    #[cfg(feature = "gc_arena")]
     fn create_default_partition(heap: &mut crate::GcHeap) -> GcPartitionId {
-        heap.create_partition(crate::arena::ARENA_CAPACITY, crate::arena::MAX_ARENA_ALLOC)
+        heap.create_partition(64 * 1024, 16 * 1024)
+    }
+
+    #[cfg(not(feature = "gc_arena"))]
+    fn create_default_partition(heap: &mut crate::GcHeap) -> GcPartitionId {
+        heap.create_partition()
     }
 
     #[derive(Debug)]
@@ -1198,6 +1057,63 @@ mod sweep_test {
         assert!(heap.partitions[pid.0 as usize].nodes.head().is_none());
     }
 
+    /// The weak slot of a white node must be gone as soon as it is unlinked —
+    /// payload drops/finalizes in the same pass may still `upgrade` it, and by
+    /// then the payload (or the whole node) may already be released.
+    #[test]
+    fn test_weak_slot_cleared_at_sweep_unlink() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let pid = create_default_partition(&mut heap);
+
+        let node = unsafe { heap.alloc_raw(pid, MyI32(7)) }.unwrap();
+        let weak = heap.downgrade(&node);
+        assert!(weak.upgrade(&heap).is_some(), "alive before the mark");
+
+        while !heap.mark(pid, 64) {}
+        let white = heap.sweep_unlink(pid).expect("post-mark sweep");
+
+        assert!(
+            weak.upgrade(&heap).is_none(),
+            "white node's weak slot must be cleared before any payload drop"
+        );
+
+        let registry = heap.type_registry();
+        GcHeap::sweep_drop_payloads(&white, registry);
+        heap.sweep_dispose(pid, white);
+        assert!(weak.upgrade(&heap).is_none());
+    }
+
+    /// Between unlink and dispose the cleared slot can be reused by a new
+    /// `downgrade` (which bumps its version); the late clear must not drop the
+    /// new occupant's pointer.
+    #[test]
+    fn test_dispose_does_not_clobber_a_reused_weak_slot() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let pid = create_default_partition(&mut heap);
+
+        let dying = unsafe { heap.alloc_raw(pid, MyI32(1)) }.unwrap();
+        let dying_weak = heap.downgrade(&dying);
+
+        while !heap.mark(pid, 64) {}
+        let white = heap.sweep_unlink(pid).expect("post-mark sweep");
+        assert!(dying_weak.upgrade(&heap).is_none());
+
+        // Reuse the slot the unlink just freed (same index, next version).
+        let survivor = unsafe { heap.alloc_raw(pid, MyI32(2)) }.unwrap();
+        let survivor_weak = heap.downgrade(&survivor);
+        assert!(survivor_weak.upgrade(&heap).is_some());
+
+        let registry = heap.type_registry();
+        GcHeap::sweep_drop_payloads(&white, registry);
+        heap.sweep_dispose(pid, white);
+
+        assert!(
+            survivor_weak.upgrade(&heap).is_some(),
+            "disposing the dead node must not clear a slot reused by a live one"
+        );
+        assert!(dying_weak.upgrade(&heap).is_none());
+    }
+
     #[test]
     fn test_two_phase_sweep_middle_node_removal() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
@@ -1275,9 +1191,19 @@ mod generations_tests {
     use super::*;
     use crate::{
         GcNode, GcRef,
-        arena::{ARENA_CAPACITY, MAX_ARENA_ALLOC},
         trace::{GcTrace, GcTraceCtx},
     };
+
+    // `create_partition` takes no parameters when `gc_arena` is disabled.
+    #[cfg(feature = "gc_arena")]
+    fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+        heap.create_partition(64 * 1024, 16 * 1024)
+    }
+
+    #[cfg(not(feature = "gc_arena"))]
+    fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+        heap.create_partition()
+    }
 
     #[derive(Debug)]
     struct GenNode {
@@ -1298,7 +1224,7 @@ mod generations_tests {
 
     fn new_heap() -> (GcHeap, GcPartitionId) {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let pid = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let pid = new_partition(&mut heap);
         (heap, pid)
     }
 
@@ -1476,8 +1402,8 @@ mod generations_tests {
     #[test]
     fn minor_across_partitions_keeps_a_remembered_edge() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p0 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
-        let p1 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let p0 = new_partition(&mut heap);
+        let p1 = new_partition(&mut heap);
 
         let mut old_root = unsafe { heap.alloc_root_raw(p0, GenNode { child: None }) }.unwrap();
         collect_all(&mut heap);
@@ -1507,8 +1433,8 @@ mod generations_tests {
     #[test]
     fn minor_across_partitions_keeps_a_young_to_young_edge() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p0 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
-        let p1 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let p0 = new_partition(&mut heap);
+        let p1 = new_partition(&mut heap);
 
         let garbage = alloc(&mut heap, p0, None);
         let inner = alloc(&mut heap, p0, None);
@@ -1525,8 +1451,8 @@ mod generations_tests {
     #[test]
     fn dealloc_partition_purges_only_dangling_remembered_sources() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p0 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
-        let p1 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let p0 = new_partition(&mut heap);
+        let p1 = new_partition(&mut heap);
 
         let mut old0 = unsafe { heap.alloc_root_raw(p0, GenNode { child: None }) }.unwrap();
         let mut old1 = unsafe { heap.alloc_root_raw(p1, GenNode { child: None }) }.unwrap();
@@ -1566,7 +1492,7 @@ mod generations_tests {
     #[test]
     fn minor_prepare_refuses_a_partition_mid_mark() {
         let (mut heap, pid) = new_heap();
-        let _other = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let _other = new_partition(&mut heap);
         let _n = alloc(&mut heap, pid, None);
 
         // A partial major leaves every partition marking.
@@ -1581,8 +1507,8 @@ mod generations_tests {
     #[test]
     fn minor_follows_an_old_to_young_to_young_chain_across_partitions() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p0 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
-        let p1 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let p0 = new_partition(&mut heap);
+        let p1 = new_partition(&mut heap);
 
         let mut old = unsafe { heap.alloc_root_raw(p0, GenNode { child: None }) }.unwrap();
         collect_all(&mut heap);
@@ -1603,9 +1529,9 @@ mod generations_tests {
     #[test]
     fn minor_across_three_partitions_terminates_on_a_cycle() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p0 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
-        let p1 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
-        let p2 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let p0 = new_partition(&mut heap);
+        let p1 = new_partition(&mut heap);
+        let p2 = new_partition(&mut heap);
 
         // p0 root -> y1 (p1) <-> y2 (p2), plus garbage in every partition. The
         // backwards edge into p1 makes the fixed-point loop revisit an earlier
@@ -1630,8 +1556,8 @@ mod generations_tests {
     #[test]
     fn finishing_a_minor_caps_the_remembered_buffer() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p0 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
-        let p1 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let p0 = new_partition(&mut heap);
+        let p1 = new_partition(&mut heap);
 
         let mut olds = Vec::new();
         for _ in 0..300 {
@@ -1658,8 +1584,8 @@ mod generations_tests {
     #[should_panic(expected = "freed by the last minor")]
     fn validator_catches_a_missing_barrier_across_partitions() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p0 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
-        let p1 = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let p0 = new_partition(&mut heap);
+        let p1 = new_partition(&mut heap);
 
         let mut old_root = unsafe { heap.alloc_root_raw(p1, GenNode { child: None }) }.unwrap();
         collect_all(&mut heap);
@@ -1700,7 +1626,15 @@ mod generations_tests {
     fn validator_walks_unreachable_old_nodes() {
         let (mut heap, pid) = new_heap();
         let mut holder = alloc(&mut heap, pid, None);
-        let mut root = unsafe { heap.alloc_root_raw(pid, GenNode { child: Some(holder) }) }.unwrap();
+        let mut root = unsafe {
+            heap.alloc_root_raw(
+                pid,
+                GenNode {
+                    child: Some(holder),
+                },
+            )
+        }
+        .unwrap();
         collect_all(&mut heap);
         assert!(!unsafe { holder.node_info().is_young() });
 
@@ -1721,7 +1655,15 @@ mod generations_tests {
     fn validator_accepts_a_bound_old_to_young_edge() {
         let (mut heap, pid) = new_heap();
         let mut holder = alloc(&mut heap, pid, None);
-        let mut root = unsafe { heap.alloc_root_raw(pid, GenNode { child: Some(holder) }) }.unwrap();
+        let mut root = unsafe {
+            heap.alloc_root_raw(
+                pid,
+                GenNode {
+                    child: Some(holder),
+                },
+            )
+        }
+        .unwrap();
         collect_all(&mut heap);
         unsafe { root.as_mut() }.child = None;
 

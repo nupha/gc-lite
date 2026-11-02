@@ -81,7 +81,9 @@ for id in heap.partition_ids() {
 heap.set_memory_limit(2048);
 heap.set_gc_threshold(1024);
 
-heap.remove_partition(partition2, GcHeap::DUMMY_DISPOSE_CALLBACK);
+if let Some(link) = heap.finalize_partition(partition2) {
+    heap.dealloc_partition(partition2, link);
+}
 ```
 
 ## Root Objects and Scopes

@@ -10,7 +10,18 @@
 //! - Weak reference usage
 //! - Partition management
 
-use gc_lite::{GcHeap, GcRef, GcResult, GcTrace, GcTraceCtx, gc_type_register};
+use gc_lite::{GcHeap, GcPartitionId, GcRef, GcResult, GcTrace, GcTraceCtx, gc_type_register};
+
+// `create_partition` takes no parameters when `gc_arena` is disabled.
+#[cfg(feature = "gc_arena")]
+fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+    heap.create_partition(64 * 1024, 16 * 1024)
+}
+
+#[cfg(not(feature = "gc_arena"))]
+fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+    heap.create_partition()
+}
 
 #[derive(Debug)]
 struct MyString(String);
@@ -55,8 +66,8 @@ fn main() -> GcResult<()> {
 
     // Create two partitions
     println!("\nCreate partitions:");
-    let partition1 = heap.create_partition(64 * 1024, 16 * 1024);
-    let partition2 = heap.create_partition(64 * 1024, 16 * 1024);
+    let partition1 = new_partition(&mut heap);
+    let partition2 = new_partition(&mut heap);
     println!("  Created partition1: {:?}", partition1);
     println!("  Created partition2: {:?}", partition2);
     println!("  Number of partitions: {}", heap.partition_ids().len());
@@ -150,7 +161,7 @@ fn main() -> GcResult<()> {
     println!("\nDemonstrate automatic garbage collection...");
 
     // Create a small partition to demonstrate automatic GC
-    let small_partition = heap.create_partition(64 * 1024, 16 * 1024);
+    let small_partition = new_partition(&mut heap);
 
     // Allocate multiple objects to fill partition
     for i in 0..5 {
@@ -204,15 +215,19 @@ fn main() -> GcResult<()> {
     println!("\nDemonstrate partition deletion:");
 
     // Create an empty partition
-    let empty_partition = heap.create_partition(64 * 1024, 16 * 1024);
+    let empty_partition = new_partition(&mut heap);
     println!("  Created empty partition: {:?}", empty_partition);
 
-    // Delete empty partition
-    heap.remove_partition(empty_partition, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    // Delete empty partition (finalize drops payloads, dealloc frees memory)
+    if let Some(link) = heap.finalize_partition(empty_partition) {
+        heap.dealloc_partition(empty_partition, link);
+    }
     println!("  Deleted empty partition successfully");
 
     // Delete non-empty partition
-    heap.remove_partition(partition1, GcHeap::DUMMY_DISPOSE_CALLBACK);
+    if let Some(link) = heap.finalize_partition(partition1) {
+        heap.dealloc_partition(partition1, link);
+    }
     println!("  Deleted non-empty partition successfully");
 
     println!("\nExample completed!");

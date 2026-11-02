@@ -1,4 +1,17 @@
-use gc_lite::{GcHeap, GcRef, GcResult, GcScopeStackId, GcTrace, GcTraceCtx, gc_type_register};
+use gc_lite::{
+    GcHeap, GcPartitionId, GcRef, GcResult, GcScopeStackId, GcTrace, GcTraceCtx, gc_type_register,
+};
+
+// `create_partition` takes no parameters when `gc_arena` is disabled.
+#[cfg(feature = "gc_arena")]
+fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+    heap.create_partition(64 * 1024, 16 * 1024)
+}
+
+#[cfg(not(feature = "gc_arena"))]
+fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+    heap.create_partition()
+}
 
 #[derive(Debug)]
 struct StaticNode {
@@ -55,7 +68,7 @@ fn alloc_other(
 
 fn main() -> GcResult<()> {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let partition = heap.create_partition(64 * 1024, 16 * 1024);
+    let partition = new_partition(&mut heap);
     let stack_id = heap.acquire_scope_stack(partition);
 
     let static_ref = alloc_static(&mut heap, stack_id, 10)?;

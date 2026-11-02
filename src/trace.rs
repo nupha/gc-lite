@@ -384,9 +384,19 @@ impl_trace_for_tuple!(A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6, H: 7);
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
     use crate::{GcHeap, GcRef, node::GcTriColor};
+
+    // `create_partition` takes no parameters when `gc_arena` is disabled.
+    #[cfg(feature = "gc_arena")]
+    fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+        heap.create_partition(64 * 1024, 16 * 1024)
+    }
+
+    #[cfg(not(feature = "gc_arena"))]
+    fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+        heap.create_partition()
+    }
 
     /// Two-phase sweep helper: unlink → drop payloads → dispose.
     fn two_phase_sweep(heap: &mut GcHeap, pid: GcPartitionId) -> usize {
@@ -469,7 +479,7 @@ mod tests {
     #[test]
     fn test_trace_propagate_simple_tree() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
 
         let child1 = unsafe { heap.alloc_raw(partition_id, TestNode::new(1)) }.unwrap();
         let child2 = unsafe { heap.alloc_raw(partition_id, TestNode::new(2)) }.unwrap();
@@ -507,7 +517,7 @@ mod tests {
     #[test]
     fn test_trace_continue_simple_tree() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
 
         let child1 = unsafe { heap.alloc_raw(partition_id, TestNode::new(1)) }.unwrap();
         let child2 = unsafe { heap.alloc_raw(partition_id, TestNode::new(2)) }.unwrap();
@@ -526,7 +536,7 @@ mod tests {
     #[test]
     fn test_trace_deep_nested_tree() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
 
         let level3 = unsafe { heap.alloc_raw(partition_id, TestNode::new(3)) }.unwrap();
 
@@ -551,7 +561,7 @@ mod tests {
     #[test]
     fn test_trace_complex_tree() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
 
         // Create a complex tree:
         //        root
@@ -589,7 +599,7 @@ mod tests {
     #[test]
     fn test_trace_algorithms_equivalence() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
 
         // Create a tree with 10 nodes in a balanced structure
         let mut nodes = Vec::new();
@@ -654,7 +664,7 @@ mod tests {
     #[test]
     fn test_trace_circular_reference() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
 
         let mut node1 = unsafe { heap.alloc_raw(partition_id, TestNode::new(1)) }.unwrap();
         let mut node2 = unsafe { heap.alloc_raw(partition_id, TestNode::new(2)) }.unwrap();
@@ -694,7 +704,7 @@ mod tests {
     #[test]
     fn test_write_barrier_black_node_adds_white_child() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
 
         // Allocate a white child node (not reachable from root yet)
         let child = unsafe { heap.alloc_raw(partition_id, TestNode::new(1)) }.unwrap();
@@ -738,7 +748,7 @@ mod tests {
     #[test]
     fn test_write_barrier_incremental_black_adds_white() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
 
         // Create a chain: root -> a -> b -> c
         let c = unsafe { heap.alloc_raw(partition_id, TestNode::new(3)) }.unwrap();
@@ -789,7 +799,7 @@ mod tests {
     #[test]
     fn test_write_barrier_bypass_leaks_white_child() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
 
         let child = unsafe { heap.alloc_raw(partition_id, TestNode::new(1)) }.unwrap();
         let mut root = unsafe { heap.alloc_root_raw(partition_id, TestNode::new(0)) }.unwrap();
@@ -850,7 +860,7 @@ mod tests {
     #[test]
     fn test_high_alignment_payload_alloc_and_access() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
 
         let node: GcRef<Align32Node> = unsafe {
             heap.alloc_root_raw(
@@ -890,7 +900,7 @@ mod tests {
     #[test]
     fn test_high_alignment_payload_multiple_nodes() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
 
         let nodes: Vec<GcRef<Align32Node>> = (0..10)
             .map(|i| {
@@ -962,8 +972,8 @@ mod tests {
     #[test]
     fn test_cross_partition_basic_ref() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p0 = heap.create_partition(64 * 1024, 16 * 1024);
-        let p1 = heap.create_partition(64 * 1024, 16 * 1024);
+        let p0 = new_partition(&mut heap);
+        let p1 = new_partition(&mut heap);
 
         let node_b = unsafe { heap.alloc_raw(p1, TestNode::new(2)) }.unwrap();
 
@@ -1020,8 +1030,8 @@ mod tests {
     #[test]
     fn test_cross_partition_chain_with_garbage() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p0 = heap.create_partition(64 * 1024, 16 * 1024);
-        let p1 = heap.create_partition(64 * 1024, 16 * 1024);
+        let p0 = new_partition(&mut heap);
+        let p1 = new_partition(&mut heap);
 
         let node_c = unsafe { heap.alloc_raw(p1, TestNode::new(3)) }.unwrap();
 
@@ -1100,9 +1110,9 @@ mod tests {
     #[test]
     fn test_cross_partition_three_way_cascade() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p0 = heap.create_partition(64 * 1024, 16 * 1024);
-        let p1 = heap.create_partition(64 * 1024, 16 * 1024);
-        let p2 = heap.create_partition(64 * 1024, 16 * 1024);
+        let p0 = new_partition(&mut heap);
+        let p1 = new_partition(&mut heap);
+        let p2 = new_partition(&mut heap);
 
         let node_c = unsafe { heap.alloc_raw(p2, TestNode::new(3)) }.unwrap();
 
@@ -1159,8 +1169,8 @@ mod tests {
     #[test]
     fn test_cross_partition_bidirectional_circular() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let p0 = heap.create_partition(64 * 1024, 16 * 1024);
-        let p1 = heap.create_partition(64 * 1024, 16 * 1024);
+        let p0 = new_partition(&mut heap);
+        let p1 = new_partition(&mut heap);
 
         // Build A(p0) with empty children, allocate first.
         let node_a = TestNode::new(1);

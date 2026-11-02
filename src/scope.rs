@@ -311,10 +311,10 @@ fn locate(cache: &[NonNull<GcHead>], node: NonNull<GcHead>) -> Option<usize> {
     cache.iter().position(|&n| n == node)
 }
 
-/// Test witness for "the hint answered": the number of cache scans `locate`
-/// had to do on this thread. O(1) removal must leave it unchanged.
 #[cfg(test)]
 thread_local! {
+    /// Test witness for "the hint answered": the number of cache scans `locate`
+    /// had to do on this thread. O(1) removal must leave it unchanged.
     static SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -584,6 +584,17 @@ mod tests {
 
     use super::*;
 
+    // `create_partition` takes no parameters when `gc_arena` is disabled.
+    #[cfg(feature = "gc_arena")]
+    fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+        heap.create_partition(64 * 1024, 16 * 1024)
+    }
+
+    #[cfg(not(feature = "gc_arena"))]
+    fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+        heap.create_partition()
+    }
+
     /// Two-phase sweep helper: unlink → drop payloads → dispose.
     fn two_phase_sweep(heap: &mut GcHeap, pid: GcPartitionId) -> usize {
         if let Some(white) = heap.sweep_unlink(pid) {
@@ -616,7 +627,7 @@ mod tests {
     #[test]
     fn test_gc_context_local_flag_set_and_cleared_on_commit() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         let head;
@@ -651,7 +662,7 @@ mod tests {
     #[test]
     fn test_gc_context_alloc_protects_and_unprotects_on_drop() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         let head;
@@ -688,7 +699,7 @@ mod tests {
     #[test]
     fn test_gc_context_add_sets_local_and_clears_on_commit() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         let node: GcRef<Node> = unsafe {
@@ -736,7 +747,7 @@ mod tests {
     #[test]
     fn test_gc_context_add_on_local_node_returns_false() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         let ctx = heap.new_scope(stack_id);
@@ -769,7 +780,7 @@ mod tests {
     #[test]
     fn test_root_node_not_collected_by_sweep() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
 
         let head;
 
@@ -799,7 +810,7 @@ mod tests {
     #[test]
     fn test_gc_context_alloc_multiple_nodes() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         let head1;
@@ -847,7 +858,7 @@ mod tests {
     #[test]
     fn test_gc_context_reset_unprotects_and_clears_cache() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         let head;
@@ -882,7 +893,7 @@ mod tests {
     #[test]
     fn test_gc_context_level_for_heap_scopes() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         assert_eq!(heap.scope_max_depth(stack_id), 0);
@@ -909,7 +920,7 @@ mod tests {
     #[test]
     fn test_gc_context_parent_mut_returns_parent_and_level() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
         let stack_id = heap.acquire_scope_stack(partition_id);
 
         let heap_ptr = &mut heap as *mut GcHeap;
@@ -940,7 +951,7 @@ mod tests {
     #[test]
     fn test_multi_scope_stacks_are_independent() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
         let stack1 = heap.acquire_scope_stack(partition_id);
         let stack2 = heap.acquire_scope_stack(partition_id);
 
@@ -980,7 +991,7 @@ mod tests {
     #[test]
     fn test_gc_scope_drop_is_lifo_per_stack() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let partition_id = heap.create_partition(64 * 1024, 16 * 1024);
+        let partition_id = new_partition(&mut heap);
         let stack1 = heap.acquire_scope_stack(partition_id);
         let stack2 = heap.acquire_scope_stack(partition_id);
         let heap_ptr = &mut heap as *mut GcHeap;
@@ -1034,7 +1045,7 @@ mod tests {
     #[test]
     fn removal_uses_the_slot_hint_instead_of_scanning() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let pid = heap.create_partition(64 * 1024, 16 * 1024);
+        let pid = new_partition(&mut heap);
         let sid = heap.acquire_scope_stack(pid);
         let ctx = heap.new_scope(sid);
 
@@ -1070,7 +1081,7 @@ mod tests {
     #[test]
     fn a_stale_hint_never_removes_another_node() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let pid = heap.create_partition(64 * 1024, 16 * 1024);
+        let pid = new_partition(&mut heap);
         let sid = heap.acquire_scope_stack(pid);
         let ctx = heap.new_scope(sid);
 
@@ -1107,7 +1118,7 @@ mod tests {
     #[test]
     fn clear_invalidates_the_hints() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let pid = heap.create_partition(64 * 1024, 16 * 1024);
+        let pid = new_partition(&mut heap);
         let sid = heap.acquire_scope_stack(pid);
         let ctx = heap.new_scope(sid);
 
@@ -1137,7 +1148,7 @@ mod tests {
     #[test]
     fn promotion_carries_the_hint_to_the_target_scope() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let pid = heap.create_partition(64 * 1024, 16 * 1024);
+        let pid = new_partition(&mut heap);
         let sid = heap.acquire_scope_stack(pid);
         // Two live handles need two `&mut` borrows; the scope stack is LIFO and
         // the heap outlives both (the other multi-scope tests do the same).
@@ -1208,7 +1219,7 @@ mod tests {
 
         let n = 20_000;
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let pid = heap.create_partition(64 * 1024, 16 * 1024);
+        let pid = new_partition(&mut heap);
         let sid = heap.acquire_scope_stack(pid);
         let ctx = heap.new_scope(sid);
 

@@ -8,8 +8,19 @@
 //! impls actually keep referenced nodes alive (and that `#[gc(skip)]`
 //! fields genuinely do not).
 
-use gc_lite::{gc_type_register, GcHeap, GcPartitionId, GcRef, GcTrace};
+use gc_lite::{GcHeap, GcPartitionId, GcRef, GcTrace, gc_type_register};
 use smallvec::SmallVec;
+
+// `create_partition` takes no parameters when `gc_arena` is disabled.
+#[cfg(feature = "gc_arena")]
+fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+    heap.create_partition(64 * 1024, 16 * 1024)
+}
+
+#[cfg(not(feature = "gc_arena"))]
+fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+    heap.create_partition()
+}
 
 // ── Types under test ────────────────────────────────────────────────────────
 
@@ -93,7 +104,7 @@ gc_type_register! {
 
 fn new_heap() -> (GcHeap, GcPartitionId) {
     let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-    let pid = heap.create_partition(64 * 1024, 16 * 1024);
+    let pid = new_partition(&mut heap);
     (heap, pid)
 }
 
@@ -113,7 +124,12 @@ fn collect(heap: &mut GcHeap, pid: GcPartitionId) {
     sweep(heap, pid);
 }
 
-fn inner(heap: &mut GcHeap, pid: GcPartitionId, next: Option<GcRef<Inner>>, value: u32) -> GcRef<Inner> {
+fn inner(
+    heap: &mut GcHeap,
+    pid: GcPartitionId,
+    next: Option<GcRef<Inner>>,
+    value: u32,
+) -> GcRef<Inner> {
     Inner::alloc_node(heap, pid, Inner { next, value }).unwrap()
 }
 
@@ -164,7 +180,13 @@ fn skip_field_does_not_keep_alive() {
 
     let hidden = inner(&mut heap, pid, None, 7);
     let _root = unsafe {
-        heap.alloc_root_raw(pid, SkipRoot { hidden: Some(hidden), keep: 1 })
+        heap.alloc_root_raw(
+            pid,
+            SkipRoot {
+                hidden: Some(hidden),
+                keep: 1,
+            },
+        )
     }
     .unwrap();
 
@@ -229,7 +251,13 @@ fn enum_variants_are_traced() {
     let _orphan = Tree::alloc_node(&mut heap, pid, Tree::Leaf(3)).unwrap();
 
     let _root = unsafe {
-        heap.alloc_root_raw(pid, Tree::Branch { left: l1, right: Some(l2) })
+        heap.alloc_root_raw(
+            pid,
+            Tree::Branch {
+                left: l1,
+                right: Some(l2),
+            },
+        )
     }
     .unwrap();
 
@@ -253,7 +281,10 @@ fn by_value_container_fields_are_traced() {
         heap.alloc_root_raw(
             pid,
             OwnedBag {
-                items: vec![Inner { next: Some(deep), value: 10 }],
+                items: vec![Inner {
+                    next: Some(deep),
+                    value: 10,
+                }],
                 tag: "bag".into(),
             },
         )
@@ -283,7 +314,10 @@ fn generic_struct_derives_gc_trace_bound() {
         heap.alloc_root_raw(
             pid,
             Wrap {
-                items: vec![Inner { next: Some(held), value: 1 }],
+                items: vec![Inner {
+                    next: Some(held),
+                    value: 1,
+                }],
             },
         )
     }

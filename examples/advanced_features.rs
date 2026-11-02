@@ -9,7 +9,18 @@
 //! - Reference recovery and validation
 //! - Cross-context object detection
 
-use gc_lite::{GcHeap, GcRef, GcResult, GcTrace, GcTraceCtx, gc_type_register};
+use gc_lite::{GcHeap, GcPartitionId, GcRef, GcResult, GcTrace, GcTraceCtx, gc_type_register};
+
+// `create_partition` takes no parameters when `gc_arena` is disabled.
+#[cfg(feature = "gc_arena")]
+fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+    heap.create_partition(64 * 1024, 16 * 1024)
+}
+
+#[cfg(not(feature = "gc_arena"))]
+fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+    heap.create_partition()
+}
 
 #[derive(Debug)]
 struct MyString(String);
@@ -46,7 +57,7 @@ fn main() -> GcResult<()> {
     println!("=== Advanced features example of partitioned garbage collection system ===");
 
     let mut heap = new_heap();
-    let partition = heap.create_partition(64 * 1024, 16 * 1024);
+    let partition = new_partition(&mut heap);
 
     // Demonstrate weak reference functionality
     println!("\n=== Weak reference functionality demonstration ===");
@@ -295,8 +306,8 @@ fn demonstrate_cross_context_detection() -> GcResult<()> {
     let mut heap1 = new_heap();
     let mut heap2 = new_heap();
 
-    let partition1 = heap1.create_partition(64 * 1024, 16 * 1024);
-    let partition2 = heap2.create_partition(64 * 1024, 16 * 1024);
+    let partition1 = new_partition(&mut heap1);
+    let partition2 = new_partition(&mut heap2);
 
     let obj1 = unsafe {
         heap1.alloc_root_raw(

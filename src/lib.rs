@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 John Ray <996351336@qq.com>
 
+#[cfg(feature = "gc_arena")]
+mod arena;
 pub mod gctype;
 mod heap;
 mod helpers;
@@ -13,9 +15,6 @@ mod scope;
 mod trace;
 mod weak;
 mod xref;
-
-#[cfg(feature = "gc_arena")]
-mod arena;
 
 pub use {
     gctype::{GcTypeInfo, GcTypeRegistry, gctype_drop, gctype_trace},
@@ -70,7 +69,10 @@ pub(crate) use helpers::unlikely;
 /// gc_type_register! { Node; }
 ///
 /// let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-/// let pid = heap.create_partition(64 * 1024, 16 * 1024);
+/// # #[cfg(feature = "gc_arena")]
+/// # let pid = heap.create_partition(64 * 1024, 16 * 1024);
+/// # #[cfg(not(feature = "gc_arena"))]
+/// # let pid = heap.create_partition();
 ///
 /// // c <- b <- a, with `a` also referenced by the root's Vec field
 /// let c = Node::alloc_node(&mut heap, pid, Node { next: None, refs: Vec::new(), name: "c".into(), raw: std::ptr::null_mut() }).unwrap();

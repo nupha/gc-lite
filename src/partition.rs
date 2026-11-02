@@ -50,7 +50,7 @@ pub struct GcPartition {
 }
 
 impl GcPartition {
-    /// Create a new partition.
+    /// Create a new partition with an arena.
     ///
     /// # Parameters
     ///
@@ -58,9 +58,8 @@ impl GcPartition {
     ///   (all allocations go through system malloc directly).
     /// - `max_alloc`: allocations larger than this skip the arena.
     ///   When `capacity == 0` this is forced to `0`.
-    #[allow(unused_variables)]
+    #[cfg(feature = "gc_arena")]
     pub fn new(capacity: usize, max_alloc: usize) -> Self {
-        #[cfg(feature = "gc_arena")]
         let (arena, arena_max_alloc) = if capacity > 0 {
             (
                 Some(GcArena::new(capacity).expect("arena alloc failed")),
@@ -79,12 +78,24 @@ impl GcPartition {
             gray_list: Vec::new(),
             marking: false,
 
-            #[cfg(feature = "gc_arena")]
             arena,
-            #[cfg(feature = "gc_arena")]
             arena_capacity: capacity,
-            #[cfg(feature = "gc_arena")]
             arena_max_alloc,
+        }
+    }
+
+    /// Create a new partition. `gc_arena` is disabled: all allocations go
+    /// through system malloc directly.
+    #[cfg(not(feature = "gc_arena"))]
+    pub fn new() -> Self {
+        Self {
+            memory_used: 0,
+            nodes: GcNodeLink::default(),
+            #[cfg(feature = "gc_generations")]
+            young: GcNodeLink::default(),
+
+            gray_list: Vec::new(),
+            marking: false,
         }
     }
 
@@ -140,12 +151,13 @@ impl GcPartition {
 }
 
 impl GcHeap {
-    /// Create a new partition and return its ID.
+    /// Create a new partition with an arena and return its ID.
     ///
     /// # Parameters
     ///
     /// - `arena_capacity`: arena size in bytes. `0` = disable arena for this partition.
     /// - `arena_max_alloc`: allocations larger than this skip the arena.
+    #[cfg(feature = "gc_arena")]
     pub fn create_partition(
         &mut self,
         arena_capacity: usize,
@@ -157,19 +169,25 @@ impl GcHeap {
         id
     }
 
+    /// Create a new partition and return its ID. `gc_arena` is disabled:
+    /// no arena configuration is needed.
+    #[cfg(not(feature = "gc_arena"))]
+    pub fn create_partition(&mut self) -> GcPartitionId {
+        let id = GcPartitionId(self.partitions.len() as u16);
+        self.partitions.push(GcPartition::new());
+        id
+    }
+
     // ── Two-phase partition removal ──────────────────────────────────────
     //
     //  Phase 1 (finalize): takes &self, calls Drop on all node payloads without
     //    deallocating memory. Drop implementations can safely access GcHeap
     //    through a shared reference (e.g. &GcHeap), avoiding the aliasing
-    //    problem that existed in the single-phase remove_partition.
+    //    problem of single-phase removal.
     //
     //  Phase 2 (dealloc):   takes &mut self, frees the memory of all finalized
     //    nodes and resets the partition state. No Drop callbacks run
     //    at this point, so there is no risk of reentrant &mut self access.
-    //
-    //  remove_partition remains for backward compatibility and calls both
-    //    phases in sequence.
 
     /// Phase 1a: Prepare partition for teardown — clear scope caches and
     /// weak slots, then return the node link WITHOUT dropping payloads.
@@ -232,9 +250,7 @@ impl GcHeap {
         // can mutate it through &self.
         for node in link.iter() {
             let hd = unsafe { node.as_ref() };
-            if !hd.weak_id.is_null() {
-                self.weak_slots[hd.weak_id.index() as usize].1.set(None);
-            }
+            self.clear_weak_slot(hd.weak_id);
         }
 
         Some(link)
@@ -291,19 +307,9 @@ impl GcHeap {
 
         // Deallocate all finalized nodes in the link.
         for node in link.iter() {
-            // Handle weak reference cleanup.
-            unsafe {
-                if !node.as_ref().weak_id.is_null() {
-                    let widx = node.as_ref().weak_id.index();
-                    debug_assert!(
-                        (widx as usize) < self.weak_slots.len(),
-                        "dealloc_partition: weak slot index {} out of bounds (len {})",
-                        widx,
-                        self.weak_slots.len(),
-                    );
-                    self.weak_slots.get_unchecked_mut(widx as usize).1.set(None);
-                }
-            }
+            // Handle weak reference cleanup. Version-checked: `finalize`
+            // callbacks between prepare and here may have reused a slot.
+            self.clear_weak_slot(unsafe { node.as_ref() }.weak_id);
 
             let dtype = unsafe { node.as_ref().dtype() } as usize;
             let info = &self.node_dtypes.type_info_list[dtype];
@@ -364,51 +370,6 @@ impl GcHeap {
         freed_bytes
     }
 
-    /// Remove a partition and reclaim all its memory.
-    ///
-    /// ⚠️ **DEPRECATED** — This method is inherently unsound. It holds `&mut self`
-    /// while `Drop` callbacks run inside [`finalize_partition`], and those
-    /// callbacks can re-enter `GcHeap` through raw pointers, creating aliasing
-    /// `&mut` references (UB).
-    ///
-    /// **Use the two-phase API instead:**
-    ///
-    /// ```ignore
-    /// let link = gc_heap.finalize_partition(pid);
-    /// // ... (Drop callbacks that access GcHeap are safe here) ...
-    /// if let Some(link) = link {
-    ///     gc_heap.dealloc_partition(pid, link);
-    /// }
-    /// ```
-    ///
-    /// See [`finalize_partition`] (takes `&self`) and [`dealloc_partition`]
-    /// (takes `&mut self`) for details.
-    ///
-    /// The `on_dispose` parameter is kept for API compatibility but is no
-    /// longer called — `Drop` is handled internally by `finalize_partition`.
-    #[deprecated(
-        note = "unsound — use finalize_partition(&self) + dealloc_partition(&mut self) instead"
-    )]
-    pub fn remove_partition(
-        &mut self,
-        partition_id: GcPartitionId,
-        _on_dispose: impl Fn(&GcHeap, &GcHead),
-    ) -> usize {
-        let link = self.finalize_partition(partition_id);
-        link.map_or(0, |link| {
-            #[cfg(debug_assertions)]
-            {
-                self.dbg_dropping_root_partition = Some(partition_id);
-            }
-            let result = self.dealloc_partition(partition_id, link);
-            #[cfg(debug_assertions)]
-            {
-                self.dbg_dropping_root_partition = None;
-            }
-            result
-        })
-    }
-
     /// Get partition information
     #[inline(always)]
     pub fn partition(&self, partition_id: GcPartitionId) -> Option<&GcPartition> {
@@ -441,7 +402,17 @@ impl GcHeap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arena::{ARENA_CAPACITY, MAX_ARENA_ALLOC};
+
+    // `create_partition` takes no parameters when `gc_arena` is disabled.
+    #[cfg(feature = "gc_arena")]
+    fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+        heap.create_partition(64 * 1024, 16 * 1024)
+    }
+
+    #[cfg(not(feature = "gc_arena"))]
+    fn new_partition(heap: &mut GcHeap) -> GcPartitionId {
+        heap.create_partition()
+    }
 
     #[derive(Debug)]
     struct DummyType;
@@ -456,7 +427,7 @@ mod tests {
     #[test]
     fn test_partition_creation() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let id = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let id = new_partition(&mut heap);
 
         let partition = heap.partition(id).unwrap();
         assert_eq!(partition.memory_used(), 0);
@@ -488,7 +459,7 @@ mod tests {
     #[test]
     fn test_memory_limit() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let id = heap.create_partition(0, 0);
+        let id = new_partition(&mut heap);
 
         assert_eq!(heap.memory_limit(), 0);
 
@@ -513,19 +484,9 @@ mod tests {
     }
 
     #[test]
-    fn test_is_ancestor_of() {
-        // 已删除 ancestor 相关 API，此测试不再适用，保留空壳确保编译通过
-    }
-
-    #[test]
-    fn test_common_parent() {
-        // 已删除 common_parent 相关 API，此测试不再适用，保留空壳确保编译通过
-    }
-
-    #[test]
     fn test_update_mem_use() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let id = heap.create_partition(0, 0);
+        let id = new_partition(&mut heap);
 
         heap.update_mem_use(id, 100);
         assert_eq!(heap.partition(id).unwrap().memory_used(), 100);
@@ -547,9 +508,9 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_partition_reclaims_memory_stats() {
+    fn test_dealloc_partition_reclaims_memory_stats() {
         let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
-        let id = heap.create_partition(ARENA_CAPACITY, MAX_ARENA_ALLOC);
+        let id = new_partition(&mut heap);
 
         // Allocate some nodes
         let _n1 = unsafe { heap.alloc_raw(id, DummyType) }.unwrap();

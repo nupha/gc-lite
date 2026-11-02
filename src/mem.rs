@@ -250,19 +250,9 @@ impl GcHeap {
 
         let partition_id = hd.partition_id();
 
-        if !hd.weak_id.is_null() {
-            // clear weak slot
-            let widx = hd.weak_id.index();
-            debug_assert!(
-                (widx as usize) < self.weak_slots.len(),
-                "dispose: weak slot index {} out of bounds (len {})",
-                widx,
-                self.weak_slots.len(),
-            );
-            unsafe {
-                self.weak_slots.get_unchecked_mut(widx as usize).1.set(None);
-            }
-        }
+        // Clear the weak slot first: a payload `Drop` below may upgrade a weak
+        // ref to this node.
+        self.clear_weak_slot(hd.weak_id);
 
         let dtype = hd.dtype() as usize;
         let info = &self.node_dtypes.type_info_list[dtype];
@@ -285,12 +275,10 @@ impl GcHeap {
 
         let partition_id = hd.partition_id();
 
-        if !hd.weak_id.is_null() {
-            let widx = hd.weak_id.index();
-            unsafe {
-                self.weak_slots.get_unchecked_mut(widx as usize).1.set(None);
-            }
-        }
+        // Slots of the white list are already cleared at unlink time; this
+        // only catches nodes disposed without a preceding unlink, and stays
+        // version-checked for the same reason.
+        self.clear_weak_slot(hd.weak_id);
 
         let dtype = hd.dtype() as usize;
         let info = &self.node_dtypes.type_info_list[dtype];
