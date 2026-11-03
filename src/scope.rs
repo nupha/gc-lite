@@ -431,6 +431,24 @@ impl GcHeap {
         GcScopeStackId(id)
     }
 
+    /// Release the LOCAL protection `node` holds, wherever it lives.
+    ///
+    /// A value can be cached on a scope of a *different* stack than the caller
+    /// (cross-realm exceptions are the known case). Clearing only the flag
+    /// would leave the node in that scope's cache; the cache's later
+    /// [`clear`](GcScopeState::clear) would then write to a node the GC may
+    /// already have freed. Returns `true` when some scope held it.
+    pub fn release_local(&self, node: NonNull<GcHead>) -> bool {
+        for stack in &self.scope_stacks {
+            for state in &stack.list {
+                if state.remove_node(node) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub fn release_scope_stack(&mut self, stack_id: GcScopeStackId) {
         let stack = &mut self.scope_stacks[stack_id.0 as usize];
         debug_assert!(
@@ -657,6 +675,38 @@ mod tests {
         unsafe {
             assert!(!head.as_ref().is_local());
         }
+    }
+
+    /// Cross-realm case: the caller is on another scope stack, so it must be
+    /// able to strip the LOCAL protection through the heap. Leaving the node in
+    /// the owning cache while clearing the flag lets the GC free it, and that
+    /// cache's later `clear()` writes to freed memory.
+    #[test]
+    fn test_release_local_removes_a_node_from_another_stacks_cache() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let partition_id = new_partition(&mut heap);
+        let stack_id = heap.acquire_scope_stack(partition_id);
+
+        let ctx = heap.new_scope(stack_id);
+        let node = ctx
+            .alloc_local(Node {
+                next: None,
+                value: 1,
+            })
+            .unwrap();
+        let head = node.as_raw().node_ptr();
+
+        unsafe { assert!(head.as_ref().is_local()) };
+        assert_eq!(ctx.count(), 1);
+
+        assert!(
+            ctx.heap().release_local(head),
+            "the owning scope's cache holds the node"
+        );
+
+        unsafe { assert!(!head.as_ref().is_local()) };
+        assert_eq!(ctx.count(), 0);
+        assert!(!ctx.heap().release_local(head), "nothing holds it any more");
     }
 
     #[test]

@@ -257,10 +257,16 @@ impl GcHead {
 
     /// Clear the LOCAL flag on this node.
     ///
-    /// This is the inverse of `alloc_local`'s flag-setting side effect. Use it
-    /// when a LOCAL node must outlive its scope without being removed from the
-    /// scope cache first — for example, when throwing a cross-realm error that
-    /// was allocated on a different scope stack.
+    /// This is the inverse of `alloc_local`'s flag-setting side effect, but the
+    /// scope cache is **not** touched: the node keeps its cache entry, and the
+    /// flag no longer protects it, so the GC may free it while the cache's
+    /// later `clear()` still writes to it. Prefer
+    /// [`GcHeap::release_local`](crate::GcHeap::release_local), which removes
+    /// the entry *and* clears the flag.
+    ///
+    /// Only use this when nothing caches the node — e.g. a value that already
+    /// lost its protection — and make sure it is reachable through some other
+    /// root before clearing the flag.
     ///
     /// # Safety
     ///
