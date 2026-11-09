@@ -17,6 +17,51 @@ pub trait GcTrace: 'static {
     // every call.
 }
 
+/// Implement [`GcTrace`] as a no-op for one or more concrete types.
+///
+/// Use this when a type **transitively contains no GC nodes** — no `JSValue`,
+/// `Object`, `GcRef`, `GcWeak`, `WriteBarrier`, or any other type that owns a
+/// GC edge. It is the explicit escape hatch for payloads whose fields are all
+/// plain Rust data and therefore do not (and should not) implement `GcTrace`
+/// themselves.
+///
+/// This is **not** a way to silence a `GcTrace` bound. If the type holds a GC
+/// node that is not traced, the collector may free a live object: a
+/// use-after-free. Prefer `#[derive(GcTrace)]` when fields do implement
+/// `GcTrace` (it also keeps working when fields are added later), and a
+/// per-field `#[gc(skip)]` when only a few fields need to be opted out.
+///
+/// The `unsafe_` prefix is a contract marker, not language-level `unsafe`:
+/// [`GcTrace`] is a safe trait. Auditing tools should flag any type annotated
+/// with this macro that later gains a GC-bearing field.
+///
+/// # Example
+///
+/// ```
+/// use gc_lite::{GcTrace, unsafe_empty_gc_trace};
+///
+/// struct PlainPayload {
+///     bytes: Vec<u8>,
+///     raw: *mut u8, // no `GcTrace` impl; fine, there is nothing to trace
+/// }
+///
+/// unsafe_empty_gc_trace!(PlainPayload);
+///
+/// fn assert_trace<T: GcTrace>() {}
+/// assert_trace::<PlainPayload>();
+/// ```
+#[macro_export]
+macro_rules! unsafe_empty_gc_trace {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl $crate::GcTrace for $ty {
+                #[inline(always)]
+                fn trace(&self, _: &mut $crate::GcTraceCtx) {}
+            }
+        )*
+    };
+}
+
 pub struct GcTraceCtx<'a> {
     pub(crate) traced_nodes: Vec<NonNull<GcHead>>,
     pub(crate) opaque: *mut u8,
@@ -386,6 +431,27 @@ impl_trace_for_tuple!(A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6, H: 7);
 mod tests {
     use super::*;
     use crate::{GcHeap, GcRef, node::GcTriColor};
+
+    /// `unsafe_empty_gc_trace!` must work for types whose fields deliberately
+    /// do not implement `GcTrace`: that is the whole point of the escape hatch.
+    #[test]
+    fn unsafe_empty_gc_trace_accepts_non_trace_fields() {
+        #[allow(dead_code)]
+        struct Opaque {
+            raw: *mut u8,
+        }
+
+        #[allow(dead_code)]
+        struct Plain {
+            opaque: Opaque,
+            bytes: Vec<u8>,
+        }
+
+        crate::unsafe_empty_gc_trace!(Plain);
+
+        fn assert_trace<T: GcTrace>() {}
+        assert_trace::<Plain>();
+    }
 
     // `create_partition` takes no parameters when `gc_arena` is disabled.
     #[cfg(feature = "gc_arena")]

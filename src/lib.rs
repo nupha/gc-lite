@@ -47,6 +47,12 @@ pub(crate) use helpers::unlikely;
 /// - `#[gc(with = "path")]` — call `path(&field, ctx)` instead of the trait
 ///   impl (for foreign containers like `SmallVec` that gc-lite cannot impl).
 ///
+/// If the type **transitively contains no GC nodes** and its fields therefore
+/// do not implement `GcTrace`, use [`unsafe_empty_gc_trace!`] instead of
+/// marking every field `#[gc(skip)]`. That macro is the explicit escape hatch
+/// for plain Rust payloads; the derive remains the safe default because it
+/// keeps tracing in sync when fields are added later.
+///
 /// Generic type parameters get a `GcTrace` bound automatically.
 ///
 /// # Examples
