@@ -3,6 +3,8 @@
 
 use std::ptr::NonNull;
 
+#[cfg(feature = "gc_arena")]
+use crate::node::GcNodeFlag;
 use crate::{
     GcHeap,
     gctype::GcTypeRegistry,
@@ -11,9 +13,6 @@ use crate::{
     partition::GcPartitionId,
     trace::GcTraceCtx,
 };
-
-#[cfg(feature = "gc_arena")]
-use crate::node::GcNodeFlag;
 
 impl GcHeap {
     pub fn add_gray_node(&mut self, node: NonNull<GcHead>) {
@@ -294,13 +293,12 @@ impl GcHeap {
                 continue;
             };
 
-            // Clear the young bit while walking, then splice the whole chain
-            // in front of the old one (keeps the newest-first order).
+            // Promote the whole young chain while walking, then splice it in
+            // front of the old one (keeps the newest-first order).
             let mut tail = head;
             loop {
                 unsafe {
-                    tail.as_mut().set_young(false);
-                    tail.as_mut().set_age(0);
+                    tail.as_mut().promote_to_old();
                     match tail.as_ref().next {
                         Some(next) => tail = next,
                         None => break,
@@ -475,6 +473,14 @@ impl GcHeap {
     /// they have survived `promote_after` minors, then are promoted to that
     /// partition's old chain.
     ///
+    /// Promotion is **transitive down young edges**: when a node `o` becomes
+    /// old, every young node it references becomes old too, recursively. Those
+    /// edges were created while `o` was young, so no write barrier recorded
+    /// them; leaving the children young would put an unremembered old→young
+    /// edge into the heap, which minor GC cannot see. The children were traced
+    /// by this minor's mark, so they are survivors (White children are never
+    /// promoted).
+    ///
     /// Returns `None` when some partition's minor mark cycle is not complete.
     /// On success every young chain contains only age>0 survivors and the
     /// remembered set is cleared (aged survivors are rooted by the next minor;
@@ -495,7 +501,14 @@ impl GcHeap {
             return None;
         }
 
+        let promote_after = promote_after.max(1);
+
+        // Split every partition's young chain into dead (white) nodes and live
+        // survivors. The survivors are collected in a Vec so the promotion
+        // closure below can run over the whole heap before the chains are
+        // rebuilt (a promoted node's children may live in another partition).
         let mut whites = Vec::new();
+        let mut survivors: Vec<Vec<NonNull<GcHead>>> = Vec::with_capacity(self.partitions.len());
         for i in 0..self.partitions.len() {
             let par = &mut self.partitions[i];
             par.set_marking(false);
@@ -503,10 +516,7 @@ impl GcHeap {
             let mut current = std::mem::take(&mut par.young).into_inner();
             let mut white_head: Option<NonNull<GcHead>> = None;
             let mut white_tail: Option<NonNull<GcHead>> = None;
-            let mut promote_head: Option<NonNull<GcHead>> = None;
-            let mut promote_tail: Option<NonNull<GcHead>> = None;
-            let mut stay_head: Option<NonNull<GcHead>> = None;
-            let mut stay_tail: Option<NonNull<GcHead>> = None;
+            let mut alive = Vec::new();
 
             while let Some(mut this) = current {
                 unsafe {
@@ -524,32 +534,96 @@ impl GcHeap {
                         }
                         white_tail = Some(this);
                     } else {
-                        let survived = hd.age() + 1;
-                        if survived >= promote_after.max(1) {
-                            // Survived the full generation count: promote.
-                            hd.set_age(0);
-                            hd.set_young(false);
-                            match promote_tail {
-                                Some(mut tail) => tail.as_mut().next = Some(this),
-                                None => promote_head = Some(this),
-                            }
-                            promote_tail = Some(this);
-                        } else {
-                            // Still young: remember how many minors it survived.
-                            hd.set_age(survived);
-                            match stay_tail {
-                                Some(mut tail) => tail.as_mut().next = Some(this),
-                                None => stay_head = Some(this),
-                            }
-                            stay_tail = Some(this);
-                        }
+                        alive.push(this);
                     }
 
                     current = next;
                 }
             }
 
-            // O(1) promotion: splice the age-1 survivors onto the old chain.
+            if white_head.is_some() {
+                whites.push((GcPartitionId(i as u16), GcNodeLink::new(white_head)));
+            }
+            survivors.push(alive);
+        }
+
+        // Seed promotion with the survivors that lived long enough, then walk
+        // their traced children: any young child of an old node is an
+        // unrecorded old→young edge, so it must become old with its parent.
+        // White children are not promoted: this minor already decided they are
+        // garbage. The `promoted` set keeps cycles and shared children linear.
+        let mut promoted = std::collections::HashSet::<NonNull<GcHead>>::new();
+        let mut work: Vec<NonNull<GcHead>> = Vec::new();
+        for alive in &survivors {
+            for &node in alive {
+                let survived = unsafe { node.as_ref().age() } + 1;
+                if survived >= promote_after && promoted.insert(node) {
+                    work.push(node);
+                }
+            }
+        }
+
+        if !work.is_empty() {
+            let mut gcx = self.create_trace_ctx(32);
+            while let Some(node) = work.pop() {
+                gcx.traced_nodes.clear();
+                #[cfg(all(debug_assertions, feature = "gc_generations"))]
+                {
+                    gcx.dbg_owner = Some(node);
+                }
+
+                self.trace_node(node, &mut gcx);
+                while let Some(child) = gcx.traced_nodes.pop() {
+                    unsafe {
+                        let child_ref = child.as_ref();
+                        // Old children need no propagation; White young ones
+                        // were rejected by the mark above.
+                        if !child_ref.is_young() || child_ref.color() == GcTriColor::White {
+                            continue;
+                        }
+                    }
+                    if promoted.insert(child) {
+                        work.push(child);
+                    }
+                }
+            }
+        }
+
+        // Rebuild each partition's chains: promoted survivors move onto the
+        // old chain; the rest stay young with an incremented survival age.
+        for (i, alive) in survivors.into_iter().enumerate() {
+            let par = &mut self.partitions[i];
+            let mut promote_head: Option<NonNull<GcHead>> = None;
+            let mut promote_tail: Option<NonNull<GcHead>> = None;
+            let mut stay_head: Option<NonNull<GcHead>> = None;
+            let mut stay_tail: Option<NonNull<GcHead>> = None;
+
+            for mut node in alive {
+                unsafe {
+                    let hd = node.as_mut();
+                    hd.next = None;
+                    if promoted.contains(&node) {
+                        // Promoted (by age or by propagation from a parent):
+                        // the generation count restarts in the old generation.
+                        hd.promote_to_old();
+                        match promote_tail {
+                            Some(mut tail) => tail.as_mut().next = Some(node),
+                            None => promote_head = Some(node),
+                        }
+                        promote_tail = Some(node);
+                    } else {
+                        // Still young: remember how many minors it survived.
+                        hd.set_age(hd.age() + 1);
+                        match stay_tail {
+                            Some(mut tail) => tail.as_mut().next = Some(node),
+                            None => stay_head = Some(node),
+                        }
+                        stay_tail = Some(node);
+                    }
+                }
+            }
+
+            // O(1) promotion: splice the survivors onto the old chain.
             if let (Some(head), Some(mut tail)) = (promote_head, promote_tail) {
                 unsafe {
                     tail.as_mut().next = par.nodes.head();
@@ -566,10 +640,6 @@ impl GcHeap {
                     unsafe { n.as_ref().age() } > 0,
                     "every node left in the young chain must carry a survival age"
                 );
-            }
-
-            if white_head.is_some() {
-                whites.push((GcPartitionId(i as u16), GcNodeLink::new(white_head)));
             }
         }
 
@@ -1357,6 +1427,195 @@ mod generations_tests {
         let mail = unsafe { heap.alloc_root_raw(pid, GenNode { child: None }) }.unwrap();
         finish_minor(&mut heap, 1);
         assert!(!unsafe { mail.node_info().is_young() });
+    }
+
+    #[test]
+    fn promotion_propagates_to_pre_existing_young_children() {
+        let (mut heap, pid) = new_heap();
+
+        // `parent` is old and reaches `o` through a recorded old→young edge.
+        let mut parent = unsafe { heap.alloc_root_raw(pid, GenNode { child: None }) }.unwrap();
+        heap.garbage_collect(pid);
+        assert!(!unsafe { parent.node_info().is_young() });
+
+        let mut o = alloc(&mut heap, pid, None);
+        heap.bind(parent.node_ptr(), o.node_ptr());
+        unsafe { parent.as_mut() }.child = Some(o);
+
+        // First minor: `o` survives and stays young with age 1.
+        finish_minor(&mut heap, 2);
+        assert!(unsafe { o.node_info().is_young() });
+        assert_eq!(unsafe { o.node_info().age() }, 1);
+
+        // Children written while `o` was still young: these young→young edges
+        // are never recorded by a write barrier. The next minor promotes `o`,
+        // so `b` and its child `c` must be promoted with it (recursively).
+        let c = alloc(&mut heap, pid, None);
+        let b = alloc(&mut heap, pid, Some(c));
+        unsafe { o.as_mut() }.child = Some(b);
+
+        let freed = finish_minor(&mut heap, 2);
+        assert_eq!(freed, 0, "the whole surviving chain is reachable");
+        assert!(!unsafe { o.node_info().is_young() }, "o is promoted");
+        assert!(
+            !unsafe { b.node_info().is_young() },
+            "a pre-existing young child must be promoted with its parent"
+        );
+        assert!(
+            !unsafe { c.node_info().is_young() },
+            "promotion must recurse through the child's own children"
+        );
+
+        // Nothing is left in the young chain, and a later minor must not free
+        // the promoted subgraph (no unrecorded old→young edge survives).
+        assert!(heap.partitions[0].young.head().is_none());
+        let freed = finish_minor(&mut heap, 2);
+        assert_eq!(freed, 0);
+        assert!(heap.nodes(pid).any(|n| n == b.node_ptr()));
+        assert!(heap.nodes(pid).any(|n| n == c.node_ptr()));
+    }
+
+    #[test]
+    fn promotion_propagates_across_partitions() {
+        let mut heap = GcHeap::new(&GC_TYPE_REGISTRY);
+        let p0 = new_partition(&mut heap);
+        let p1 = new_partition(&mut heap);
+        let p2 = new_partition(&mut heap);
+
+        let mut parent = unsafe { heap.alloc_root_raw(p0, GenNode { child: None }) }.unwrap();
+        collect_all(&mut heap);
+
+        // old (p0) -> o (p1) via a barrier; o survives one minor and ages.
+        let mut o = alloc(&mut heap, p1, None);
+        heap.bind(parent.node_ptr(), o.node_ptr());
+        unsafe { parent.as_mut() }.child = Some(o);
+        finish_minor(&mut heap, 2);
+        assert!(unsafe { o.node_info().is_young() });
+
+        // o -> b (p0) -> c (p2): promotion must follow young edges into every
+        // partition, not just the one whose chain is being processed.
+        let c = alloc(&mut heap, p2, None);
+        let b = alloc(&mut heap, p0, Some(c));
+        unsafe { o.as_mut() }.child = Some(b);
+
+        let freed = finish_minor(&mut heap, 2);
+        assert_eq!(freed, 0);
+        assert!(!unsafe { o.node_info().is_young() });
+        assert!(!unsafe { b.node_info().is_young() });
+        assert!(!unsafe { c.node_info().is_young() });
+        assert!(heap.partitions[0].young.head().is_none());
+        assert!(heap.partitions[1].young.head().is_none());
+        assert!(heap.partitions[2].young.head().is_none());
+    }
+
+    #[test]
+    fn promotion_propagation_terminates_on_a_cycle() {
+        let (mut heap, pid) = new_heap();
+
+        let mut parent = unsafe { heap.alloc_root_raw(pid, GenNode { child: None }) }.unwrap();
+        heap.garbage_collect(pid);
+
+        let mut o = alloc(&mut heap, pid, None);
+        heap.bind(parent.node_ptr(), o.node_ptr());
+        unsafe { parent.as_mut() }.child = Some(o);
+        finish_minor(&mut heap, 2); // o survives at age 1
+
+        // o -> a -> o: the promotion closure must visit each node once.
+        let mut a = alloc(&mut heap, pid, Some(o));
+        unsafe { o.as_mut() }.child = Some(a);
+
+        let freed = finish_minor(&mut heap, 2);
+        assert_eq!(freed, 0);
+        assert!(!unsafe { o.node_info().is_young() });
+        assert!(!unsafe { a.node_info().is_young() });
+        assert!(heap.partitions[0].young.head().is_none());
+    }
+
+    #[test]
+    fn promotion_propagation_leaves_other_young_survivors_alone() {
+        let (mut heap, pid) = new_heap();
+
+        let mut parent = unsafe { heap.alloc_root_raw(pid, GenNode { child: None }) }.unwrap();
+        heap.garbage_collect(pid);
+
+        let mut o = alloc(&mut heap, pid, None);
+        heap.bind(parent.node_ptr(), o.node_ptr());
+        unsafe { parent.as_mut() }.child = Some(o);
+        finish_minor(&mut heap, 2); // o survives at age 1
+        assert_eq!(unsafe { o.node_info().age() }, 1);
+
+        // An age-0 survivor that is unrelated to the promoted subgraph.
+        let stay = unsafe { heap.alloc_root_raw(pid, GenNode { child: None }) }.unwrap();
+        // An age-0 child that must follow its promoted parent.
+        let child = alloc(&mut heap, pid, None);
+        unsafe { o.as_mut() }.child = Some(child);
+
+        finish_minor(&mut heap, 2);
+        assert!(!unsafe { o.node_info().is_young() });
+        assert!(!unsafe { child.node_info().is_young() });
+        assert_eq!(
+            unsafe { child.node_info().age() },
+            0,
+            "a propagated child starts a fresh old generation"
+        );
+        // The unrelated survivor stays young with an incremented age.
+        assert!(unsafe { stay.node_info().is_young() });
+        assert_eq!(unsafe { stay.node_info().age() }, 1);
+        assert_eq!(heap.partitions[0].young.len(), 1);
+        assert!(heap.nodes(pid).any(|n| n == stay.node_ptr()));
+    }
+
+    #[test]
+    fn promotion_propagation_waits_for_the_configured_generation_count() {
+        let (mut heap, pid) = new_heap();
+        let mut o = unsafe { heap.alloc_root_raw(pid, GenNode { child: None }) }.unwrap();
+
+        for expected_age in 1..4 {
+            finish_minor(&mut heap, 4);
+            assert!(unsafe { o.node_info().is_young() });
+            assert_eq!(unsafe { o.node_info().age() }, expected_age);
+        }
+
+        let c = alloc(&mut heap, pid, None);
+        let b = alloc(&mut heap, pid, Some(c));
+        unsafe { o.as_mut() }.child = Some(b);
+
+        // Only the fourth minor promotes o; b and c must follow it.
+        finish_minor(&mut heap, 4);
+        assert!(!unsafe { o.node_info().is_young() });
+        assert!(!unsafe { b.node_info().is_young() });
+        assert!(!unsafe { c.node_info().is_young() });
+        assert!(heap.partitions[0].young.head().is_none());
+    }
+
+    #[test]
+    fn promotion_propagation_stops_at_old_children() {
+        let (mut heap, pid) = new_heap();
+
+        // `old_child` is old before the rest of the subgraph exists.
+        let old_child = unsafe { heap.alloc_root_raw(pid, GenNode { child: None }) }.unwrap();
+        heap.garbage_collect(pid);
+        assert!(!unsafe { old_child.node_info().is_young() });
+
+        let mut o = unsafe { heap.alloc_root_raw(pid, GenNode { child: None }) }.unwrap();
+        finish_minor(&mut heap, 2); // o survives at age 1
+        assert_eq!(unsafe { o.node_info().age() }, 1);
+
+        let mut y = alloc(&mut heap, pid, Some(old_child));
+        unsafe { o.as_mut() }.child = Some(y);
+        finish_minor(&mut heap, 2);
+
+        assert!(!unsafe { o.node_info().is_young() });
+        assert!(!unsafe { y.node_info().is_young() });
+        // Already-old children are left untouched (not re-linked or duplicated).
+        assert!(!unsafe { old_child.node_info().is_young() });
+        assert_eq!(unsafe { old_child.node_info().age() }, 0);
+        assert_eq!(
+            heap.nodes(pid)
+                .filter(|n| *n == old_child.node_ptr())
+                .count(),
+            1
+        );
     }
 
     #[test]

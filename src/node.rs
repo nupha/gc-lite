@@ -325,6 +325,18 @@ impl GcHead {
         }
     }
 
+    /// Move this node from the young generation to the old generation.
+    ///
+    /// Only the generation bits change; the caller is responsible for moving
+    /// the node between the partition's young and old chains. Kept in one place
+    /// so the minor promotion path and the bulk major merge cannot drift apart.
+    #[cfg(feature = "gc_generations")]
+    #[inline(always)]
+    pub(super) fn promote_to_old(&mut self) {
+        self.set_young(false);
+        self.set_age(0);
+    }
+
     /// Whether the node is a remembered-set source (`gc_generations`).
     #[cfg(feature = "gc_generations")]
     #[inline(always)]
