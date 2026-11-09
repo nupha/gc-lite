@@ -239,6 +239,7 @@ fn field_kind(attrs: &[syn::Attribute]) -> SynResult<FieldKind> {
 
 fn named_field_stmts(
     fields: &syn::punctuated::Punctuated<syn::Field, Token![,]>,
+    crate_path: &Path,
 ) -> SynResult<TokenStream2> {
     let mut stmts = TokenStream2::new();
     for f in fields {
@@ -246,7 +247,7 @@ fn named_field_stmts(
         match field_kind(&f.attrs)? {
             FieldKind::Skip => {}
             FieldKind::Trace => stmts.extend(quote! {
-                ::gc_lite::GcTrace::trace(&self.#ident, __gc_trace_ctx);
+                #crate_path::GcTrace::trace(&self.#ident, __gc_trace_ctx);
             }),
             FieldKind::With(p) => stmts.extend(quote! {
                 #p(&self.#ident, __gc_trace_ctx);
@@ -258,6 +259,7 @@ fn named_field_stmts(
 
 fn unnamed_field_stmts(
     fields: &syn::punctuated::Punctuated<syn::Field, Token![,]>,
+    crate_path: &Path,
 ) -> SynResult<TokenStream2> {
     let mut stmts = TokenStream2::new();
     for (i, f) in fields.iter().enumerate() {
@@ -265,7 +267,7 @@ fn unnamed_field_stmts(
         match field_kind(&f.attrs)? {
             FieldKind::Skip => {}
             FieldKind::Trace => stmts.extend(quote! {
-                ::gc_lite::GcTrace::trace(&self.#idx, __gc_trace_ctx);
+                #crate_path::GcTrace::trace(&self.#idx, __gc_trace_ctx);
             }),
             FieldKind::With(p) => stmts.extend(quote! {
                 #p(&self.#idx, __gc_trace_ctx);
@@ -277,7 +279,7 @@ fn unnamed_field_stmts(
 
 /// One match arm per enum variant. Skipped fields are bound as `_` so the
 /// generated pattern never triggers unused-binding warnings.
-fn variant_arm(v: &syn::Variant) -> SynResult<TokenStream2> {
+fn variant_arm(v: &syn::Variant, crate_path: &Path) -> SynResult<TokenStream2> {
     let vname = &v.ident;
     let arm = match &v.fields {
         Fields::Named(fields) => {
@@ -290,7 +292,7 @@ fn variant_arm(v: &syn::Variant) -> SynResult<TokenStream2> {
                     FieldKind::Trace => {
                         pattern.extend(quote! { #ident, });
                         stmts.extend(quote! {
-                            ::gc_lite::GcTrace::trace(#ident, __gc_trace_ctx);
+                            #crate_path::GcTrace::trace(#ident, __gc_trace_ctx);
                         });
                     }
                     FieldKind::With(p) => {
@@ -311,7 +313,7 @@ fn variant_arm(v: &syn::Variant) -> SynResult<TokenStream2> {
                     FieldKind::Trace => {
                         pattern.extend(quote! { #binding, });
                         stmts.extend(quote! {
-                            ::gc_lite::GcTrace::trace(#binding, __gc_trace_ctx);
+                            #crate_path::GcTrace::trace(#binding, __gc_trace_ctx);
                         });
                     }
                     FieldKind::With(p) => {
@@ -327,8 +329,34 @@ fn variant_arm(v: &syn::Variant) -> SynResult<TokenStream2> {
     Ok(arm)
 }
 
+/// Container attribute `#[gc(crate_path = <path>)]`: where the generated code
+/// looks for `GcTrace`/`GcTraceCtx`. Defaults to `::gc_lite` so deriving from
+/// inside gc-lite works unchanged. An embedding crate that re-exports gc-lite
+/// (`zuqe::gc_lite`) points at the re-export instead of adding a direct
+/// dependency. Unknown container `gc` keys are errors, never silently ignored.
+fn crate_path_attr(input: &DeriveInput) -> SynResult<Path> {
+    let mut crate_path: Option<Path> = None;
+    for attr in input.attrs.iter().filter(|a| a.path().is_ident("gc")) {
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("crate_path") {
+                if crate_path.is_some() {
+                    return Err(meta.error("duplicate `crate_path`"));
+                }
+                crate_path = Some(meta.value()?.parse()?);
+                Ok(())
+            } else {
+                Err(meta.error(
+                    "unknown container `gc` attribute; expected `#[gc(crate_path = <path>)]`",
+                ))
+            }
+        })?;
+    }
+    Ok(crate_path.unwrap_or_else(|| parse_quote!(::gc_lite)))
+}
+
 fn expand_gc_trace(input: &DeriveInput) -> SynResult<TokenStream2> {
     let name = &input.ident;
+    let crate_path = crate_path_attr(input)?;
 
     if matches!(input.data, Data::Union(_)) {
         return Err(syn::Error::new(
@@ -344,22 +372,22 @@ fn expand_gc_trace(input: &DeriveInput) -> SynResult<TokenStream2> {
     let mut generics = input.generics.clone();
     for param in generics.params.iter_mut() {
         if let GenericParam::Type(tp) = param {
-            tp.bounds.push(parse_quote!(::gc_lite::GcTrace));
+            tp.bounds.push(parse_quote!(#crate_path::GcTrace));
         }
     }
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     let body = match &input.data {
         Data::Struct(data) => match &data.fields {
-            Fields::Named(fields) => named_field_stmts(&fields.named)?,
-            Fields::Unnamed(fields) => unnamed_field_stmts(&fields.unnamed)?,
+            Fields::Named(fields) => named_field_stmts(&fields.named, &crate_path)?,
+            Fields::Unnamed(fields) => unnamed_field_stmts(&fields.unnamed, &crate_path)?,
             Fields::Unit => TokenStream2::new(),
         },
         Data::Enum(data) => {
             let arms = data
                 .variants
                 .iter()
-                .map(variant_arm)
+                .map(|v| variant_arm(v, &crate_path))
                 .collect::<SynResult<Vec<_>>>()?;
             quote! { match self { #(#arms)* } }
         }
@@ -368,9 +396,9 @@ fn expand_gc_trace(input: &DeriveInput) -> SynResult<TokenStream2> {
 
     Ok(quote! {
         #[automatically_derived]
-        impl #impl_generics ::gc_lite::GcTrace for #name #ty_generics #where_clause {
+        impl #impl_generics #crate_path::GcTrace for #name #ty_generics #where_clause {
             #[inline]
-            fn trace(&self, __gc_trace_ctx: &mut ::gc_lite::GcTraceCtx) {
+            fn trace(&self, __gc_trace_ctx: &mut #crate_path::GcTraceCtx) {
                 #body
             }
         }
@@ -458,5 +486,74 @@ mod derive_tests {
             syn::parse_str("struct S { #[gc(skip)] #[gc(skip)] a: u32 }").unwrap();
         let err = expand_gc_trace(&input).unwrap_err().to_string();
         assert!(err.contains("duplicate `gc` attribute"), "{err}");
+    }
+
+    /// An embedding crate that re-exports gc-lite points the expansion at its
+    /// own path; every generated path (impl, ctx, field calls, generic bound)
+    /// must move with it, and the default must stay `::gc_lite`.
+    #[test]
+    fn custom_crate_path_is_used_for_every_generated_path() {
+        let out = expand("#[gc(crate_path = zuqe::gc_lite)] struct S<T> { a: u32, b: Vec<T> }");
+        assert!(
+            out.contains(
+                &quote! { impl<T: zuqe::gc_lite::GcTrace> zuqe::gc_lite::GcTrace for S<T> }
+                    .to_string()
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                &quote! { fn trace(&self, __gc_trace_ctx: &mut zuqe::gc_lite::GcTraceCtx) }
+                    .to_string()
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                &quote! { zuqe::gc_lite::GcTrace::trace(&self.a, __gc_trace_ctx); }.to_string()
+            ),
+            "{out}"
+        );
+        assert!(
+            !out.contains("& mut :: gc_lite"),
+            "default path leaked:\n{out}"
+        );
+    }
+
+    #[test]
+    fn custom_crate_path_applies_to_enum_variants() {
+        let out = expand("#[gc(crate_path = zuqe::gc_lite)] enum E { A(u32), B { x: u8 }, C }");
+        assert!(
+            out.contains(
+                &quote! { zuqe::gc_lite::GcTrace::trace(__field_0, __gc_trace_ctx); }.to_string()
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(&quote! { zuqe::gc_lite::GcTrace::trace(x, __gc_trace_ctx); }.to_string()),
+            "{out}"
+        );
+        assert!(
+            !out.contains("& mut :: gc_lite"),
+            "default path leaked:\n{out}"
+        );
+    }
+
+    #[test]
+    fn unknown_container_gc_key_is_rejected() {
+        let input: DeriveInput =
+            syn::parse_str("#[gc(crate_pth = zuqe::gc_lite)] struct S { a: u32 }").unwrap();
+        let err = expand_gc_trace(&input).unwrap_err().to_string();
+        assert!(err.contains("unknown container `gc` attribute"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_crate_path_is_rejected() {
+        let input: DeriveInput = syn::parse_str(
+            "#[gc(crate_path = zuqe::gc_lite)] #[gc(crate_path = ::gc_lite)] struct S { a: u32 }",
+        )
+        .unwrap();
+        let err = expand_gc_trace(&input).unwrap_err().to_string();
+        assert!(err.contains("duplicate `crate_path`"), "{err}");
     }
 }
