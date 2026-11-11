@@ -795,7 +795,7 @@ impl GcHeap {
     /// # Safety
     ///
     /// Both pointers must point to valid, live GC nodes managed by this heap.
-    pub fn bind(&mut self, mut master: NonNull<GcHead>, mut slave: NonNull<GcHead>) {
+    pub fn bind(&mut self, master: NonNull<GcHead>, mut slave: NonNull<GcHead>) {
         #[cfg(debug_assertions)]
         unsafe {
             master.as_ref().debug_assert_node_valid(self);
@@ -813,6 +813,7 @@ impl GcHeap {
                 master.as_ref().is_remembered(),
             );
             if !master_young && slave_young && !master_remembered {
+                let mut master = master;
                 master.as_mut().set_remembered(true);
                 self.remembered.push(master);
             }
@@ -853,6 +854,35 @@ impl GcHeap {
                         slave_par.gray_list.push(slave);
                     }
                 }
+            }
+        }
+    }
+
+    /// Mark `owner` dirty for minor GC.
+    ///
+    /// "Minor" means a generational minor collection that re-scans the
+    /// remembered set (not tri-color/incremental marking). Use this when
+    /// `owner`'s traced reachability changes but there is no specific child
+    /// edge to report via [`bind`](Self::bind). If `owner` is old and not yet
+    /// remembered, it is added to the remembered set so minor GC re-traces it.
+    ///
+    /// Unlike `bind`, this does not depend on the child being young and does
+    /// not perform tri-color child marking.
+    ///
+    /// # Safety
+    ///
+    /// `owner` must point to a valid, live GC node managed by this heap.
+    #[cfg(feature = "gc_generations")]
+    pub fn set_minor_dirty(&mut self, mut owner: NonNull<GcHead>) {
+        #[cfg(debug_assertions)]
+        unsafe {
+            owner.as_ref().debug_assert_node_valid(self);
+        }
+
+        unsafe {
+            if !owner.as_ref().is_young() && !owner.as_ref().is_remembered() {
+                owner.as_mut().set_remembered(true);
+                self.remembered.push(owner);
             }
         }
     }
